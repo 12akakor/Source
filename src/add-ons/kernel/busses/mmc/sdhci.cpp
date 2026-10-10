@@ -64,6 +64,8 @@ SdhciBus::SdhciBus(struct registers* registers, uint8_t irq, bool poll)
 	fWorkerThread(0),
 	fCardType(CARD_TYPE_UNKNOWN),
 	fDmaArea(-1),
+	fDmaDescriptors(NULL),
+	fDmaDescriptorsPhysical(0),
 	fBounceBuffer(NULL),
 	fBouncePhysical(0),
 	fTransferModeSelected(false),
@@ -91,10 +93,12 @@ SdhciBus::SdhciBus(struct registers* registers, uint8_t irq, bool poll)
 		return;
 	}
 
-	// A bounce buffer for ReadData(), which reads into kernel buffers of any
-	// kind. Below 4GB, since the SDMA address register is 32 bits wide.
-	fDmaArea = create_area("sdhci dma", (void**)&fBounceBuffer,
-		B_ANY_KERNEL_ADDRESS, B_PAGE_SIZE, B_32_BIT_CONTIGUOUS,
+	// Memory for DMA: page 0 holds the ADMA2 descriptor table, page 1 is a
+	// bounce buffer used by the transfer self test and by ReadData(). It has
+	// to be physically contiguous, and below 4GB since we use the 32-bit
+	// descriptor format and the 32-bit SDMA address register.
+	fDmaArea = create_area("sdhci dma", (void**)&fDmaDescriptors,
+		B_ANY_KERNEL_ADDRESS, 2 * B_PAGE_SIZE, B_32_BIT_CONTIGUOUS,
 		B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA);
 	if (fDmaArea < 0) {
 		ERROR("Could not allocate DMA memory\n");
@@ -103,12 +107,17 @@ SdhciBus::SdhciBus(struct registers* registers, uint8_t irq, bool poll)
 	}
 
 	physical_entry entry;
-	fStatus = get_memory_map(fBounceBuffer, B_PAGE_SIZE, &entry, 1);
+	fStatus = get_memory_map(fDmaDescriptors, 2 * B_PAGE_SIZE, &entry, 1);
 	if (fStatus != B_OK) {
 		ERROR("Could not get physical address of DMA memory\n");
 		return;
 	}
-	fBouncePhysical = entry.address;
+	fDmaDescriptorsPhysical = entry.address;
+	fBounceBuffer = (uint8*)fDmaDescriptors + B_PAGE_SIZE;
+	fBouncePhysical = entry.address + B_PAGE_SIZE;
+	TRACE("DMA memory: descriptor table at %" B_PRIxPHYSADDR
+		", bounce buffer at %" B_PRIxPHYSADDR "\n", fDmaDescriptorsPhysical,
+		fBouncePhysical);
 
 	// First of all, we have to make sure we are in a sane state. The easiest
 	// way is to reset everything.
@@ -563,12 +572,16 @@ static const uint32 kBlockSize = 512;
 // large margin for slow devices and writes.
 static const bigtime_t kTransferTimeout = 5000000;
 
+// The self test only moves 1KB. A short timeout keeps the boot fast when a
+// transfer method does not work at all.
+static const bigtime_t kSelfTestTimeout = 300000;
+
 // Error bits of the R1 card status that mean the card refused a command
 static const uint32 kCardStatusErrorBits = (1u << 31) | (1 << 30) | (1 << 29)
 	| (1 << 28) | (1 << 27) | (1 << 26) | (1 << 24) | (1 << 23) | (1 << 22)
 	| (1 << 21) | (1 << 20) | (1 << 19) | (1 << 7);
 
-static const char* const kDataModeNames[] = { "sdma", "pio" };
+static const char* const kDataModeNames[] = { "adma2", "sdma", "pio" };
 static const char* const kStopModeNames[] = { "cmd23", "auto_cmd12", "single" };
 
 
@@ -595,6 +608,38 @@ SdhciBus::_UsesSectorAddressing() const
 	// Standard capacity SD cards and MMC devices up to 2GB use byte offsets,
 	// all the other types use sector offsets.
 	return fCardType != CARD_TYPE_SD && fCardType != CARD_TYPE_MMC;
+}
+
+
+// Offset of the ADMA System Address register, from the SD Host Controller
+// specification. The register is reached through this offset rather than
+// through the (packed) registers structure, to be able to access it as two
+// 32-bit halves.
+static const size_t kAdmaSystemAddressOffset = 0x58;
+
+
+void
+SdhciBus::_SetAdmaAddress(phys_addr_t address)
+{
+	// Some controllers ignore a single 64-bit access to this register. It then
+	// keeps pointing at 0, and the ADMA engine fails while fetching the first
+	// descriptor (ADMA error state ST_FDS). Only use 32-bit accesses, like
+	// other SDHCI drivers do.
+	volatile uint32* reg = (volatile uint32*)((volatile uint8*)fRegisters
+		+ kAdmaSystemAddressOffset);
+	reg[0] = (uint32)address;
+	reg[1] = (uint32)((uint64)address >> 32);
+}
+
+
+uint64
+SdhciBus::_AdmaAddress()
+{
+	volatile uint32* reg = (volatile uint32*)((volatile uint8*)fRegisters
+		+ kAdmaSystemAddressOffset);
+	uint32 low = reg[0];
+	uint32 high = reg[1];
+	return ((uint64)high << 32) | low;
 }
 
 
@@ -746,6 +791,39 @@ SdhciBus::_TransferChunk(uint8 command, uint32 argument, uint32 blockCount,
 	}
 
 	switch (dataMode) {
+		case kDataModeAdma2:
+		{
+			const uint32 maxDescriptors = B_PAGE_SIZE / sizeof(adma2_descriptor);
+			uint32 count = 0;
+			phys_addr_t address = physical;
+			size_t remaining = length;
+			while (remaining > 0) {
+				if (count >= maxDescriptors)
+					return B_BAD_VALUE;
+				size_t chunk = std::min(remaining, kAdma2MaxTransferLength);
+				adma2_descriptor& descriptor = fDmaDescriptors[count++];
+				descriptor.attributes = kAdma2Valid | kAdma2ActTran;
+				descriptor.length = chunk;
+				descriptor.address = (uint32)address;
+				address += chunk;
+				remaining -= chunk;
+			}
+			// The last descriptor ends the table
+			fDmaDescriptors[count - 1].attributes |= kAdma2End | kAdma2Interrupt;
+
+			fRegisters->host_control.SetDMAMode(HostControl::kAdma32);
+			_SetAdmaAddress(fDmaDescriptorsPhysical);
+
+			uint64 readBack = _AdmaAddress();
+			if (readBack != (uint64)fDmaDescriptorsPhysical) {
+				ERROR("ADMA address register reads back %" B_PRIx64
+					" instead of %" B_PRIxPHYSADDR "\n", readBack,
+					fDmaDescriptorsPhysical);
+			}
+			transferMode |= TransferMode::kDmaEnable;
+			break;
+		}
+
 		case kDataModeSdma:
 			fRegisters->host_control.SetDMAMode(HostControl::kSdma);
 			fRegisters->system_address = (uint32)physical;
@@ -907,10 +985,11 @@ SdhciBus::_TransferChunk(uint8 command, uint32 argument, uint32 blockCount,
 	if (status != B_OK) {
 		ERROR("transfer failed: command %u, argument %" B_PRIx32 ", %" B_PRIu32
 			" blocks, %s/%s: %s, int status %08" B_PRIx32 ", state %08" B_PRIx32
-			", auto cmd error %04x\n", command, argument, blockCount,
-			kDataModeNames[dataMode], kStopModeNames[stopMode],
-			strerror(status), intStatus, fRegisters->present_state.Bits(),
-			fRegisters->auto_cmd12_error_status);
+			", adma error %02x, auto cmd error %04x, adma address %" B_PRIx64
+			"\n", command, argument, blockCount, kDataModeNames[dataMode],
+			kStopModeNames[stopMode], strerror(status), intStatus,
+			fRegisters->present_state.Bits(), fRegisters->adma_error_status,
+			fRegisters->auto_cmd12_error_status, _AdmaAddress());
 		_AbortTransfer("data phase failed");
 		return status;
 	}
@@ -968,10 +1047,12 @@ SdhciBus::_TransferBlocks(bool isWrite, uint32 argument, uint32 argumentStep,
 }
 
 
-/*!	Decides how data is moved, the first time data is accessed: simple DMA
-	when the controller has it, PIO otherwise. eMMC devices always support
-	CMD23 (set block count); for SD cards, where it is optional, the controller
-	sends CMD12 by itself at the end of a transfer (auto CMD12).
+/*!	Decides how data is moved, the first time data is accessed.
+	The first two blocks of the device are read in the simplest possible way
+	(PIO, one block at a time) as a reference. Then the transfer methods are
+	tried in order of preference, and the first one that reads the same data
+	is kept. On the Surface Go 2 the first candidate always works; the others
+	are there for controllers that behave differently.
 */
 status_t
 SdhciBus::_SelectTransferMode()
@@ -980,18 +1061,120 @@ SdhciBus::_SelectTransferMode()
 		return B_OK;
 	fTransferModeSelected = true;
 
+	const bool canAdma = fRegisters->capabilities.AdvancedDMA();
 	const bool canSdma = fRegisters->capabilities.SimpleDMA();
-	TRACE_ALWAYS("controller: spec %d, SDMA %s, high speed %s, DDR50 %s, "
-		"SDR104/HS200 %s, base clock %u MHz\n",
+	const bool mmc = _IsMMC();
+	const uint32 step = _UsesSectorAddressing() ? 1 : kBlockSize;
+
+	TRACE_ALWAYS("controller: spec %d, SDMA %s, ADMA2 %s, high speed %s, DDR50 %s, "
+		"SDR104/HS200 %s, base clock %u MHz; card "
+		"type %d (%s addressing), RCA %u\n",
 		fRegisters->host_controller_version.specVersion,
-		canSdma ? "yes" : "no",
+		canSdma ? "yes" : "no", canAdma ? "yes" : "no",
 		fRegisters->capabilities.HighSpeed() ? "yes" : "no",
 		fRegisters->capabilities.DDR50Support() ? "yes" : "no",
 		fRegisters->capabilities.SDR104Support() ? "yes" : "no",
-		fRegisters->capabilities.BaseClockFrequency());
+		fRegisters->capabilities.BaseClockFrequency(), fCardType,
+		step == 1 ? "sector" : "byte", fSelectedRca);
 
-	fDataMode = canSdma ? kDataModeSdma : kDataModePio;
-	fStopMode = _IsMMC() ? kStopModeCmd23 : kStopModeAutoCmd12;
+	// Order of preference. CMD23 is the normal way for eMMC, auto CMD12 for SD
+	// (where CMD23 is optional and would need checking the SCR first).
+	static const struct {
+		int	data;
+		int	stop;
+	} kMmcCandidates[] = {
+		{ kDataModeAdma2, kStopModeCmd23 },
+		{ kDataModeAdma2, kStopModeAutoCmd12 },
+		{ kDataModeSdma, kStopModeCmd23 },
+		{ kDataModeSdma, kStopModeAutoCmd12 },
+		{ kDataModeAdma2, kStopModeSingle },
+		{ kDataModeSdma, kStopModeSingle },
+		{ kDataModePio, kStopModeCmd23 },
+		{ kDataModePio, kStopModeSingle },
+	}, kSdCandidates[] = {
+		{ kDataModeAdma2, kStopModeAutoCmd12 },
+		{ kDataModeSdma, kStopModeAutoCmd12 },
+		{ kDataModeAdma2, kStopModeSingle },
+		{ kDataModeSdma, kStopModeSingle },
+		{ kDataModePio, kStopModeAutoCmd12 },
+		{ kDataModePio, kStopModeSingle },
+	};
+	const auto* candidates = mmc ? kMmcCandidates : kSdCandidates;
+	const size_t candidateCount = mmc
+		? sizeof(kMmcCandidates) / sizeof(kMmcCandidates[0])
+		: sizeof(kSdCandidates) / sizeof(kSdCandidates[0]);
+
+	int chosenData = -1;
+	int chosenStop = -1;
+
+	const size_t testLength = 2 * kBlockSize;
+	uint8* reference = (uint8*)malloc(testLength);
+	bool haveReference = false;
+
+	if (reference != NULL) {
+		status_t status = B_OK;
+		for (uint32 i = 0; i < 2 && status == B_OK; i++) {
+			status = _TransferChunk(SD_READ_SINGLE_BLOCK, i * step, 1,
+				kBlockSize, false, kDataModePio, kStopModeSingle, 0,
+				reference + i * kBlockSize, kSelfTestTimeout);
+		}
+		haveReference = status == B_OK;
+		if (haveReference) {
+			TRACE("reference read OK:%s%s\n",
+				reference[510] == 0x55 && reference[511] == 0xaa
+					? " MBR signature" : " no MBR signature",
+				memcmp(reference + kBlockSize, "EFI PART", 8) == 0
+					? ", GPT header" : "");
+		} else {
+			ERROR("reference read (pio, one block at a time) FAILED: "
+				"%s\n", strerror(status));
+		}
+	}
+
+	for (size_t i = 0; i < candidateCount && chosenData < 0; i++) {
+		const int data = candidates[i].data;
+		const int stop = candidates[i].stop;
+		if ((data == kDataModeAdma2 && !canAdma)
+			|| (data == kDataModeSdma && !canSdma)) {
+			continue;
+		}
+
+		memset(fBounceBuffer, 0xa5, testLength);
+		status_t status = _TransferBlocks(false, 0, step, 2, data, stop,
+			fBouncePhysical, data == kDataModePio ? fBounceBuffer : NULL,
+			kSelfTestTimeout);
+
+		const char* verdict = NULL;
+		if (status != B_OK)
+			verdict = strerror(status);
+		else if (haveReference
+			&& memcmp(fBounceBuffer, reference, testLength) != 0)
+			verdict = "data differs from the reference";
+
+		if (verdict == NULL) {
+			chosenData = data;
+			chosenStop = stop;
+			if (!haveReference)
+				TRACE("%s/%s completed, but could not be verified\n",
+					kDataModeNames[data], kStopModeNames[stop]);
+		} else {
+			ERROR("%s/%s does not work: %s\n", kDataModeNames[data],
+				kStopModeNames[stop], verdict);
+		}
+	}
+
+	free(reference);
+
+	if (chosenData >= 0) {
+		fDataMode = chosenData;
+		fStopMode = chosenStop;
+	} else {
+		// Nothing worked. PIO one block at a time is the least demanding
+		// method, keep it in the hope that the problem was transient.
+		fDataMode = kDataModePio;
+		fStopMode = kStopModeSingle;
+		ERROR("no transfer method worked\n");
+	}
 
 	TRACE_ALWAYS("data transfers: %s, %s\n", kDataModeNames[fDataMode],
 		kStopModeNames[fStopMode]);
