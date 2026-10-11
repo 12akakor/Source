@@ -29,6 +29,12 @@
 
 
 //#define TRACE_MEMORY_MAP
+
+#ifndef EFI_MEMORY_RUNTIME
+#	define EFI_MEMORY_RUNTIME	0x8000000000000000ULL
+#endif
+
+
 //#define TRACE_PAGE_DIRECTORY
 
 // Ignore memory below 1M and above 64GB (maximum amount of physical memory on x86 with PAE)
@@ -180,6 +186,28 @@ map_range(addr_t virtAddr, phys_addr_t physAddr, size_t size, uint32_t flags)
 }
 
 
+// The UEFI specification requires the OS to provide a valid VirtualStart for
+// every runtime descriptor before it calls SetVirtualAddressMap(). The runtime
+// services are not mapped for the kernel (see the TODO in
+// arch_mmu_generate_post_efi_page_tables()), so we never assigned any, and the
+// firmware was handed descriptors that all claim virtual address 0 and overlap
+// each other. Some firmware spends a very long time in that case (about 15
+// minutes on a Lenovo Flex 10). Map the runtime regions 1:1 instead, which is
+// valid and makes the firmware's pointer conversion trivial.
+static void
+assign_identity_virtual_addresses(size_t memoryMapSize,
+								  efi_memory_descriptor *memoryMap, size_t descriptorSize)
+{
+	addr_t addr = (addr_t)memoryMap;
+	for (size_t i = 0; i < memoryMapSize / descriptorSize; i++) {
+		efi_memory_descriptor *entry
+		= (efi_memory_descriptor *)(addr + i * descriptorSize);
+		if ((entry->Attribute & EFI_MEMORY_RUNTIME) != 0)
+			entry->VirtualStart = entry->PhysicalStart;
+	}
+}
+
+
 void
 arch_mmu_post_efi_setup(size_t memoryMapSize,
 	efi_memory_descriptor *memoryMap, size_t descriptorSize,
@@ -187,6 +215,9 @@ arch_mmu_post_efi_setup(size_t memoryMapSize,
 {
 	build_physical_allocated_list(memoryMapSize, memoryMap,
 		descriptorSize, descriptorVersion);
+
+	assign_identity_virtual_addresses(memoryMapSize, memoryMap,
+									  descriptorSize);
 
 	// Switch EFI to virtual mode, using the kernel pmap.
 	kRuntimeServices->SetVirtualAddressMap(memoryMapSize, descriptorSize,
