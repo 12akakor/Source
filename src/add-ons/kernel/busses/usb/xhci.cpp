@@ -3064,6 +3064,57 @@ XHCI::ResetEndpoint(bool preserve, xhci_endpoint* endpoint)
 }
 
 
+/*!	Takes an endpoint out of the Halted state right after the transfer that
+	halted it has completed. Called from the finisher thread, which may wait on
+	a command (the event thread may not: it is the one that processes the
+	command's completion).
+
+	A STALL -- or a babble or transaction error -- halts the endpoint, and only
+	a Reset Endpoint command leaves that state (XHCI 1.2 § 4.8.3 p163). The
+	failed transfer itself completes promptly with its error. If nothing resets
+	the endpoint at that point, the device's NEXT transfer is queued on a halted
+	endpoint, never runs, and waits out the whole control timeout (5 s,
+	Pipe.cpp) before CancelQueuedTransfers() finally resets it.
+
+	The ring is not cleared. The dequeue pointer is moved to where the next TD
+	will be (or already was) linked: after the reset it still points into the
+	halted TD, whose TRBs have just been freed.
+*/
+void
+XHCI::_RecoverHaltedEndpoint(xhci_endpoint* endpoint)
+{
+	MutexLocker endpointLocker(endpoint->lock);
+	if (endpoint->device == NULL
+			|| _GetEndpointState(endpoint) != ENDPOINT_STATE_HALTED)
+		return;
+	const uint32 resume = endpoint->next;
+	const uint8 slot = endpoint->device->slot;
+
+	// Not held across the commands, as in CancelQueuedTransfers(). A halted
+	// endpoint posts no transfer events, but a submitter may link a new TD
+	// meanwhile; it goes at "resume", which is where the dequeue pointer is
+	// set below, and the doorbell afterwards starts it.
+	endpointLocker.Unlock();
+
+	status_t status = ResetEndpoint(false, endpoint);
+	if (status == B_OK) {
+		status = SetTRDequeue(endpoint->trb_addr + resume * sizeof(xhci_trb),
+			0, endpoint->id + 1, slot);
+	}
+	if (status != B_OK) {
+		// Leave it to the old path: the next transfer's timeout ends in
+		// CancelQueuedTransfers(), which resets the endpoint as well.
+		TRACE_ERROR("could not recover halted endpoint %" B_PRIu32 " on slot %"
+			B_PRIu8 ": %s\n", (uint32)endpoint->id + 1, slot, strerror(status));
+		return;
+	}
+
+	TRACE_ALWAYS("recovered halted endpoint %" B_PRIu32 " on slot %" B_PRIu8
+		"\n", (uint32)endpoint->id + 1, slot);
+	Ring(slot, endpoint->id + 1);
+}
+
+
 status_t
 XHCI::StopEndpoint(bool suspend, xhci_endpoint* endpoint)
 {
@@ -3246,6 +3297,26 @@ XHCI::FinishTransfers()
 
 			const uint8 completionCode = td->trb_completion_code;
 			status_t callbackStatus = xhci_error_status(completionCode, directionIn);
+
+			// A STALL halts the endpoint, and the halt must be cleared
+			// before the endpoint can run anything again. This is the
+			// only place that can do it in time: before the callback, so a
+			// caller that immediately sends its next request finds a working
+			// endpoint. See _RecoverHaltedEndpoint().
+			//
+			// STALL only. Babble and transaction errors halt the endpoint too,
+			// but a transaction error is also what an unplug produces, in a
+			// burst: recovering those would send commands to a slot that is
+			// gone, each failing only after DoCommand()'s ~800 ms of timeouts,
+			// all on this thread. They keep the old path (the next transfer's
+			// timeout resets the endpoint).
+			if (completionCode == COMP_STALL
+					&& transfer->IsochronousData() == NULL) {
+				xhci_endpoint* endpoint = (xhci_endpoint*)
+					transfer->TransferPipe()->ControllerCookie();
+				if (endpoint != NULL)
+					_RecoverHaltedEndpoint(endpoint);
+			}
 
 			size_t actualLength = transfer->FragmentLength();
 			if (completionCode != COMP_SUCCESS) {
