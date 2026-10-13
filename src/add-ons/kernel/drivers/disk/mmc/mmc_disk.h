@@ -35,6 +35,17 @@ typedef struct {
 	uint16_t rca;
 	uint32_t flags;
 
+	uint8_t deviceType;
+	bool isMMC;
+	bool readOnly;
+		// eMMC devices are read-only unless enabled in the settings file
+	int maxBusWidth;
+		// Widest data bus to try on eMMC (1, 4 or 8), from the settings file
+	int busWidth;
+	bool cacheEnabled;
+		// The firmware left the volatile write cache on and it could not be
+		// turned off: writes must be flushed
+
 	device_geometry geometry;
 
 	DMAResource* dmaResource;

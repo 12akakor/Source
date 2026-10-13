@@ -19,10 +19,33 @@
 #include "mmc.h"
 
 
-// Ways to move data between the controller and memory, see
+// A single entry of the ADMA2 descriptor table, in the 32-bit address format.
+// See SD Host Controller Simplified Specification, section 1.13.
+struct adma2_descriptor {
+	uint16	attributes;
+	uint16	length;
+	uint32	address;
+} __attribute__((packed));
+
+
+// Attribute bits of an ADMA2 descriptor
+static const uint16 kAdma2Valid = 1 << 0;
+static const uint16 kAdma2End = 1 << 1;
+static const uint16 kAdma2Interrupt = 1 << 2;
+static const uint16 kAdma2ActTran = 2 << 4;
+
+// The length field of a descriptor is 16 bits wide. We use a smaller value
+// that is still a multiple of the sector size, so a descriptor never describes
+// a partial sector and we don't rely on the "0 means 65536" convention.
+static const size_t kAdma2MaxTransferLength = 32768;
+
+
+// Ways to move data between the controller and memory. The first one that
+// works is chosen on the first data access, see
 // SdhciBus::_SelectTransferMode().
 enum sdhci_data_mode {
-	kDataModeSdma = 0,		// DMA through the simple system address register
+	kDataModeAdma2 = 0,		// DMA through an ADMA2 descriptor table
+	kDataModeSdma,			// DMA through the simple system address register
 	kDataModePio,			// CPU copies through the buffer data port
 	kDataModeCount
 };
@@ -69,6 +92,8 @@ class SdhciBus {
 			bool				_IsEmbeddedSlot();
 			bool				_IsCardPresent();
 			bool				_UsesSectorAddressing() const;
+			void				_SetAdmaAddress(phys_addr_t address);
+			uint64				_AdmaAddress();
 			status_t			_WaitDataLineIdle(bigtime_t timeout);
 			status_t			_SendDataCommand(uint8 command,
 									uint32 argument, uint16 transferMode,
@@ -103,6 +128,8 @@ class SdhciBus {
 			// buffer for the self test and for ReadData(). Both are
 			// physically contiguous and below 4GB.
 			area_id				fDmaArea;
+			adma2_descriptor*	fDmaDescriptors;
+			phys_addr_t			fDmaDescriptorsPhysical;
 			uint8*				fBounceBuffer;
 			phys_addr_t			fBouncePhysical;
 

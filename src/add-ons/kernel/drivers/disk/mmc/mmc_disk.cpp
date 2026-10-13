@@ -22,18 +22,23 @@
 #include <drivers/device_manager.h>
 #include <drivers/KernelExport.h>
 #include <drivers/Drivers.h>
+#include <drivers/driver_settings.h>
 #include <kernel/OS.h>
 #include <util/fs_trim_support.h>
 
 #include <AutoDeleter.h>
 
 
-#define TRACE_MMC_DISK
+// Verbose tracing, including one line per read and write call. That also
+// fills the syslog fast enough to push the boot messages out of it.
+//#define TRACE_MMC_DISK
 #ifdef TRACE_MMC_DISK
 #	define TRACE(x...) dprintf("\33[33mmmc_disk:\33[0m " x)
 #else
-#	define TRACE(x...) ;
+#	define TRACE(x...) do {} while (false)
+		// Not just ";": "if (...) TRACE(...); else ..." must still compile
 #endif
+#define TRACE_ALWAYS(x...)	dprintf("\33[33mmmc_disk:\33[0m " x)
 #define ERROR(x...)			dprintf("\33[33mmmc_disk:\33[0m " x)
 #define CALLED() 			TRACE("CALLED %s\n", __PRETTY_FUNCTION__)
 
@@ -71,7 +76,65 @@ struct mmc_disk_csd {
 		// fixed value is used.
 		return 8;
 	}
+
+	uint64 mmc_capacity()
+	{
+		// MMC devices always use the CSD 1.0 layout for these fields,
+		// whatever their CSD_STRUCTURE says (JEDEC 84-B51, 7.3). For devices
+		// larger than 2GB, C_SIZE is 0xFFF and the real size is in EXT_CSD.
+		uint64 size = ((bits[0] >> 54) & 0x3FF) | ((bits[1] & 0x3) << 10);
+		uint32 mult = (bits[0] >> 39) & 0x7;
+		return (size + 1) << (mult + 2 + read_bl_len());
+	}
 };
+
+
+// EXT_CSD byte offsets, JEDEC 84-B51 section 7.4
+enum {
+	kExtCsdFlushCache = 32,
+	kExtCsdCacheControl = 33,
+	kExtCsdPartitionConfig = 179,
+	kExtCsdBusWidth = 183,
+	kExtCsdHsTiming = 185,
+	kExtCsdRevision = 192,
+	kExtCsdStructure = 194,
+	kExtCsdDeviceType = 196,
+	kExtCsdSecCount = 212,		// 4 bytes, little endian
+	kExtCsdHcWpGroupSize = 221,
+	kExtCsdHcEraseGroupSize = 224,
+	kExtCsdBootSizeMult = 226,
+	kExtCsdCacheSize = 249,		// 4 bytes, little endian, in KiB
+	kExtCsdSize = 512
+};
+
+
+static uint32
+ext_csd_sector_count(const uint8* extCsd)
+{
+	return (uint32)extCsd[kExtCsdSecCount]
+		| ((uint32)extCsd[kExtCsdSecCount + 1] << 8)
+		| ((uint32)extCsd[kExtCsdSecCount + 2] << 16)
+		| ((uint32)extCsd[kExtCsdSecCount + 3] << 24);
+}
+
+
+/*!	Compares EXT_CSD fields that never change. Used to check that data
+	transfers still work after changing the bus width, the same way Linux
+	does when the device does not support the bus test commands.
+*/
+static bool
+ext_csd_same_device(const uint8* a, const uint8* b)
+{
+	static const int kFields[] = { kExtCsdRevision, kExtCsdStructure,
+		kExtCsdDeviceType, kExtCsdSecCount, kExtCsdSecCount + 1,
+		kExtCsdSecCount + 2, kExtCsdSecCount + 3, kExtCsdHcWpGroupSize,
+		kExtCsdHcEraseGroupSize, kExtCsdBootSizeMult };
+	for (size_t i = 0; i < sizeof(kFields) / sizeof(kFields[0]); i++) {
+		if (a[kFields[i]] != b[kFields[i]])
+			return false;
+	}
+	return true;
+}
 
 
 static float
@@ -104,7 +167,11 @@ mmc_disk_supports_device(device_node* parent)
 	else if (deviceType == CARD_TYPE_SDIO) {
 		// Ignore silently, since it is not mass storage and should be handled by other drivers
 		return 0.0;
-	} else
+	} else if (deviceType == CARD_TYPE_MMC)
+		TRACE("MMC device found, parent: %p\n", parent);
+	else if (deviceType == CARD_TYPE_MMC_EXTENDED_CAPACITY)
+		TRACE("High capacity MMC device found, parent: %p\n", parent);
+	else
 		return 0.0;
 
 	return 0.8;
@@ -116,8 +183,13 @@ mmc_disk_register_device(device_node* node)
 {
 	CALLED();
 
+	uint8_t deviceType = CARD_TYPE_UNKNOWN;
+	sDeviceManager->get_attr_uint8(node, kMmcTypeAttribute, &deviceType, true);
+
 	device_attr attrs[] = {
-		{ B_DEVICE_PRETTY_NAME, B_STRING_TYPE, { .string = "SD Card" }},
+		{ B_DEVICE_PRETTY_NAME, B_STRING_TYPE,
+			{ .string = is_mmc_card_type((card_type)deviceType)
+				? "eMMC" : "SD Card" }},
 		{ NULL }
 	};
 
@@ -131,6 +203,11 @@ mmc_disk_execute_iorequest(void* data, IOOperation* operation)
 {
 	mmc_disk_driver_info* info = (mmc_disk_driver_info*)data;
 	status_t error;
+
+	if (operation->IsWrite() && info->readOnly) {
+		info->scheduler->OperationCompleted(operation, B_READ_ONLY_DEVICE, 0);
+		return B_READ_ONLY_DEVICE;
+	}
 
 	uint8_t command;
 	if (operation->IsWrite())
@@ -151,6 +228,243 @@ mmc_disk_execute_iorequest(void* data, IOOperation* operation)
 
 
 static status_t
+mmc_disk_read_ext_csd(mmc_disk_driver_info* info, uint8* extCsd)
+{
+	if (info->mmc->read_data == NULL)
+		return B_NOT_SUPPORTED;
+	return info->mmc->read_data(info->parent, info->parentCookie, info->rca,
+		MMC_SEND_EXT_CSD, 0, extCsd, kExtCsdSize);
+}
+
+
+/*!	Polls CMD13 (SEND_STATUS) until the device is back in the transfer state
+	and ready for data, for example after the busy phase of CMD6.
+*/
+static status_t
+mmc_disk_wait_ready(mmc_disk_driver_info* info, uint32* _status)
+{
+	bigtime_t deadline = system_time() + 1000000;
+	while (true) {
+		uint32 status = 0;
+		status_t error = info->mmc->execute_command(info->parent,
+			info->parentCookie, info->rca, SEND_STATUS,
+			(uint32)info->rca << 16, &status);
+		*_status = status;
+		if (error != B_OK)
+			return error;
+
+		const uint32 kStateTransfer = 4;
+		if ((status & (1 << 8)) != 0 && ((status >> 9) & 0xF) == kStateTransfer)
+			return B_OK;
+		if (system_time() > deadline)
+			return B_TIMED_OUT;
+		snooze(1000);
+	}
+}
+
+
+/*!	Writes one byte of the EXT_CSD with CMD6 (SWITCH) and waits for the device
+	to be done with it. The busy phase must be over before anything else is
+	changed, in particular the bus width on the host side.
+*/
+static status_t
+mmc_disk_switch(mmc_disk_driver_info* info, uint8 index, uint8 value)
+{
+	// Access mode 3 = write byte, command set 0
+	uint32 argument = (3 << 24) | ((uint32)index << 16) | ((uint32)value << 8);
+	uint32 response = 0;
+	status_t error = info->mmc->execute_command(info->parent,
+		info->parentCookie, info->rca, MMC_SWITCH, argument, &response);
+	if (error != B_OK) {
+		ERROR("CMD6 EXT_CSD[%u] = %u failed: %s\n", index, value,
+			strerror(error));
+		return error;
+	}
+
+	uint32 status = 0;
+	error = mmc_disk_wait_ready(info, &status);
+	if (error != B_OK) {
+		ERROR("device not ready after CMD6 EXT_CSD[%u] = %u: %s "
+			"(status %08" B_PRIx32 ")\n", index, value, strerror(error), status);
+		return error;
+	}
+	if ((status & (1 << 7)) != 0) {
+		ERROR("CMD6 EXT_CSD[%u] = %u rejected (SWITCH_ERROR, status %08"
+			B_PRIx32 ")\n", index, value, status);
+		return B_ERROR;
+	}
+	return B_OK;
+}
+
+
+/*!	Tries 8 then 4 bit data transfers, and keeps the first that
+	works. Each width is checked by reading the EXT_CSD again and comparing
+	fields that never change with the copy read in 1-bit mode.
+*/
+static void
+mmc_disk_select_bus_width(mmc_disk_driver_info* info, const uint8* extCsd)
+{
+	static const struct {
+		int		width;
+		uint8	value;
+	} kWidths[] = {
+		{ 8, 2 },
+		{ 4, 1 },
+	};
+
+	info->busWidth = 1;
+
+	uint8* check = (uint8*)malloc(kExtCsdSize);
+	if (check == NULL)
+		return;
+
+	for (size_t i = 0; i < sizeof(kWidths) / sizeof(kWidths[0]); i++) {
+		const int width = kWidths[i].width;
+		if (width > info->maxBusWidth) {
+			TRACE("bus width %d skipped (limited to %d by the settings "
+				"file)\n", width, info->maxBusWidth);
+			continue;
+		}
+
+		if (mmc_disk_switch(info, kExtCsdBusWidth, kWidths[i].value) != B_OK) {
+			TRACE("bus width %d: device refused the switch\n", width);
+			continue;
+		}
+
+		info->mmc->set_bus_width(info->parent, info->parentCookie, width);
+
+		memset(check, 0, kExtCsdSize);
+		status_t error = mmc_disk_read_ext_csd(info, check);
+		if (error == B_OK && ext_csd_same_device(extCsd, check)) {
+			info->busWidth = width;
+			TRACE("%d-bit bus verified (EXT_CSD[183] now %u)\n",
+				width, check[kExtCsdBusWidth]);
+			free(check);
+			return;
+		}
+
+		ERROR("bus width %d does not work (%s%s), going back to 1 bit\n",
+			width, strerror(error),
+			error == B_OK ? ", EXT_CSD read back differs" : "");
+
+		info->mmc->set_bus_width(info->parent, info->parentCookie, 1);
+		mmc_disk_switch(info, kExtCsdBusWidth, 0);
+		error = mmc_disk_read_ext_csd(info, check);
+		ERROR("1-bit transfers after going back: %s\n", strerror(error));
+	}
+
+	TRACE("staying with a 1-bit bus\n");
+	free(check);
+}
+
+
+/*!	This driver does not use the device's volatile write cache (eMMC 4.5,
+	EXT_CSD revision 6, and later). If the firmware left it on, turn it off,
+	which also flushes it: a write is then on flash when it completes.
+*/
+static void
+mmc_disk_setup_cache(mmc_disk_driver_info* info, const uint8* extCsd)
+{
+	const uint32 cacheSize = (uint32)extCsd[kExtCsdCacheSize]
+		| ((uint32)extCsd[kExtCsdCacheSize + 1] << 8)
+		| ((uint32)extCsd[kExtCsdCacheSize + 2] << 16)
+		| ((uint32)extCsd[kExtCsdCacheSize + 3] << 24);
+	bool enabled = (extCsd[kExtCsdCacheControl] & 1) != 0;
+
+	if (enabled && !info->readOnly
+		&& mmc_disk_switch(info, kExtCsdCacheControl, 0) == B_OK) {
+		uint8* check = (uint8*)malloc(kExtCsdSize);
+		if (check != NULL && mmc_disk_read_ext_csd(info, check) == B_OK)
+			enabled = (check[kExtCsdCacheControl] & 1) != 0;
+		free(check);
+	}
+
+	info->cacheEnabled = enabled;
+	TRACE_ALWAYS("write cache: %" B_PRIu32 " KiB, %s\n", cacheSize,
+		enabled ? "on (flushed on request)" : "off");
+}
+
+
+/*!	Writes what the device's volatile cache holds to flash, if the cache is
+	on (only when the firmware left it on and it could not be turned off).
+*/
+static status_t
+mmc_disk_flush_cache(mmc_disk_driver_info* info)
+{
+	if (!info->cacheEnabled)
+		return B_OK;
+
+	status_t status = mmc_disk_switch(info, kExtCsdFlushCache, 1);
+	if (status != B_OK)
+		ERROR("write cache flush failed: %s\n", strerror(status));
+	return status;
+}
+
+
+static status_t
+mmc_disk_get_emmc_geometry(mmc_disk_driver_info* info, mmc_disk_csd& csd,
+	device_geometry* geometry)
+{
+	uint64 sectorCount = 0;
+
+	uint8* extCsd = (uint8*)malloc(kExtCsdSize);
+	if (extCsd == NULL)
+		return B_NO_MEMORY;
+
+	memset(extCsd, 0, kExtCsdSize);
+	status_t error = mmc_disk_read_ext_csd(info, extCsd);
+	if (error == B_OK) {
+		sectorCount = ext_csd_sector_count(extCsd);
+		TRACE("EXT_CSD: revision %u, structure %u, device type %02x, "
+			"sectors %" B_PRIu64 " (%" B_PRIu64 " MB), bus width %u, "
+			"HS timing %u, boot partitions %u KB each, partition config "
+			"%02x\n", extCsd[kExtCsdRevision], extCsd[kExtCsdStructure],
+			extCsd[kExtCsdDeviceType], sectorCount,
+			sectorCount * kBlockSize / (1024 * 1024),
+			extCsd[kExtCsdBusWidth], extCsd[kExtCsdHsTiming],
+			extCsd[kExtCsdBootSizeMult] * 128, extCsd[kExtCsdPartitionConfig]);
+	} else
+		ERROR("reading EXT_CSD failed: %s\n", strerror(error));
+
+	if (sectorCount == 0) {
+		// Devices up to 2GB have no SEC_COUNT, their size is in the CSD
+		sectorCount = csd.mmc_capacity() / kBlockSize;
+		TRACE("using the size from the CSD: %" B_PRIu64 " sectors%s\n",
+			sectorCount,
+			error != B_OK ? " (probably wrong, EXT_CSD could not be read)" : "");
+	}
+
+	if (error == B_OK) {
+		mmc_disk_select_bus_width(info, extCsd);
+		mmc_disk_setup_cache(info, extCsd);
+	} else
+		info->busWidth = 1;
+
+	free(extCsd);
+
+	geometry->bytes_per_sector = kBlockSize;
+	geometry->bytes_per_physical_sector = kBlockSize;
+	if (sectorCount <= UINT32_MAX) {
+		geometry->sectors_per_track = 1;
+		geometry->cylinder_count = sectorCount;
+	} else {
+		geometry->sectors_per_track = 256;
+		geometry->cylinder_count = sectorCount / 256;
+	}
+	geometry->head_count = 1;
+	geometry->device_type = B_DISK;
+	geometry->removable = false;
+	geometry->read_only = info->readOnly;
+	geometry->write_once = false;
+
+	TRACE_ALWAYS("%" B_PRIu64 " sectors of %" B_PRIu32 " bytes, %d-bit bus, "
+		"%s\n", sectorCount, kBlockSize, info->busWidth,
+		info->readOnly ? "read-only" : "writable");
+	return B_OK;
+}
+
+
+static status_t
 mmc_block_get_geometry(mmc_disk_driver_info* info, device_geometry* geometry)
 {
 	struct mmc_disk_csd csd;
@@ -164,6 +478,13 @@ mmc_block_get_geometry(mmc_disk_driver_info* info, device_geometry* geometry)
 
 	TRACE("CSD: %" PRIx64 " %" PRIx64 "\n", csd.bits[0], csd.bits[1]);
 
+	if (info->isMMC) {
+		TRACE("CSD %016" B_PRIx64 " %016" B_PRIx64 ", structure %u\n",
+			csd.bits[1], csd.bits[0], csd.structure_version());
+		return mmc_disk_get_emmc_geometry(info, csd, geometry);
+	}
+
+	// SD cards: unchanged from before
 	if (csd.structure_version() >= 3) {
 		TRACE("unknown CSD version %d\n", csd.structure_version());
 		return B_NOT_SUPPORTED;
@@ -174,7 +495,7 @@ mmc_block_get_geometry(mmc_disk_driver_info* info, device_geometry* geometry)
 	geometry->cylinder_count = 1 << (csd.c_size_mult() + 2);
 	geometry->head_count = 1;
 	geometry->device_type = B_DISK;
-	geometry->removable = true; // TODO detect eMMC which isn't
+	geometry->removable = true;
 	geometry->read_only = false; // TODO check write protect switch?
 	geometry->write_once = false;
 
@@ -182,35 +503,12 @@ mmc_block_get_geometry(mmc_disk_driver_info* info, device_geometry* geometry)
 	// opportunity to switch the card to 4-bit data transfers (instead of the
 	// default 1 bit mode)
 	uint32_t cardStatus = 0;
-	status_t status = B_OK;
-
-	// TODO have the card type at hand instead of using the csd version here
-	if (csd.structure_version() < 3) {
-		const uint32 k4BitMode = 2;
-		info->mmc->execute_command(info->parent, info->parentCookie, info->rca,
-			SD_APP_CMD, info->rca << 16, &cardStatus);
-		status = info->mmc->execute_command(info->parent, info->parentCookie, info->rca,
-			SD_SET_BUS_WIDTH, k4BitMode, &cardStatus);
-	} else {
-		// TODO according to the eMMC spec, we should first run a test with CMD19 and CMD14 to
-		// determine if the 4-bit (and possibly the 8-bit) bus is wired, and also check if we need
-		// to switch to a different POWER_CLASS. See Jedec 84-B50 appendix A.6.3
-		//
-		// Command parameters for CMD6 (SWITCH):
-		// bits 31-26: set to 0
-		// bits 25-24: access (3 = write byte)
-		// bits 23-16: index (B7 = 183 in decimal is the offset of BUS_WIDTH in the EXT_CSD register)
-		// bits 15-8: value (1 = 4 bit mode)
-		// bits 7-3: set to 0
-		// bits 2-0: command set (kee using command set 0)
-		//
-		// See chapter 7.4.61 of the JEDEC spec as well as table 41 in section 6.10.4.
-		//
-		// The application note A.6.3 just gives the "magic" value to use without details as below:
-		const uint32 k4BitMode = 0x3B70100;
-		status = info->mmc->execute_command(info->parent, info->parentCookie, info->rca,
-			MMC_SWITCH, k4BitMode, &cardStatus);
-	}
+	const uint32 k4BitMode = 2;
+	info->mmc->execute_command(info->parent, info->parentCookie, info->rca,
+		SD_APP_CMD, info->rca << 16, &cardStatus);
+	status_t status = info->mmc->execute_command(info->parent,
+		info->parentCookie, info->rca, SD_SET_BUS_WIDTH, k4BitMode,
+		&cardStatus);
 
 	TRACE("Card status after switching to 4 bit mode: %08x\n", cardStatus);
 
@@ -275,6 +573,44 @@ mmc_disk_init_driver(device_node* node, void** cookie)
 		info->flags = 0;
 	else
 		info->flags = kIoCommandOffsetAsSectors;
+
+	info->deviceType = deviceType;
+	info->isMMC = is_mmc_card_type((card_type)deviceType);
+	info->readOnly = false;
+	info->maxBusWidth = 8;
+	info->busWidth = 1;
+	info->cacheEnabled = false;
+
+	if (info->isMMC) {
+		// Options in /boot/home/config/settings/kernel/drivers/mmc_disk:
+		//   emmc_write_enable false	read-only (writable by default)
+		//   emmc_bus_width 4			widest bus to try
+		bool writeEnable = true;
+		void* handle = load_driver_settings("mmc_disk");
+		if (handle != NULL) {
+			writeEnable = get_driver_boolean_parameter(handle,
+				"emmc_write_enable", true, true);
+
+			const char* width = get_driver_parameter(handle, "emmc_bus_width",
+				NULL, NULL);
+			if (width != NULL) {
+				if (strcmp(width, "1") == 0)
+					info->maxBusWidth = 1;
+				else if (strcmp(width, "4") == 0)
+					info->maxBusWidth = 4;
+				else if (strcmp(width, "8") == 0)
+					info->maxBusWidth = 8;
+			}
+			unload_driver_settings(handle);
+		}
+		info->readOnly = !writeEnable;
+
+		TRACE("eMMC device, RCA %u, %s addressing, %s, bus width up to %d "
+			"bits%s\n", info->rca,
+			(info->flags & kIoCommandOffsetAsSectors) != 0 ? "sector" : "byte",
+			info->readOnly ? "READ-ONLY" : "WRITABLE", info->maxBusWidth,
+			handle != NULL ? "" : " (no settings file)");
+	}
 
 	status_t error;
 
@@ -469,6 +805,11 @@ mmc_block_write(void* cookie, off_t position, const void* buffer,
 	CALLED();
 	mmc_disk_handle* handle = (mmc_disk_handle*)cookie;
 
+	if (handle->info->readOnly) {
+		*_length = 0;
+		return B_READ_ONLY_DEVICE;
+	}
+
 	size_t length = *_length;
 	if (position >= handle->info->DeviceSize())
 		return ERANGE;
@@ -495,6 +836,9 @@ mmc_block_io(void* cookie, io_request* request)
 {
 	CALLED();
 	mmc_disk_handle* handle = (mmc_disk_handle*)cookie;
+
+	if (request->IsWrite() && handle->info->readOnly)
+		return B_READ_ONLY_DEVICE;
 
 	if ((request->Offset() + (off_t)request->Length()) > handle->info->DeviceSize())
 		return ERANGE;
@@ -655,13 +999,23 @@ mmc_block_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
 
 		case B_TRIM_DEVICE:
 		{
+			// eMMC uses CMD35/CMD36 to set the erase range, not the SD
+			// commands CMD32/CMD33 used by mmc_block_trim(): those are illegal
+			// commands for an eMMC device. Not implemented yet.
+			if (info->isMMC || info->readOnly)
+				return B_NOT_SUPPORTED;
+
 			// We know the buffer is kernel-side because it has been
 			// preprocessed in devfs
 			return mmc_block_trim(info, (fs_trim_data*)buffer);
 		}
 
-		/*case B_FLUSH_DRIVE_CACHE:
-			return synchronize_cache(info);*/
+		case B_FLUSH_DRIVE_CACHE:
+			// File systems ask for this to make sure their journal is on
+			// the media, and the kernel after syncing a volume
+			if (!info->isMMC)
+				return B_DEV_INVALID_IOCTL;
+			return mmc_disk_flush_cache(info);
 	}
 
 	return B_DEV_INVALID_IOCTL;
