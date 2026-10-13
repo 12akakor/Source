@@ -235,7 +235,19 @@ scan_for_drivers_if_needed(devfs_vnode* dir)
 
 	// scan for drivers at this path
 	static int32 updateCycle = 1;
-	device_manager_probe(path.Path(), updateCycle++);
+	if (device_manager_probe(path.Path(), updateCycle++) == B_BUSY) {
+		// The device manager is still building its node tree, so a probe now
+		// would only see part of it. Do not remember this as the scan of the
+		// directory: each directory is scanned once before the boot volume is
+		// mounted, and for "disk" that scan has to find the boot disk's
+		// controller. (A USB disk moving from a companion controller to EHCI
+		// during start-up gets us here, through the lookup that unpublishes
+		// it; the AHCI controller, later on the PCI bus, was then never
+		// probed and the kernel found no boot partition.)
+		dprintf("devfs: device manager not ready, not scanning \"%s\" yet\n",
+			path.Path());
+		return B_OK;
+	}
 	legacy_driver_probe(path.Path());
 
 	dir->stream.u.dir.scanned = scan_mode();
