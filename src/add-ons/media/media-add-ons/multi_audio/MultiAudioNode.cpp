@@ -39,6 +39,20 @@
 static const int32 kInputQueueDepth = 4;
 
 
+// Bytes in one device record buffer for a capture output of this format.
+// Each output carries only its own channels, so this must use the output's
+// channel count: sizing it for the whole device (all input channels) made a
+// 2-channel output of a 4-channel device advertise twice the frames it fills,
+// and the unfilled half was delivered as silence.
+static size_t
+record_buffer_bytes(uint32 frames, const media_format& format)
+{
+	return frames * (format.u.raw_audio.format
+			& media_raw_audio_format::B_AUDIO_SIZE_MASK)
+		* format.u.raw_audio.channel_count;
+}
+
+
 // This represents a hardware output.
 class node_input {
 public:
@@ -503,6 +517,15 @@ MultiAudioNode::NodeRegistered()
 			currentOutput->fPreferredFormat.u.raw_audio.channel_count++;
 			currentOutput->fOutput.format = currentOutput->fPreferredFormat;
 		}
+	}
+
+	// Now that each output knows its channel count, size its buffers for it.
+	for (int32 i = 0; node_output* channel = (node_output*)fOutputs.ItemAt(i);
+			i++) {
+		channel->fPreferredFormat.u.raw_audio.buffer_size = record_buffer_bytes(
+			fDevice->BufferList().return_record_buffer_size,
+			channel->fPreferredFormat);
+		channel->fOutput.format = channel->fPreferredFormat;
 	}
 
 	// Set up our parameter web
@@ -1558,7 +1581,7 @@ MultiAudioNode::SetParameterValue(int32 id, bigtime_t performanceTime,
 			media_format newFormat = channel->fOutput.format;
 			newFormat.u.raw_audio.frame_rate = frameRate;
 			newFormat.u.raw_audio.buffer_size
-				= fInputPreferredFormat.u.raw_audio.buffer_size;
+				= channel->fPreferredFormat.u.raw_audio.buffer_size;
 
 			int32 changeTag = 0;
 			status_t error = RequestFormatChange(channel->fOutput.source,
@@ -2439,12 +2462,13 @@ MultiAudioNode::_SetNodeOutputFrameRate(float frameRate)
 	for (int32 i = 0; node_output* channel = (node_output*)fOutputs.ItemAt(i);
 			i++) {
 		channel->fPreferredFormat.u.raw_audio.frame_rate = frameRate;
-		channel->fPreferredFormat.u.raw_audio.buffer_size
-			= fInputPreferredFormat.u.raw_audio.buffer_size;
+		channel->fPreferredFormat.u.raw_audio.buffer_size = record_buffer_bytes(
+			fDevice->BufferList().return_record_buffer_size,
+			channel->fPreferredFormat);
 
 		channel->fOutput.format.u.raw_audio.frame_rate = frameRate;
 		channel->fOutput.format.u.raw_audio.buffer_size
-			= fInputPreferredFormat.u.raw_audio.buffer_size;
+			= channel->fPreferredFormat.u.raw_audio.buffer_size;
 	}
 
 	// make sure the time base is reset
