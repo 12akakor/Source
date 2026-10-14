@@ -516,7 +516,7 @@ static const Translation kTranslations[] = {
 #define kNumberOfTranslations (sizeof(kTranslations) / sizeof(Translation))
 
 #define kRenkuOSCurrentMaintainers \
-	"Hello World\n" \
+	"Kevin Adams\n" \
 	"\n"
 
 #define kCurrentMaintainers \
