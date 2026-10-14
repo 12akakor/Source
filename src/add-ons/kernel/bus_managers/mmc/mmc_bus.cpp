@@ -19,6 +19,12 @@ MMCBus::MMCBus(device_node* node)
 	fCookie(NULL),
 	fStatus(B_OK),
 	fWorkerThread(-1),
+	fInitialScanDone(-1),
+	fInitialScanRequested(false),
+	fInitialScanSignaled(false),
+	fInitialScanWaited(false),
+	fDeferRegistration(true),
+	fPendingCount(0),
 	fActiveDevice(0),
 	fCardType(CARD_TYPE_UNKNOWN)
 {
@@ -38,11 +44,22 @@ MMCBus::MMCBus(device_node* node)
 
 	fScanSemaphore = create_sem(0, "MMC bus scan");
 	fLockSemaphore = create_sem(1, "MMC bus lock");
+	fInitialScanDone = create_sem(0, "MMC bus initial scan");
+	mutex_init(&fRegistrationLock, "MMC bus registration");
+
+	// Give the controller the scan semaphore before the scanning thread
+	// exists: the controller releases it right away if a device is present,
+	// so its count now says whether the first scan will find something to
+	// wait for (see RegisterInitialDevices()). With the thread already
+	// running, it could have taken the semaphore in between.
+	fController->set_scan_semaphore(fCookie, fScanSemaphore);
+	int32 count = 0;
+	if (get_sem_count(fScanSemaphore, &count) == B_OK && count > 0)
+		fInitialScanRequested = true;
+
 	fWorkerThread = spawn_kernel_thread(_WorkerThread, "SD bus controller",
 		B_NORMAL_PRIORITY, this);
 	resume_thread(fWorkerThread);
-
-	fController->set_scan_semaphore(fCookie, fScanSemaphore);
 }
 
 
@@ -60,8 +77,103 @@ MMCBus::~MMCBus()
 
 	// Wait for the worker thread to terminate
 	status_t result;
-	if (fWorkerThread != 0)
+	if (fWorkerThread > 0)
 		wait_for_thread(fWorkerThread, &result);
+
+	delete_sem(fInitialScanDone);
+	mutex_destroy(&fRegistrationLock);
+}
+
+
+/*!	Called from the bus node's register_child_devices hook, while the device
+	manager is registering the bus. Waits for the first scan and registers
+	what it found, so that a device holding the boot volume exists before the
+	kernel looks for boot partitions. The scan runs in the worker thread,
+	which cannot register nodes itself meanwhile: the device manager lock is
+	held here, so it would block on it, and we would wait for it forever.
+	Later scans (a card inserted afterwards) register their nodes directly.
+*/
+void
+MMCBus::RegisterInitialDevices()
+{
+	if (fInitialScanRequested && !fInitialScanWaited) {
+		fInitialScanWaited = true;
+		status_t status = acquire_sem_etc(fInitialScanDone, 1,
+			B_RELATIVE_TIMEOUT, 3000000);
+		if (status != B_OK) {
+			ERROR("first scan not finished after 3s, the device will be "
+				"published when it is\n");
+		}
+	}
+
+	card_info cards[kMaxPendingCards];
+	int32 count;
+	{
+		MutexLocker locker(fRegistrationLock);
+		fDeferRegistration = false;
+		count = fPendingCount;
+		memcpy(cards, fPendingCards, sizeof(card_info) * count);
+		fPendingCount = 0;
+	}
+
+	for (int32 i = 0; i < count; i++)
+		_RegisterCard(cards[i]);
+
+	if (fInitialScanRequested) {
+		TRACE("%" B_PRId32 " device(s) published while registering the "
+			"bus\n", count);
+	}
+}
+
+
+void
+MMCBus::_PublishCard(const card_info& card)
+{
+	{
+		MutexLocker locker(fRegistrationLock);
+		if (fDeferRegistration) {
+			// The bus node is still being registered, RegisterInitialDevices()
+			// will publish this
+			if (fPendingCount < kMaxPendingCards)
+				fPendingCards[fPendingCount++] = card;
+			return;
+		}
+	}
+	_RegisterCard(card);
+}
+
+
+void
+MMCBus::_RegisterCard(const card_info& card)
+{
+	device_attr attrs[] = {
+		{ B_DEVICE_BUS, B_STRING_TYPE, {.string = "mmc" }},
+		{ B_DEVICE_PRETTY_NAME, B_STRING_TYPE, {.string = "mmc device" }},
+		{ B_DEVICE_VENDOR_ID, B_UINT32_TYPE, {.ui32 = card.vendor}},
+		{ B_DEVICE_ID, B_STRING_TYPE, {.string = card.name}},
+		{ B_DEVICE_UNIQUE_ID, B_UINT32_TYPE, {.ui32 = card.serial}},
+		{ "mmc/revision", B_UINT16_TYPE, {.ui16 = card.revision}},
+		{ "mmc/month", B_UINT8_TYPE, {.ui8 = card.month}},
+		{ "mmc/year", B_UINT16_TYPE, {.ui16 = card.year}},
+		{ kMmcRcaAttribute, B_UINT16_TYPE, {.ui16 = card.rca}},
+		{ kMmcTypeAttribute, B_UINT8_TYPE, {.ui8 = card.type}},
+		{}
+	};
+
+	// publish child device for the card
+	gDeviceManager->register_node(fNode, MMC_BUS_MODULE_NAME, attrs, NULL,
+		NULL);
+}
+
+
+void
+MMCBus::_InitialScanDone()
+{
+	MutexLocker locker(fRegistrationLock);
+	if (!fInitialScanSignaled) {
+		fInitialScanSignaled = true;
+		release_sem(fInitialScanDone);
+	}
 }
 
 
@@ -113,6 +225,21 @@ MMCBus::ReadData(uint16_t rca, uint8_t command, uint32_t argument,
 	if (status != B_OK)
 		return status;
 	return fController->read_data(fCookie, command, argument, buffer, length);
+}
+
+
+status_t
+MMCBus::SetTiming(uint16_t rca, int timing, uint32_t flags)
+{
+	if (fController->set_timing == NULL)
+		return B_NOT_SUPPORTED;
+
+	// The controller checks that transfers still work after the change, so
+	// the device must be selected
+	status_t status = _ActivateDevice(rca);
+	if (status != B_OK)
+		return status;
+	return fController->set_timing(fCookie, timing, flags);
 }
 
 
@@ -194,6 +321,7 @@ MMCBus::_WorkerThread(void* cookie)
 		// Check if we need to exit early (possible if the parent device did
 		// not manage initialize itself correctly)
 		if (bus->fStatus == B_SHUTTING_DOWN) {
+			bus->_InitialScanDone();
 			bus->ReleaseBus();
 			return B_OK;
 		}
@@ -316,6 +444,7 @@ MMCBus::_WorkerThread(void* cookie)
 			ERROR("Card does not support voltage range (expected %x, "
 				"reply %x)\n", probe, response);
 			bus->_TerminateBus();
+			bus->_InitialScanDone();
 			bus->ReleaseBus();
 			return B_ERROR;
 		}
@@ -437,29 +566,25 @@ MMCBus::_WorkerThread(void* cookie)
 		}
 
 		if (cardFound) {
-			device_attr attrs[] = {
-				{ B_DEVICE_BUS, B_STRING_TYPE, {.string = "mmc" }},
-				{ B_DEVICE_PRETTY_NAME, B_STRING_TYPE, {.string = "mmc device" }},
-				{ B_DEVICE_VENDOR_ID, B_UINT32_TYPE, {.ui32 = vendor}},
-				{ B_DEVICE_ID, B_STRING_TYPE, {.string = name}},
-				{ B_DEVICE_UNIQUE_ID, B_UINT32_TYPE, {.ui32 = serial}},
-				{ "mmc/revision", B_UINT16_TYPE, {.ui16 = revision}},
-				{ "mmc/month", B_UINT8_TYPE, {.ui8 = month}},
-				{ "mmc/year", B_UINT16_TYPE, {.ui16 = year}},
-				{ kMmcRcaAttribute, B_UINT16_TYPE, {.ui16 = rca}},
-				{ kMmcTypeAttribute, B_UINT8_TYPE, {.ui8 = cardType}},
-				{}
-			};
-
-			// publish child device for the card
-			gDeviceManager->register_node(bus->fNode, MMC_BUS_MODULE_NAME,
-				attrs, NULL, NULL);
+			card_info card;
+			card.vendor = vendor;
+			strlcpy(card.name, name, sizeof(card.name));
+			card.serial = serial;
+			card.revision = revision;
+			card.month = month;
+			card.year = year;
+			card.rca = rca;
+			card.type = cardType;
+			bus->_PublishCard(card);
 		}
 
 		// TODO if there is a single card active, check if it supports CMD6
 		// (spec version 1.10 or later in SCR). If it does, check if CMD6 can
 		// enable high speed mode, use that to go to 50MHz instead of 25.
 		bus->SetClock(25000);
+
+		// The first scan is over, whether it found something or not
+		bus->_InitialScanDone();
 
 		// FIXME we also need to unpublish devices that are gone. Probably need
 		// to "ping" all RCAs somehow? Or is there an interrupt we can look for
@@ -470,6 +595,7 @@ MMCBus::_WorkerThread(void* cookie)
 		bus->_AcquireScanSemaphore();
 	}
 
+	bus->_InitialScanDone();
 	bus->ReleaseBus();
 
 	TRACE("poller thread terminating");

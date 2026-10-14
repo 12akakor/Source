@@ -210,12 +210,23 @@ mmc_disk_execute_iorequest(void* data, IOOperation* operation)
 	}
 
 	uint8_t command;
-	if (operation->IsWrite())
+	if (operation->IsWrite()) {
 		command = SD_WRITE_MULTIPLE_BLOCKS;
-	else
+		// Set before the write: even a failed one may have left data in the
+		// device's cache
+		atomic_set(&info->cacheDirty, 1);
+	} else
 		command = SD_READ_MULTIPLE_BLOCKS;
 	error = info->mmc->do_io(info->parent, info->parentCookie, info->rca,
 		command, operation, (info->flags & kIoCommandOffsetAsSectors) != 0);
+
+	// And again after it: a flush from another thread (a sync, say) may have
+	// cleared the flag while this write waited for the bus, and then run
+	// before it. The write is in the cache now, and the next flush, for
+	// example the one its file system sends after a journal write, must not
+	// skip it.
+	if (operation->IsWrite())
+		atomic_set(&info->cacheDirty, 1);
 
 	if (error != B_OK) {
 		info->scheduler->OperationCompleted(operation, error, 0);
@@ -358,9 +369,12 @@ mmc_disk_select_bus_width(mmc_disk_driver_info* info, const uint8* extCsd)
 }
 
 
-/*!	This driver does not use the device's volatile write cache (eMMC 4.5,
-	EXT_CSD revision 6, and later). If the firmware left it on, turn it off,
-	which also flushes it: a write is then on flash when it completes.
+/*!	Turns the device's volatile write cache on (or off, as the settings say).
+	It exists since eMMC 4.5 (EXT_CSD revision 6). With it on, completed
+	writes may still be in the cache: mmc_disk_flush_cache() writes them to
+	flash when a file system asks (B_FLUSH_DRIVE_CACHE, which BFS does after
+	each journal write and the kernel after syncing a volume, including at
+	shutdown), when the device is closed, and when the driver goes away.
 */
 static void
 mmc_disk_setup_cache(mmc_disk_driver_info* info, const uint8* extCsd)
@@ -369,35 +383,302 @@ mmc_disk_setup_cache(mmc_disk_driver_info* info, const uint8* extCsd)
 		| ((uint32)extCsd[kExtCsdCacheSize + 1] << 8)
 		| ((uint32)extCsd[kExtCsdCacheSize + 2] << 16)
 		| ((uint32)extCsd[kExtCsdCacheSize + 3] << 24);
+	const bool supported = extCsd[kExtCsdRevision] >= 6 && cacheSize > 0;
 	bool enabled = (extCsd[kExtCsdCacheControl] & 1) != 0;
+	const char* note = "";
 
-	if (enabled && !info->readOnly
-		&& mmc_disk_switch(info, kExtCsdCacheControl, 0) == B_OK) {
-		uint8* check = (uint8*)malloc(kExtCsdSize);
-		if (check != NULL && mmc_disk_read_ext_csd(info, check) == B_OK)
-			enabled = (check[kExtCsdCacheControl] & 1) != 0;
-		free(check);
-	}
+	if (!supported) {
+		note = " (not supported by the device)";
+	} else if (info->readOnly) {
+		note = " (read-only, left as the firmware set it)";
+	} else if (info->wantCache != enabled) {
+		// Turning the cache off also flushes it
+		if (mmc_disk_switch(info, kExtCsdCacheControl,
+				info->wantCache ? 1 : 0) == B_OK) {
+			uint8* check = (uint8*)malloc(kExtCsdSize);
+			if (check != NULL && mmc_disk_read_ext_csd(info, check) == B_OK)
+				enabled = (check[kExtCsdCacheControl] & 1) != 0;
+			else
+				enabled = info->wantCache;
+			free(check);
+		}
+		if (enabled != info->wantCache)
+			note = " (COULD NOT BE CHANGED)";
+		else if (!enabled)
+			note = " (disabled by the settings file)";
+	} else if (!enabled)
+		note = " (disabled by the settings file)";
 
 	info->cacheEnabled = enabled;
-	TRACE_ALWAYS("write cache: %" B_PRIu32 " KiB, %s\n", cacheSize,
-		enabled ? "on (flushed on request)" : "off");
+	TRACE_ALWAYS("write cache: %" B_PRIu32 " KiB, %s%s\n", cacheSize,
+		enabled ? "on (flushed on request, on close and on shutdown)"
+			: "off (writes are on flash when they complete)", note);
 }
 
 
-/*!	Writes what the device's volatile cache holds to flash, if the cache is
-	on (only when the firmware left it on and it could not be turned off).
+/*!	Writes what the device's volatile cache holds to flash, if anything was
+	written since the last flush. The controller waits for the end of the
+	busy signal (up to 30s) while it still owns the bus, so no other command
+	can reach the device before the flush is over.
 */
 static status_t
 mmc_disk_flush_cache(mmc_disk_driver_info* info)
 {
-	if (!info->cacheEnabled)
+	if (!info->cacheEnabled || atomic_get_and_set(&info->cacheDirty, 0) == 0)
 		return B_OK;
 
 	status_t status = mmc_disk_switch(info, kExtCsdFlushCache, 1);
-	if (status != B_OK)
-		ERROR("write cache flush failed: %s\n", strerror(status));
+	if (status != B_OK) {
+		atomic_set(&info->cacheDirty, 1);
+		ERROR("write cache flush FAILED: %s\n", strerror(status));
+	}
 	return status;
+}
+
+
+static bool
+mmc_disk_transfers_work(mmc_disk_driver_info* info, const uint8* extCsd,
+	uint8* check)
+{
+	for (int i = 0; i < 3; i++) {
+		memset(check, 0, kExtCsdSize);
+		if (mmc_disk_read_ext_csd(info, check) != B_OK
+			|| !ext_csd_same_device(extCsd, check)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+
+/*!	Puts device and controller back to the legacy timing at the current bus
+	width, after a faster timing did not work.
+*/
+static void
+mmc_disk_back_to_legacy(mmc_disk_driver_info* info, const uint8* extCsd,
+	uint8* check)
+{
+	const uint8 sdrWidth = info->busWidth == 8 ? 2
+		: info->busWidth == 4 ? 1 : 0;
+
+	// The controller first. Until the device is back too, only commands are
+	// exchanged, and the command line works at 25MHz whatever timing the
+	// device is in.
+	info->mmc->set_timing(info->parent, info->parentCookie, info->rca,
+		MMC_TIMING_LEGACY, MMC_TIMING_NO_VERIFY);
+	mmc_disk_switch(info, kExtCsdBusWidth, sdrWidth);
+	mmc_disk_switch(info, kExtCsdHsTiming, 0);
+
+	bool ok = mmc_disk_transfers_work(info, extCsd, check);
+	if (!ok)
+		ERROR("back to the legacy timing, but transfers still fail\n");
+}
+
+
+/*!	HS200: 4 or 8 bit single data rate bus (already set), device switched with
+	HS_TIMING = 2, then the controller at 200MHz, which runs the tuning.
+*/
+static status_t
+mmc_disk_enter_hs200(mmc_disk_driver_info* info)
+{
+	status_t status = mmc_disk_switch(info, kExtCsdHsTiming, 2);
+	if (status != B_OK) {
+		TRACE("HS200: device refused the timing\n");
+		return status;
+	}
+	return info->mmc->set_timing(info->parent, info->parentCookie, info->rca,
+		MMC_TIMING_HS200, MMC_TIMING_SIGNALING_1V8);
+}
+
+
+/*!	HS400, JEDEC 84-B51 section 6.6.2.3: from a tuned HS200 bus, lower the
+	clock to 52MHz, switch the device to high speed, then to the 8 bit dual
+	data rate bus width, then to HS400, and finally the controller to HS400 at
+	200MHz, keeping the HS200 tuning result.
+*/
+static status_t
+mmc_disk_enter_hs400(mmc_disk_driver_info* info)
+{
+	status_t status = mmc_disk_enter_hs200(info);
+	if (status != B_OK)
+		return status;
+
+	status = info->mmc->set_timing(info->parent, info->parentCookie, info->rca,
+		MMC_TIMING_HS_SDR25, MMC_TIMING_SIGNALING_1V8 | MMC_TIMING_KEEP_TUNING
+			| MMC_TIMING_NO_VERIFY);
+	if (status != B_OK)
+		return status;
+
+	status = mmc_disk_switch(info, kExtCsdHsTiming, 1);
+	if (status != B_OK) {
+		TRACE("HS400: device refused high speed timing\n");
+		return status;
+	}
+	status = mmc_disk_switch(info, kExtCsdBusWidth, 6);
+	if (status != B_OK) {
+		TRACE("HS400: device refused the 8 bit DDR bus width\n");
+		return status;
+	}
+	status = mmc_disk_switch(info, kExtCsdHsTiming, 3);
+	if (status != B_OK) {
+		TRACE("HS400: device refused the timing\n");
+		return status;
+	}
+
+	return info->mmc->set_timing(info->parent, info->parentCookie, info->rca,
+		MMC_TIMING_HS400, MMC_TIMING_SIGNALING_1V8 | MMC_TIMING_KEEP_TUNING);
+}
+
+
+/*!	DDR52: high speed timing, then the dual data rate bus width (which needs
+	high speed timing to be set already), then the controller.
+*/
+static status_t
+mmc_disk_enter_ddr52(mmc_disk_driver_info* info, uint32 flags)
+{
+	const uint8 ddrWidth = info->busWidth == 8 ? 6 : 5;
+	status_t status = mmc_disk_switch(info, kExtCsdHsTiming, 1);
+	if (status != B_OK) {
+		TRACE("DDR52: device refused high speed timing\n");
+		return status;
+	}
+	status = mmc_disk_switch(info, kExtCsdBusWidth, ddrWidth);
+	if (status != B_OK) {
+		TRACE("DDR52: device refused the DDR bus width\n");
+		return status;
+	}
+	return info->mmc->set_timing(info->parent, info->parentCookie, info->rca,
+		MMC_TIMING_DDR52, flags);
+}
+
+
+static status_t
+mmc_disk_enter_hs52(mmc_disk_driver_info* info, int timing, uint32 flags)
+{
+	status_t status = mmc_disk_switch(info, kExtCsdHsTiming, 1);
+	if (status != B_OK) {
+		TRACE("HS52: device refused high speed timing\n");
+		return status;
+	}
+	return info->mmc->set_timing(info->parent, info->parentCookie, info->rca,
+		timing, flags);
+}
+
+
+/*!	Tries the bus timings from the fastest down, and keeps the
+	first one with which data transfers still work. Each attempt is checked
+	twice: by the controller (the first blocks of the device compared with the
+	self test reference, using the normal transfer method) and here (EXT_CSD
+	read three times and compared with the copy read at the start). After a
+	failed attempt, device and controller go back to the legacy timing before
+	the next one.
+*/
+static void
+mmc_disk_select_speed(mmc_disk_driver_info* info, const uint8* extCsd)
+{
+	static const struct {
+		int		timing;
+		uint32	flags;
+	} kAttempts[] = {
+		{ MMC_TIMING_HS400, MMC_TIMING_SIGNALING_1V8 },
+		{ MMC_TIMING_HS200, MMC_TIMING_SIGNALING_1V8 },
+		{ MMC_TIMING_DDR52, MMC_TIMING_SIGNALING_1V8 },
+		{ MMC_TIMING_DDR52, 0 },
+		{ MMC_TIMING_HS_SDR25, MMC_TIMING_SIGNALING_1V8 },
+		{ MMC_TIMING_HS, 0 },
+	};
+
+	info->timing = MMC_TIMING_LEGACY;
+
+	if (info->mmc->set_timing == NULL) {
+		TRACE("the bus manager cannot change the timing\n");
+		return;
+	}
+
+	// EXT_CSD DEVICE_TYPE: bit 1 HS 52MHz, bit 2 DDR 52MHz (1.8V/3V),
+	// bit 4 HS200 (1.8V), bit 6 HS400 (1.8V)
+	const uint8 deviceType = extCsd[kExtCsdDeviceType];
+	const bool deviceHs = (deviceType & (1 << 1)) != 0;
+	const bool deviceDdr = (deviceType & (1 << 2)) != 0;
+	const bool deviceHs200 = (deviceType & (1 << 4)) != 0;
+	const bool deviceHs400 = (deviceType & (1 << 6)) != 0;
+	TRACE("device supports:%s%s%s%s, bus width %d\n",
+		deviceHs ? " HS52" : "", deviceDdr ? " DDR52" : "",
+		deviceHs200 ? " HS200" : "", deviceHs400 ? " HS400" : "",
+		info->busWidth);
+
+	uint8* check = (uint8*)malloc(kExtCsdSize);
+	if (check == NULL)
+		return;
+
+	for (size_t i = 0; i < sizeof(kAttempts) / sizeof(kAttempts[0]); i++) {
+		const int timing = kAttempts[i].timing;
+		const uint32 flags = kAttempts[i].flags;
+		const bool signaling18 = (flags & MMC_TIMING_SIGNALING_1V8) != 0;
+
+		bool possible;
+		switch (timing) {
+			case MMC_TIMING_HS400:
+				possible = deviceHs400 && info->busWidth == 8;
+				break;
+			case MMC_TIMING_HS200:
+				possible = deviceHs200 && info->busWidth >= 4;
+				break;
+			case MMC_TIMING_DDR52:
+				possible = deviceDdr && info->busWidth >= 4;
+				break;
+			default:
+				possible = deviceHs;
+				break;
+		}
+		if (!possible || timing > info->maxTiming)
+			continue;
+
+		// Skip what the controller cannot do before touching the device. HS400
+		// also needs HS200 on the way.
+		if (info->mmc->set_timing(info->parent, info->parentCookie, info->rca,
+				timing, MMC_TIMING_QUERY) != B_OK
+			|| (timing == MMC_TIMING_HS400
+				&& info->mmc->set_timing(info->parent, info->parentCookie,
+					info->rca, MMC_TIMING_HS200, MMC_TIMING_QUERY) != B_OK)) {
+			continue;
+		}
+
+		const char* name = mmc_timing_name(timing);
+		const char* variant = signaling18 && timing < MMC_TIMING_HS200
+			? " with 1.8V signaling" : "";
+		TRACE("trying %s%s\n", name, variant);
+
+		status_t status;
+		switch (timing) {
+			case MMC_TIMING_HS400:
+				status = mmc_disk_enter_hs400(info);
+				break;
+			case MMC_TIMING_HS200:
+				status = mmc_disk_enter_hs200(info);
+				break;
+			case MMC_TIMING_DDR52:
+				status = mmc_disk_enter_ddr52(info, flags);
+				break;
+			default:
+				status = mmc_disk_enter_hs52(info, timing, flags);
+				break;
+		}
+
+		if (status == B_OK && mmc_disk_transfers_work(info, extCsd, check)) {
+			info->timing = timing;
+			TRACE("%s%s works\n", name, variant);
+			free(check);
+			return;
+		}
+
+		ERROR("%s%s does not work (%s)\n", name, variant,
+			status != B_OK ? strerror(status) : "EXT_CSD read back differs");
+		mmc_disk_back_to_legacy(info, extCsd, check);
+	}
+
+	TRACE("staying with the legacy timing (25MHz)\n");
+	free(check);
 }
 
 
@@ -436,6 +717,7 @@ mmc_disk_get_emmc_geometry(mmc_disk_driver_info* info, mmc_disk_csd& csd,
 
 	if (error == B_OK) {
 		mmc_disk_select_bus_width(info, extCsd);
+		mmc_disk_select_speed(info, extCsd);
 		mmc_disk_setup_cache(info, extCsd);
 	} else
 		info->busWidth = 1;
@@ -458,7 +740,8 @@ mmc_disk_get_emmc_geometry(mmc_disk_driver_info* info, mmc_disk_csd& csd,
 	geometry->write_once = false;
 
 	TRACE_ALWAYS("%" B_PRIu64 " sectors of %" B_PRIu32 " bytes, %d-bit bus, "
-		"%s\n", sectorCount, kBlockSize, info->busWidth,
+		"%s, %s\n", sectorCount, kBlockSize, info->busWidth,
+		mmc_timing_name(info->timing),
 		info->readOnly ? "read-only" : "writable");
 	return B_OK;
 }
@@ -579,18 +862,24 @@ mmc_disk_init_driver(device_node* node, void** cookie)
 	info->readOnly = false;
 	info->maxBusWidth = 8;
 	info->busWidth = 1;
+	info->maxTiming = MMC_TIMING_HS400;
+	info->timing = MMC_TIMING_LEGACY;
 	info->cacheEnabled = false;
+	info->wantCache = true;
+	info->cacheDirty = 0;
 
 	if (info->isMMC) {
 		// Options in /boot/home/config/settings/kernel/drivers/mmc_disk:
 		//   emmc_write_enable false	read-only (writable by default)
+		//   emmc_write_cache false		don't use the device's write cache
 		//   emmc_bus_width 4			widest bus to try
 		bool writeEnable = true;
 		void* handle = load_driver_settings("mmc_disk");
 		if (handle != NULL) {
 			writeEnable = get_driver_boolean_parameter(handle,
 				"emmc_write_enable", true, true);
-
+			info->wantCache = get_driver_boolean_parameter(handle,
+				"emmc_write_cache", true, true);
 			const char* width = get_driver_parameter(handle, "emmc_bus_width",
 				NULL, NULL);
 			if (width != NULL) {
@@ -601,14 +890,33 @@ mmc_disk_init_driver(device_node* node, void** cookie)
 				else if (strcmp(width, "8") == 0)
 					info->maxBusWidth = 8;
 			}
+			// Fastest bus timing to try: legacy, hs, ddr, hs200 or hs400,
+			// for example
+			//   emmc_speed hs200
+			const char* speed = get_driver_parameter(handle, "emmc_speed",
+				NULL, NULL);
+			if (speed != NULL) {
+				if (strcmp(speed, "legacy") == 0)
+					info->maxTiming = MMC_TIMING_LEGACY;
+				else if (strcmp(speed, "hs") == 0)
+					info->maxTiming = MMC_TIMING_HS_SDR25;
+				else if (strcmp(speed, "ddr") == 0)
+					info->maxTiming = MMC_TIMING_DDR52;
+				else if (strcmp(speed, "hs200") == 0)
+					info->maxTiming = MMC_TIMING_HS200;
+				else if (strcmp(speed, "hs400") == 0)
+					info->maxTiming = MMC_TIMING_HS400;
+			}
 			unload_driver_settings(handle);
 		}
 		info->readOnly = !writeEnable;
 
 		TRACE("eMMC device, RCA %u, %s addressing, %s, bus width up to %d "
-			"bits%s\n", info->rca,
+			"bits, speed up to %s, write cache %s%s\n", info->rca,
 			(info->flags & kIoCommandOffsetAsSectors) != 0 ? "sector" : "byte",
 			info->readOnly ? "READ-ONLY" : "WRITABLE", info->maxBusWidth,
+			mmc_timing_name(info->maxTiming),
+			info->wantCache ? "wanted" : "not wanted",
 			handle != NULL ? "" : " (no settings file)");
 	}
 
@@ -664,6 +972,8 @@ mmc_disk_uninit_driver(void* _cookie)
 {
 	CALLED();
 	mmc_disk_driver_info* info = (mmc_disk_driver_info*)_cookie;
+	if (info->isMMC)
+		mmc_disk_flush_cache(info);
 	delete info->scheduler;
 	delete info->dmaResource;
 	sDeviceManager->put_node(info->parent);
@@ -753,9 +1063,13 @@ mmc_block_open(void* _info, const char* path, int openMode, void** _cookie)
 static status_t
 mmc_block_close(void* cookie)
 {
-	//mmc_disk_handle* handle = (mmc_disk_handle*)cookie;
+	mmc_disk_handle* handle = (mmc_disk_handle*)cookie;
 	CALLED();
 
+	// Programs writing to the raw device (dd, for example) never ask for a
+	// flush: fsync() on a device does not reach the driver
+	if (handle->info->isMMC)
+		mmc_disk_flush_cache(handle->info);
 	return B_OK;
 }
 

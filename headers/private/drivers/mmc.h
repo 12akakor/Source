@@ -17,6 +17,49 @@
 
 struct IOOperation;
 
+
+// Bus timings, from slowest to fastest. The clock follows the timing:
+// 25MHz for the legacy timing, 52MHz (or the closest lower value) otherwise.
+typedef enum mmc_bus_timing {
+	MMC_TIMING_LEGACY = 0,
+		// Default after initialization, single data rate
+	MMC_TIMING_HS,
+		// High speed, single data rate: the controller's "high speed enable"
+		// bit
+	MMC_TIMING_HS_SDR25,
+		// Same, but also selecting the UHS SDR25 mode, which some controllers
+		// (Intel) need for high speed
+	MMC_TIMING_DDR52,
+		// High speed, dual data rate (UHS DDR50 mode). eMMC only, needs a 4
+		// or 8 bit bus.
+	MMC_TIMING_HS200,
+		// 200MHz single data rate (UHS SDR104 mode), eMMC only, 1.8V
+		// signaling, 4 or 8 bit bus. The controller runs the tuning procedure.
+	MMC_TIMING_HS400,
+		// 200MHz dual data rate, eMMC only, 8 bit bus. Only reachable from a
+		// tuned HS200 bus (the tuning is kept). Not in the SD host controller
+		// specification: uses the Intel UHS mode 5.
+} mmc_bus_timing;
+
+
+static inline const char*
+mmc_timing_name(int timing)
+{
+	static const char* const kNames[] = { "legacy", "HS52", "HS52 (SDR25)",
+		"DDR52", "HS200", "HS400" };
+	if (timing < MMC_TIMING_LEGACY || timing > MMC_TIMING_HS400)
+		return "?";
+	return kNames[timing];
+}
+
+
+// Flags for set_timing()
+#define MMC_TIMING_SIGNALING_1V8	0x01	// set the 1.8V signaling enable bit
+#define MMC_TIMING_KEEP_TUNING		0x02	// don't reset the tuning result
+#define MMC_TIMING_NO_VERIFY		0x04	// don't check transfers afterwards
+#define MMC_TIMING_QUERY			0x08	// only check that the controller
+											// supports the timing, change nothing
+
 typedef enum card_type {
 	CARD_TYPE_UNKNOWN,
 	CARD_TYPE_MMC,
@@ -60,6 +103,7 @@ enum SD_COMMANDS {
 	// Block oriented read and write commands, class 2
 	SD_READ_SINGLE_BLOCK = 17,
 	SD_READ_MULTIPLE_BLOCKS = 18,
+	MMC_SEND_TUNING_BLOCK = 21, // HS200 tuning, reads a known pattern
 	SET_BLOCK_COUNT = 23,
 		// Mandatory for eMMC, optional for SD (see CMD_SUPPORT in the SCR)
 
@@ -113,6 +157,13 @@ typedef struct mmc_bus_interface {
 		// Execute a command that reads a single small block of data (at most
 		// 512 bytes) into a kernel buffer. Used for registers that are read
 		// through the data lines, such as the eMMC EXT_CSD.
+	status_t (*set_timing)(void* controller, int timing, uint32_t flags);
+		// Configure the controller for an mmc_bus_timing, and the matching
+		// clock (MMC_TIMING_* flags above). The device must already have been
+		// switched to that timing. For HS200 this includes tuning. Returns an
+		// error if the controller does not support the timing, or if tuning or
+		// data transfers fail with it (the timing is then left as requested,
+		// the caller decides what to do).
 } mmc_bus_interface;
 
 
@@ -135,6 +186,9 @@ typedef struct mmc_device_interface {
 		uint8_t command, uint32_t argument, void* buffer, size_t length);
 		// Read a single small block of data (at most 512 bytes) into a
 		// kernel buffer, see mmc_bus_interface::read_data.
+	status_t (*set_timing)(device_node* controller, void* cookie, uint16_t rca,
+		int timing, uint32_t flags);
+		// See mmc_bus_interface::set_timing
 } mmc_device_interface;
 
 
