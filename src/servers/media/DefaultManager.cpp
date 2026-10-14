@@ -15,6 +15,7 @@
 #include <Path.h>
 #include <TimeSource.h>
 #include <string.h>
+#include <syslog.h>
 
 #include "MediaDebug.h"
 #include "DormantNodeManager.h"
@@ -63,6 +64,8 @@ DefaultManager::DefaultManager()
 	fRoster(NULL)
 {
 	strcpy(fPhysicalAudioOutInputName, "default");
+	for (int32 i = 0; i < 4; i++)
+		fUsingFallback[i] = false;
 	fBeginHeader[0] = 0xab00150b;
 	fBeginHeader[1] = 0x18723462;
 	fBeginHeader[2] = 0x00000002;
@@ -162,6 +165,17 @@ DefaultManager::SaveState(NodeManager *node_manager)
 	for (uint32 i = 0; i < sizeof(default_types) / sizeof(default_types[0]);
 		i++) {
 
+		// A fallback must not replace the saved preference, or one
+		// boot without the device forgets it for good -- and neither must
+		// having found no node at all, which this used to skip. Write back
+		// what was loaded instead.
+		BMessage* saved = _SavedDefault(default_types[i]);
+		if (saved != NULL && (media_node_ids[i] == -1
+				|| fUsingFallback[_TypeIndex(default_types[i])])) {
+			list.AddItem(new BMessage(*saved));
+			continue;
+		}
+
 		// we call the node manager to have more infos about nodes
 		dormant_node_info info;
 		media_node node;
@@ -230,14 +244,19 @@ DefaultManager::Set(media_node_id node_id, const char *input_name,
 	TRACE("DefaultManager::Set type : %i, node : %li, input : %li\n", type,
 		node_id, input_id);
 	switch (type) {
+		// An explicit choice is the new preference, so it is saved
+		// as such even if the previous default was only a fallback.
 		case VIDEO_INPUT:
 			fPhysicalVideoIn = node_id;
+			fUsingFallback[_TypeIndex(kMsgTypeVideoIn)] = false;
 			return B_OK;
 		case AUDIO_INPUT:
 			fPhysicalAudioIn = node_id;
+			fUsingFallback[_TypeIndex(kMsgTypeAudioIn)] = false;
 			return B_OK;
 		case VIDEO_OUTPUT:
 			fPhysicalVideoOut = node_id;
+			fUsingFallback[_TypeIndex(kMsgTypeVideoOut)] = false;
 			return B_OK;
 		case AUDIO_MIXER:
 			return B_ERROR;
@@ -246,6 +265,7 @@ DefaultManager::Set(media_node_id node_id, const char *input_name,
 				return B_OK;
 
 			fPhysicalAudioOut = node_id;
+			fUsingFallback[_TypeIndex(kMsgTypeAudioOut)] = false;
 			fPhysicalAudioOutInputID = input_id;
 			strcpy(fPhysicalAudioOutInputName,
 				input_name ? input_name : "<null>");
@@ -441,31 +461,32 @@ DefaultManager::_FindPhysical(volatile media_node_id *id, uint32 default_type,
 	media_format format;
 	int32 count;
 	status_t rv;
-	BMessage *msg = NULL;
 	BPath msgPath;
 	dormant_node_info msgDninfo;
-	int32 input_id;
+	int32 input_id = 0;
 	bool isAudio = (type == B_MEDIA_RAW_AUDIO)
 		|| (type == B_MEDIA_ENCODED_AUDIO);
 
-	for (int32 i = 0; i < fMsgList.CountItems(); i++) {
-		msg = (BMessage *)fMsgList.ItemAt(i);
-		int32 msgType;
-		if (msg->FindInt32(kDefaultManagerType, &msgType) == B_OK
-			&& ((uint32)msgType == default_type)) {
-			const char *name = NULL;
-			const char *path = NULL;
-			msg->FindInt32(kDefaultManagerAddon, &msgDninfo.addon);
-			msg->FindInt32(kDefaultManagerFlavorId, &msgDninfo.flavor_id);
-			msg->FindInt32(kDefaultManagerInput, &input_id);
-			msg->FindString(kDefaultManagerFlavorName, &name);
-			msg->FindString(kDefaultManagerPath, &path);
-			if (name)
-				strcpy(msgDninfo.name, name);
-			if (path)
-				msgPath = BPath(path);
-			break;
-		}
+	// This used to assign `msg` on every iteration of a search loop and
+	// broke out only on a type match, so with no entry saved for THIS type it
+	// was left pointing at another type's entry, with msgDninfo never filled
+	// in -- and the uninitialised name then matched no device at all.
+	BMessage *msg = _SavedDefault(default_type);
+	if (msg != NULL) {
+		const char *name = NULL;
+		const char *path = NULL;
+		msgDninfo.addon = -1;
+		msgDninfo.flavor_id = -1;
+		msgDninfo.name[0] = '\0';
+		msg->FindInt32(kDefaultManagerAddon, &msgDninfo.addon);
+		msg->FindInt32(kDefaultManagerFlavorId, &msgDninfo.flavor_id);
+		msg->FindInt32(kDefaultManagerInput, &input_id);
+		msg->FindString(kDefaultManagerFlavorName, &name);
+		msg->FindString(kDefaultManagerPath, &path);
+		if (name)
+			strlcpy(msgDninfo.name, name, sizeof(msgDninfo.name));
+		if (path)
+			msgPath = BPath(path);
 	}
 
 	format.type = type;
@@ -481,6 +502,24 @@ DefaultManager::_FindPhysical(volatile media_node_id *id, uint32 default_type,
 	}
 	for (int i = 0; i < count; i++)
 		TRACE("info[%d].name %s\n", i, info[i].name);
+
+	// This used to restore the saved default only from a node matching its
+	// flavor id AND name AND add-on path, and with a saved default present
+	// it accepted nothing else -- so a miss left NO default at
+	// all, not even the built-in card. A flavor id is just the device's index
+	// in its add-on's list, which multi_audio fills in discovery order: one USB
+	// device absent at boot, or enumerated in another order, renumbers the
+	// rest. Measured on the Beta 6 bench: the RMX came up as flavor 1 with the
+	// default saved as flavor 2, and the machine booted with no audio output.
+	//
+	// So: an exact match first; else the same name from the same add-on (the
+	// name carries the instance suffix -- "#2" -- that tells identical
+	// devices apart); else the first real device, as when nothing is saved,
+	// marked as a fallback so SaveState() keeps the preference.
+	media_node_id exactMatch = -1;
+	media_node_id nameMatch = -1;
+	int32 nameMatchIndex = -1;
+	int32 firstReal = -1;
 
 	for (int i = 0; i < count; i++) {
 		if (isAudio) {
@@ -506,33 +545,106 @@ DefaultManager::_FindPhysical(volatile media_node_id *id, uint32 default_type,
 					continue;
 			}
 		}
-		if (msg) {	// we have a default info msg
-			dormant_node_info dninfo;
-			if (fRoster->GetDormantNodeFor(info[i].node,
-					&dninfo) != B_OK) {
-				ERROR("Couldn't GetDormantNodeFor\n");
-				continue;
-			}
-			if (dninfo.flavor_id != msgDninfo.flavor_id
-				|| strcmp(dninfo.name, msgDninfo.name) != 0) {
-				ERROR("Doesn't match flavor or name\n");
-				continue;
-			}
-			BPath path;
-			if (gDormantNodeManager->FindAddOnPath(&path, dninfo.addon) != B_OK
-				|| path != msgPath) {
-				ERROR("Doesn't match : path\n");
-				continue;
-			}
+		if (firstReal < 0)
+			firstReal = i;
+
+		if (msg == NULL) {
+			// Nothing saved: the first real device, as before.
+			break;
 		}
-		TRACE("Default physical %s %s \"%s\" created!\n",
-			isAudio ? "audio" : "video", isInput ? "input" : "output",
-			info[i].name);
-		*id = info[i].node.node;
-		if (msg && isAudio && !isInput)
+
+		dormant_node_info dninfo;
+		if (fRoster->GetDormantNodeFor(info[i].node, &dninfo) != B_OK) {
+			ERROR("Couldn't GetDormantNodeFor\n");
+			continue;
+		}
+		if (strcmp(dninfo.name, msgDninfo.name) != 0) {
+			ERROR("Doesn't match name\n");
+			continue;
+		}
+		BPath path;
+		if (gDormantNodeManager->FindAddOnPath(&path, dninfo.addon) != B_OK
+			|| path != msgPath) {
+			ERROR("Doesn't match : path\n");
+			continue;
+		}
+		if (dninfo.flavor_id == msgDninfo.flavor_id) {
+			exactMatch = info[i].node.node;
+			break;
+		}
+		if (nameMatch < 0) {
+			nameMatch = info[i].node.node;
+			nameMatchIndex = i;
+		}
+	}
+
+	const int32 typeIndex = _TypeIndex(default_type);
+
+	if (msg != NULL && (exactMatch >= 0 || nameMatch >= 0)) {
+		*id = exactMatch >= 0 ? exactMatch : nameMatch;
+		if (exactMatch < 0) {
+			syslog(LOG_NOTICE, "media_server: default %s %s \"%s\" restored by"
+				" name; its flavor id moved from %" B_PRId32 "\n",
+				isAudio ? "audio" : "video", isInput ? "input" : "output",
+				info[nameMatchIndex].name, msgDninfo.flavor_id);
+		}
+		if (isAudio && !isInput)
 			fPhysicalAudioOutInputID = input_id;
+		fUsingFallback[typeIndex] = false;
+		TRACE("Default physical %s %s restored!\n",
+			isAudio ? "audio" : "video", isInput ? "input" : "output");
 		return;
 	}
+
+	if (firstReal < 0) {
+		// Only "None" (if anything) was found; *id already says so.
+		return;
+	}
+
+	*id = info[firstReal].node.node;
+	if (msg != NULL) {
+		// The saved device is not here. Use the first real one for this
+		// session, but keep the preference: the next start with the device
+		// present restores it. (Switching back when it is plugged in later
+		// needs the mixer rewired live, which this server cannot do.)
+		fUsingFallback[typeIndex] = true;
+		syslog(LOG_NOTICE, "media_server: default %s %s \"%s\" not present;"
+			" using \"%s\" until it is\n", isAudio ? "audio" : "video",
+			isInput ? "input" : "output", msgDninfo.name,
+			info[firstReal].name);
+	} else
+		fUsingFallback[typeIndex] = false;
+	TRACE("Default physical %s %s \"%s\" created!\n",
+		isAudio ? "audio" : "video", isInput ? "input" : "output",
+		info[firstReal].name);
+}
+
+
+/*!	Index into fUsingFallback[] for a saved-settings type. */
+int32
+DefaultManager::_TypeIndex(uint32 defaultType)
+{
+	switch (defaultType) {
+		case kMsgTypeVideoIn:	return 0;
+		case kMsgTypeVideoOut:	return 1;
+		case kMsgTypeAudioIn:	return 2;
+		default:				return 3;	// kMsgTypeAudioOut
+	}
+}
+
+
+/*!	The saved default of \a defaultType as loaded at start, or NULL. */
+BMessage*
+DefaultManager::_SavedDefault(uint32 defaultType) const
+{
+	for (int32 i = 0; i < fMsgList.CountItems(); i++) {
+		BMessage* msg = (BMessage*)fMsgList.ItemAt(i);
+		int32 msgType;
+		if (msg->FindInt32(kDefaultManagerType, &msgType) == B_OK
+			&& (uint32)msgType == defaultType)
+			return msg;
+	}
+	return NULL;
 }
 
 

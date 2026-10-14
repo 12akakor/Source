@@ -58,6 +58,10 @@ private:
 
 			status_t			_ConnectMixerToOutput();
 
+			// See _FindPhysical().
+			static	int32		_TypeIndex(uint32 defaultType);
+			BMessage*			_SavedDefault(uint32 defaultType) const;
+
 private:
 			volatile bool 		fMixerConnected;
 			volatile media_node_id fPhysicalVideoOut;
@@ -74,6 +78,11 @@ private:
 			media_input 		fPhysicalAudioOutFromMixer;
 
 			BList				fMsgList;
+
+			// Per default type (_TypeIndex()), whether the current
+			// default is only standing in because the saved one was absent at
+			// boot. SaveState() then keeps the saved preference.
+			bool				fUsingFallback[4];
 
 			uint32				fBeginHeader[3];
 			uint32				fEndHeader[3];
