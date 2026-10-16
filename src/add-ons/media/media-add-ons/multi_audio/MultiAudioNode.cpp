@@ -1824,12 +1824,42 @@ MultiAudioNode::_OutputThread()
 			system_time());
 	}
 
+	// The exchange result is this thread's only way of learning that the
+	// device is gone. If it is ignored, the node is only torn down when the
+	// device's /dev entry disappears, which forces a driver to unpublish a
+	// device that is still open -- and devfs then deletes the device object
+	// out from under our fd. Stopping on the error lets the node close the
+	// device first, so the driver can unpublish it once nothing holds it.
+	int32 consecutiveErrors = 0;
+	const int32 kMaxConsecutiveErrors = 100;
+		// Tolerate transient stalls, but never spin forever on a dead device
+		// (the same shape as usb_midi's consecutive-error cap).
+
 	while (atomic_get(&fQuitThread) == 0) {
 		BAutolock locker(fBufferLock);
 			// make sure the buffers don't change while we're playing with them
 
 		// send buffer
-		fDevice->BufferExchange(&bufferInfo);
+		status_t exchangeStatus = fDevice->BufferExchange(&bufferInfo);
+
+		if (exchangeStatus == B_CANCELED || exchangeStatus == B_DEV_NOT_READY) {
+			// Definitive: the driver is telling us the device is removed.
+			fprintf(stderr, "multi_audio: device gone (%s), stopping the "
+				"output thread\n", strerror(exchangeStatus));
+			break;
+		}
+		if (exchangeStatus != B_OK) {
+			// Transient (a completion stall shows up as B_TIMED_OUT). Do not
+			// touch bufferInfo -- it holds nothing valid for this round.
+			if (++consecutiveErrors >= kMaxConsecutiveErrors) {
+				fprintf(stderr, "multi_audio: %" B_PRId32 " consecutive "
+					"exchange failures (%s), stopping the output thread\n",
+					consecutiveErrors, strerror(exchangeStatus));
+				break;
+			}
+			continue;
+		}
+		consecutiveErrors = 0;
 
 		//PRINT(("MultiAudioNode::RunThread: buffer exchanged\n"));
 		//PRINT(("MultiAudioNode::RunThread: played_real_time: %lld\n", bufferInfo.played_real_time));
