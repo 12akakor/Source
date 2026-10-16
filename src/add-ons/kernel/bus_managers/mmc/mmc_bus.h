@@ -182,6 +182,8 @@ public:
 				status_t		ReadData(uint16_t rca, uint8_t command,
 									uint32_t argument, void* buffer,
 									size_t length);
+				status_t		SetTiming(uint16_t rca, int timing,
+									uint32_t flags);
 
 				void			SetClock(int frequency);
 				void			SetBusWidth(int width);
@@ -189,10 +191,28 @@ public:
 
 				void			AcquireBus() { acquire_sem(fLockSemaphore); }
 				void			ReleaseBus() { release_sem(fLockSemaphore); }
+				void			RegisterInitialDevices();
+
 private:
+				// Identity of a card found by a scan, to publish its node
+				struct card_info {
+					uint32_t	vendor;
+					char		name[7];
+					uint32_t	serial;
+					uint16_t	revision;
+					uint8_t		month;
+					uint16_t	year;
+					uint16_t	rca;
+					uint8_t		type;
+				};
+		static	const int32		kMaxPendingCards = 4;
+
 				status_t		_ActivateDevice(uint16_t rca);
 				void			_AcquireScanSemaphore();
 				void			_TerminateBus();
+				void			_PublishCard(const card_info& card);
+				void			_RegisterCard(const card_info& card);
+				void			_InitialScanDone();
 		static	status_t		_WorkerThread(void*);
 
 private:
@@ -204,6 +224,18 @@ private:
 		thread_id				fWorkerThread;
 		sem_id					fScanSemaphore;
 		sem_id					fLockSemaphore;
+
+		// First scan, done while the bus node is being registered, so that a
+		// boot volume on the device is found (see RegisterInitialDevices())
+		sem_id					fInitialScanDone;
+		bool					fInitialScanRequested;
+		bool					fInitialScanSignaled;
+		bool					fInitialScanWaited;
+		bool					fDeferRegistration;
+		mutex					fRegistrationLock;
+		card_info				fPendingCards[kMaxPendingCards];
+		int32					fPendingCount;
+
 		uint16					fActiveDevice;
 		card_type				fCardType;
 		// FIXME card type shall be extended to map card type to RCA.

@@ -80,6 +80,7 @@ class SdhciBus {
 			void				TerminateBus();
 			status_t			ReadData(uint8_t command, uint32_t argument,
 									void* buffer, size_t length);
+			status_t			SetTiming(int timing, uint32 flags);
 
 	private:
 			bool				PowerOn();
@@ -113,6 +114,8 @@ class SdhciBus {
 			void				_LogCardStatus(const char* when,
 									uint32 status);
 			status_t			_SelectTransferMode();
+			status_t			_VerifyTransfers(const char* what);
+			status_t			_ExecuteTuning();
 
 	private:
 			struct registers*	fRegisters;
@@ -137,6 +140,9 @@ class SdhciBus {
 			bool				fTransferModeSelected;
 			int					fDataMode;
 			int					fStopMode;
+			uint8*				fReference;
+				// First two blocks of the device as read by the self test,
+				// to check transfers after a bus timing change
 
 			// Transfer mode used by the next data command sent through
 			// ExecuteCommand(), set by _SendDataCommand()
@@ -408,6 +414,9 @@ class Capabilities
 		bool TypeASupport() { return (fBits >> 36) & 1; }
 		bool DDR50Support() { return (fBits >> 34) & 1; }
 		bool SDR104Support() { return (fBits >> 33) & 1; }
+		bool IntelHS400Support() { return (fBits >> 63) & 1; }
+			// Not in the specification: Intel controllers use this reserved
+			// bit to say they can do eMMC HS400
 		bool SDR50Support() { return (fBits >> 32) & 1; }
 		uint8_t SlotType() { return (fBits >> 30) & 3; }
 		bool AsynchronousInterrupts() { return (fBits >> 29) & 1; }
@@ -457,10 +466,19 @@ class HostControl {
 			value = (value & ~kDataTransferWidthMask) | width;
 		}
 
+		void SetHighSpeed(bool enable)
+		{
+			if (enable)
+				value |= kHighSpeed;
+			else
+				value &= ~kHighSpeed;
+		}
+
 		// TODO add other bits for LED control, etc.
 
 		uint8 Bits() { return value; }
 
+		static const uint8_t kHighSpeed = 1 << 2;
 		static const uint8_t kDmaMask = 3 << 3;
 		static const uint8_t kSdma = 0 << 3;
 		static const uint8_t kAdma32 = 2 << 3;
@@ -632,6 +650,7 @@ void set_card_type(void* controller, card_type type);
 void terminate_bus(void* controller);
 status_t read_data(void* controller, uint8_t command, uint32_t argument,
 	void* buffer, size_t length);
+status_t set_timing(void* controller, int timing, uint32_t flags);
 
 extern mmc_bus_interface gSDHCIACPIDeviceModule;
 extern mmc_bus_interface gSDHCIPCIDeviceModule;

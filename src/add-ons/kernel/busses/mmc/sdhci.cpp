@@ -71,27 +71,37 @@ SdhciBus::SdhciBus(struct registers* registers, uint8_t irq, bool poll)
 	fTransferModeSelected(false),
 	fDataMode(kDataModePio),
 	fStopMode(kStopModeSingle),
+	fReference(NULL),
 	fUseDataTransferMode(false),
 	fDataTransferMode(0),
 	fSelectedRca(0)
 {
-	if (irq == 0 || irq == 0xff) {
-		ERROR("IRQ not assigned\n");
-		fStatus = B_BAD_DATA;
-		return;
+	const bool haveIrq = irq != 0 && irq != 0xff;
+	if (!haveIrq) {
+		// The interrupt routing gave this controller no interrupt line. Seen
+		// on the Surface Go 2 when booting from its eMMC (but not when booting
+		// from USB). Failing here left the system without its boot volume.
+		// Poll the status register instead: slower to react, but it works.
+		TRACE_ALWAYS("no interrupt line assigned (%u), polling the controller "
+			"instead\n", irq);
+		fIrq = 0;
+		poll = true;
 	}
 
 	fInterruptNotifier.Init(this, "SDHCI interrupts");
 
 	DisableInterrupts();
 
-	fStatus = install_io_interrupt_handler(fIrq,
-		sdhci_generic_interrupt, this, 0);
+	if (haveIrq) {
+		fStatus = install_io_interrupt_handler(fIrq,
+			sdhci_generic_interrupt, this, 0);
 
-	if (fStatus != B_OK) {
-		ERROR("can't install interrupt handler\n");
-		return;
-	}
+		if (fStatus != B_OK) {
+			ERROR("can't install interrupt handler\n");
+			return;
+		}
+	} else
+		fStatus = B_OK;
 
 	// Memory for DMA: page 0 holds the ADMA2 descriptor table, page 1 is a
 	// bounce buffer used by the transfer self test and by ReadData(). It has
@@ -214,6 +224,7 @@ SdhciBus::~SdhciBus()
 	if (fDmaArea >= 0)
 		delete_area(fDmaArea);
 
+	free(fReference);
 }
 
 
@@ -339,6 +350,7 @@ SdhciBus::ExecuteCommand(uint8_t command, uint32_t argument, uint32_t* response)
 		case SD_READ_MULTIPLE_BLOCKS:
 		case SD_WRITE_SINGLE_BLOCK:
 		case SD_WRITE_MULTIPLE_BLOCKS:
+		case MMC_SEND_TUNING_BLOCK:
 			if (!fUseDataTransferMode) {
 				ERROR("Data command %d sent outside of the data transfer code\n",
 					command);
@@ -470,7 +482,13 @@ SdhciBus::ExecuteCommand(uint8_t command, uint32_t argument, uint32_t* response)
 		// signal on DAT0 to end. This used to wait forever, which hung the
 		// whole bus if the card never released the line.
 		TRACE("Waiting for data line...\n");
-		if (_WaitDataLineIdle(2000000) != B_OK) {
+		// An eMMC switch command can be a cache flush, which may keep the
+		// device busy much longer than the others: allow 30s, as Linux does.
+		// The caller holds the bus until then, so nothing else can be sent
+		// to the busy device.
+		const bigtime_t busyTimeout
+			= _IsMMC() && command == MMC_SWITCH ? 30000000 : 2000000;
+		if (_WaitDataLineIdle(busyTimeout) != B_OK) {
 			ERROR("busy signal after command %d did not end (state %08"
 				B_PRIx32 "), resetting the data line\n", command,
 				fRegisters->present_state.Bits());
@@ -1067,13 +1085,14 @@ SdhciBus::_SelectTransferMode()
 	const uint32 step = _UsesSectorAddressing() ? 1 : kBlockSize;
 
 	TRACE_ALWAYS("controller: spec %d, SDMA %s, ADMA2 %s, high speed %s, DDR50 %s, "
-		"SDR104/HS200 %s, base clock %u MHz; card "
+		"SDR104/HS200 %s, HS400 (Intel bit 63) %s, base clock %u MHz; card "
 		"type %d (%s addressing), RCA %u\n",
 		fRegisters->host_controller_version.specVersion,
 		canSdma ? "yes" : "no", canAdma ? "yes" : "no",
 		fRegisters->capabilities.HighSpeed() ? "yes" : "no",
 		fRegisters->capabilities.DDR50Support() ? "yes" : "no",
 		fRegisters->capabilities.SDR104Support() ? "yes" : "no",
+		fRegisters->capabilities.IntelHS400Support() ? "yes" : "no",
 		fRegisters->capabilities.BaseClockFrequency(), fCardType,
 		step == 1 ? "sector" : "byte", fSelectedRca);
 
@@ -1163,7 +1182,12 @@ SdhciBus::_SelectTransferMode()
 		}
 	}
 
-	free(reference);
+	// Keep the reference to check transfers after a bus timing change
+	if (haveReference) {
+		free(fReference);
+		fReference = reference;
+	} else
+		free(reference);
 
 	if (chosenData >= 0) {
 		fDataMode = chosenData;
@@ -1179,6 +1203,257 @@ SdhciBus::_SelectTransferMode()
 	TRACE_ALWAYS("data transfers: %s, %s\n", kDataModeNames[fDataMode],
 		kStopModeNames[fStopMode]);
 	return B_OK;
+}
+
+
+/*!	Reads the first two blocks again with the selected transfer method, and
+	compares them with what the self test read at the initial bus settings.
+*/
+status_t
+SdhciBus::_VerifyTransfers(const char* what)
+{
+	if (fReference == NULL) {
+		TRACE("%s: no reference data, transfers not verified\n", what);
+		return B_OK;
+	}
+
+	const uint32 step = _UsesSectorAddressing() ? 1 : kBlockSize;
+	const size_t length = 2 * kBlockSize;
+	for (int round = 0; round < 4; round++) {
+		memset(fBounceBuffer, 0x5a, length);
+		status_t status = _TransferBlocks(false, 0, step, 2, fDataMode,
+			fStopMode, fBouncePhysical,
+			fDataMode == kDataModePio ? fBounceBuffer : NULL, kSelfTestTimeout);
+		if (status != B_OK) {
+			TRACE("%s: verification read %d failed: %s\n", what, round,
+				strerror(status));
+			return status;
+		}
+		if (memcmp(fBounceBuffer, fReference, length) != 0) {
+			TRACE("%s: verification read %d returned different data\n",
+				what, round);
+			return B_IO_ERROR;
+		}
+	}
+	return B_OK;
+}
+
+
+/*!	HS200 tuning, SD Host Controller Simplified Specification 3.00, section
+	3.13.2: with "execute tuning" set, the controller reads the tuning block
+	(CMD21) as many times as it needs to find a good sampling point, then
+	clears the bit. "Sampling clock select" then says whether it succeeded.
+	The tuning block data is consumed by the controller, not read here.
+*/
+status_t
+SdhciBus::_ExecuteTuning()
+{
+	const uint16 kExecuteTuning = 1 << 6;
+	const uint16 kSamplingClockSelect = 1 << 7;
+	const uint32 blockSize = (fRegisters->host_control.Bits()
+		& HostControl::kDataTransfer8Bit) != 0 ? 128 : 64;
+
+	fRegisters->host_control_2 = (fRegisters->host_control_2
+		& ~(uint16)(kExecuteTuning | kSamplingClockSelect)) | kExecuteTuning;
+
+	bool success = false;
+	int round;
+	const char* reason = "the controller did not finish within 40 blocks";
+	for (round = 0; round < 40; round++) {
+		// Only the command line must be free before each block. The data line
+		// stays "busy" during tuning: the controller keeps the tuning block
+		// in its buffer, and the driver must not read it, so the read
+		// transfer never ends from the controller's point of view. Other
+		// SDHCI drivers ignore the data line here as well.
+		bigtime_t idleDeadline = system_time() + 10000;
+		while (fRegisters->present_state.CommandInhibit()
+			&& system_time() < idleDeadline) {
+			snooze(10);
+		}
+		if (fRegisters->present_state.CommandInhibit()) {
+			reason = "command line still busy";
+			break;
+		}
+
+		fRegisters->interrupt_status = kClearableStatusBits;
+		fRegisters->block_size.ConfigureTransfer(blockSize, 0);
+		fRegisters->block_count = 1;
+		fRegisters->argument = 0;
+		fRegisters->transfer_mode = (uint16)TransferMode::kRead;
+
+		// While tuning, the controller does not report "command complete":
+		// the buffer read ready status is the only sign that the device
+		// answered. So the command is sent directly here, and not through
+		// ExecuteCommand(), which waits for command complete (that is what
+		// made the first version of this give up after 5s, although the
+		// tuning block had arrived).
+		fRegisters->command.SendCommand(MMC_SEND_TUNING_BLOCK,
+			Command::kR1Type | Command::kDataPresent);
+
+		// Wait for the tuning block (buffer read ready), 50ms at most
+		bigtime_t deadline = system_time() + 50000;
+		bool received = false;
+		while (system_time() < deadline) {
+			if ((fRegisters->interrupt_status & SDHCI_INT_BUF_READ_READY)
+					!= 0) {
+				received = true;
+				break;
+			}
+			snooze(10);
+		}
+		if (!received) {
+			reason = (fRegisters->interrupt_status
+					& SDHCI_INT_COMMAND_TIMEOUT) != 0
+				? "no response to CMD21" : "no tuning block received";
+			break;
+		}
+		fRegisters->interrupt_status = SDHCI_INT_BUF_READ_READY;
+
+		uint16 hostControl2 = fRegisters->host_control_2;
+		if ((hostControl2 & kExecuteTuning) == 0) {
+			success = (hostControl2 & kSamplingClockSelect) != 0;
+			reason = success ? "" : "the controller found no good sampling point";
+			break;
+		}
+	}
+
+	if (!success) {
+		// Back to the default sampling point, and make sure the device is
+		// not left sending a tuning block
+		fRegisters->host_control_2 = fRegisters->host_control_2
+			& ~(uint16)(kExecuteTuning | kSamplingClockSelect);
+		fRegisters->software_reset.ResetCommandAndDataLines();
+		fRegisters->interrupt_status = kClearableStatusBits;
+		uint32 response = 0;
+		ExecuteCommand(SD_STOP_TRANSMISSION, 0, &response);
+		fRegisters->interrupt_status = kClearableStatusBits;
+		ERROR("tuning FAILED after %d blocks of %" B_PRIu32 " bytes: %s\n",
+			round + 1, blockSize, reason);
+		return B_ERROR;
+	}
+
+	// Drop the last tuning block left in the buffer. A data line reset does
+	// not touch Host Control 2, so the tuning result stays.
+	if (fRegisters->present_state.DataInhibit())
+		fRegisters->software_reset.ResetDataLine();
+	fRegisters->interrupt_status = kClearableStatusBits;
+
+	TRACE("tuning done after %d blocks of %" B_PRIu32 " bytes (host "
+		"control 2 %04x)\n", round + 1, blockSize, fRegisters->host_control_2);
+	return B_OK;
+}
+
+
+/*!	Configures the controller side of a bus timing (see
+	mmc_bus_timing in mmc.h), tunes for HS200, and checks that data
+	transfers still work.
+*/
+status_t
+SdhciBus::SetTiming(int timing, uint32 flags)
+{
+	if (timing < MMC_TIMING_LEGACY || timing > MMC_TIMING_HS400)
+		return B_BAD_VALUE;
+	const char* name = mmc_timing_name(timing);
+
+	int kilohertz = 52000;
+	bool highSpeed = true;
+	uint16 uhsMode = 0;		// Host Control 2 bits 2-0
+	switch (timing) {
+		case MMC_TIMING_LEGACY:
+			kilohertz = 25000;
+			highSpeed = false;
+			break;
+		case MMC_TIMING_HS:
+			break;
+		case MMC_TIMING_HS_SDR25:
+			uhsMode = 1;
+			break;
+		case MMC_TIMING_DDR52:
+			uhsMode = 4;
+			break;
+		case MMC_TIMING_HS200:
+			// SDHCI has no HS200 mode: it is the SD SDR104 mode electrically
+			uhsMode = 3;
+			kilohertz = 200000;
+			flags |= MMC_TIMING_SIGNALING_1V8;
+			break;
+		case MMC_TIMING_HS400:
+			uhsMode = 5;
+			kilohertz = 200000;
+			flags |= MMC_TIMING_SIGNALING_1V8 | MMC_TIMING_KEEP_TUNING;
+			break;
+	}
+
+	const char* missing = NULL;
+	if (highSpeed && !fRegisters->capabilities.HighSpeed())
+		missing = "high speed";
+	else if (timing == MMC_TIMING_DDR52
+		&& !fRegisters->capabilities.DDR50Support())
+		missing = "DDR50";
+	else if (timing == MMC_TIMING_HS200
+		&& !fRegisters->capabilities.SDR104Support())
+		missing = "SDR104 (needed for HS200)";
+	else if (timing == MMC_TIMING_HS400
+		&& !fRegisters->capabilities.IntelHS400Support())
+		missing = "HS400 (capability bit 63)";
+	if (missing != NULL) {
+		TRACE("timing %s: controller has no %s support\n", name, missing);
+		return B_NOT_SUPPORTED;
+	}
+	if ((flags & MMC_TIMING_QUERY) != 0)
+		return B_OK;
+
+	// Stop the clock to the card while the timing changes, as other SDHCI
+	// drivers do
+	fRegisters->clock_control.DisableSD();
+
+	uint16 hostControl2 = fRegisters->host_control_2;
+	if ((hostControl2 & (1 << 15)) != 0)
+		TRACE("disabling preset values, the clock is set explicitly\n");
+	// The 1.8V signaling bit is cleared unless this timing asks for it. That
+	// is not a change from what the firmware left: the constructor's reset
+	// for all clears this register, so the device is identified and the
+	// legacy timing first runs with the bit clear, and going back to legacy
+	// returns to that state.
+	uint16 clear = (1 << 15) | (1 << 3) | 0x7;
+	if ((flags & MMC_TIMING_KEEP_TUNING) == 0)
+		clear |= (1 << 6) | (1 << 7);	// tuning result
+	hostControl2 &= ~clear;
+	hostControl2 |= uhsMode;
+	if ((flags & MMC_TIMING_SIGNALING_1V8) != 0)
+		hostControl2 |= 1 << 3;
+	fRegisters->host_control_2 = hostControl2;
+
+	fRegisters->host_control.SetHighSpeed(highSpeed);
+
+	// Also starts the clock to the card again
+	SetClock(kilohertz, false);
+
+	const bool signaling18 = (flags & MMC_TIMING_SIGNALING_1V8) != 0;
+#ifdef TRACE_SDHCI
+	const int baseClock = fRegisters->capabilities.BaseClockFrequency();
+	const int divider = (baseClock * 1000 + kilohertz - 1) / kilohertz;
+	const int effective = baseClock * 1000
+		/ (divider <= 1 ? 1 : (divider + 1) / 2 * 2);
+	TRACE("timing %s%s: clock about %d kHz, host control %02x, host "
+		"control 2 %04x\n", name, signaling18 ? " (1.8V signaling)" : "",
+		effective, fRegisters->host_control.Bits(),
+		fRegisters->host_control_2);
+#endif
+
+	if (timing == MMC_TIMING_HS200) {
+		status_t status = _ExecuteTuning();
+		if (status != B_OK)
+			return status;
+	}
+
+	if ((flags & MMC_TIMING_NO_VERIFY) != 0)
+		return B_OK;
+
+	char what[48];
+	snprintf(what, sizeof(what), "timing %s%s", name,
+		signaling18 ? "+1.8V" : "");
+	return _VerifyTransfers(what);
 }
 
 
@@ -1704,6 +1979,14 @@ read_data(void* controller, uint8_t command, uint32_t argument, void* buffer,
 {
 	SdhciBus* bus = (SdhciBus*)controller;
 	return bus->ReadData(command, argument, buffer, length);
+}
+
+
+status_t
+set_timing(void* controller, int timing, uint32_t flags)
+{
+	SdhciBus* bus = (SdhciBus*)controller;
+	return bus->SetTiming(timing, flags);
 }
 
 

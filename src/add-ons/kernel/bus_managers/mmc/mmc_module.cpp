@@ -49,7 +49,11 @@ mmc_bus_uninit(void* _device)
 static status_t
 mmc_bus_register_child(void* _device)
 {
-	// Nothing to do, child devices are registered by the scanning thread
+	// Publish what the first scan finds, so that a boot volume on the device
+	// is there when the kernel looks for it. Devices found by later scans are
+	// published by the scanning thread.
+	MMCBus* bus = (MMCBus*)_device;
+	bus->RegisterInitialDevices();
 	return B_OK;
 }
 
@@ -120,6 +124,20 @@ mmc_bus_set_width(device_node* node, void* cookie, int width)
 
 
 static status_t
+mmc_bus_set_timing(device_node* node, void* cookie, uint16_t rca, int timing,
+	uint32_t flags)
+{
+	MMCBus* bus = (MMCBus*)cookie;
+
+	bus->AcquireBus();
+	status_t result = bus->SetTiming(rca, timing, flags);
+	bus->ReleaseBus();
+
+	return result;
+}
+
+
+static status_t
 mmc_bus_read_data(device_node* node, void* cookie, uint16_t rca,
 	uint8_t command, uint32_t argument, void* buffer, size_t length)
 {
@@ -185,7 +203,8 @@ mmc_device_interface mmc_bus_controller_module = {
 	mmc_bus_execute_command,
 	mmc_bus_do_io,
 	mmc_bus_set_width,
-	mmc_bus_read_data
+	mmc_bus_read_data,
+	mmc_bus_set_timing
 };
 
 

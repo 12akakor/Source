@@ -42,9 +42,15 @@ typedef struct {
 	int maxBusWidth;
 		// Widest data bus to try on eMMC (1, 4 or 8), from the settings file
 	int busWidth;
+	int maxTiming;
+		// Fastest mmc_bus_timing to try on eMMC, from the settings file
+	int timing;
+	bool wantCache;
+		// Use the device's volatile write cache (settings file, default yes)
 	bool cacheEnabled;
-		// The firmware left the volatile write cache on and it could not be
-		// turned off: writes must be flushed
+		// The volatile write cache is on: writes must be flushed
+	int32 cacheDirty;
+		// Something was written since the last flush
 
 	device_geometry geometry;
 
