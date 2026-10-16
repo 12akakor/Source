@@ -133,6 +133,11 @@ Stream::_ChooseAlternate()
 			continue;
 		}
 
+		if (fAlternates[i]->Endpoint() == 0) {
+			TRACE(ERR, "Ignore alternate %d - zero endpoint description.\n", i);
+			continue;
+		}
+
 		if (fAlternates[i]->Format()->fFormatType
 				!= USB_AUDIO_FORMAT_TYPE_I) {
 			TRACE(ERR, "Ignore alternate %d - format type %#02x "
@@ -862,12 +867,17 @@ Stream::OnSetConfiguration(usb_device device,
 		return B_ERROR;
 	}
 
-	usb_interface_info* interface
-		= &config->interface[fInterface].alt[fActiveAlternate];
-	if (interface == NULL) {
-		TRACE(ERR, "NULL interface. Not set.\n");
+	// On reattach this is the replugged device's configuration, which need not
+	// have the interface and alternate this stream was set up for.
+	if (fInterface >= config->interface_count
+		|| fActiveAlternate >= config->interface[fInterface].alt_count) {
+		TRACE(ERR, "No alternate %" B_PRIuSIZE " of interface %" B_PRIuSIZE
+			" in this configuration. Not set.\n", fActiveAlternate, fInterface);
 		return B_ERROR;
 	}
+
+	usb_interface_info* interface
+		= &config->interface[fInterface].alt[fActiveAlternate];
 
 	// Remembered for the R2 stream-start sequence, which re-toggles this
 	// stream's alternate setting (see _ArmClockAndActivate).
