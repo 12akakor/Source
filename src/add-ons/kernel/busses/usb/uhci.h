@@ -85,6 +85,8 @@ typedef struct isochronous_transfer_data {
 	// transfer type
 	uhci_td **					descriptors;
 	uint16						last_to_process;
+	// Frame of descriptors[0]; descriptors[i] is linked in start_frame + i.
+	uint16						start_frame;
 	bool						incoming;
 	bool						is_active;
 	isochronous_transfer_data *	link;
@@ -138,7 +140,8 @@ static	int32						InterruptHandler(void *data);
 		status_t					AddPendingIsochronousTransfer(
 										Transfer *transfer,
 										uhci_td **isoRequest,
-										bool directionIn);
+										bool directionIn,
+										uint16 startFrame);
 
 static	int32						FinishThread(void *data);
 		void						FinishTransfers();
@@ -160,6 +163,8 @@ static int32						FinishIsochronousThread(void *data);
 										uhci_td *descriptor,
 										uint16 frame);
 		uhci_td *					UnlinkIsochronousDescriptor(uint16 frame);
+		void						DetachIsochronousDescriptors(
+										isochronous_transfer_data *transfer);
 
 		// Transfer queue functions
 		uhci_qh *					CreateTransferQueue(uhci_td *descriptor);
