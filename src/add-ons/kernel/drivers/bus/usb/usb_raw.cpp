@@ -101,10 +101,13 @@ usb_raw_device_removed(void *cookie)
 	// in syscalls.
 	const usb_configuration_info *configurationInfo =
 		gUSBModule->get_configuration(device->device);
-	if (configurationInfo != NULL) {
+	if (configurationInfo != NULL && configurationInfo->interface_count > 0) {
+		// An interface the device described no alternate for has no active
+		// one.
 		struct usb_interface_info* interface
 			= configurationInfo->interface->active;
-		for (unsigned int i = 0; i < interface->endpoint_count; i++)
+		for (unsigned int i = 0;
+				interface != NULL && i < interface->endpoint_count; i++)
 			gUSBModule->cancel_queued_transfers(interface->endpoint[i].handle);
 	}
 
