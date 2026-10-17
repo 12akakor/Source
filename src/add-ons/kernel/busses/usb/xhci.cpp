@@ -348,6 +348,8 @@ XHCI::XHCI(pci_info *info, 	pci_device_module_info* pci, pci_device* device, Sta
 		fStack(stack),
 		fIRQ(0),
 		fUseMSI(false),
+		fBayTrail(info->vendor_id == PCI_VENDOR_INTEL
+			&& info->device_id == PCI_DEVICE_INTEL_BAYTRAIL_XHCI),
 		fErstArea(-1),
 		fDcbaArea(-1),
 		fCmdCompSem(-1),
@@ -365,6 +367,11 @@ XHCI::XHCI(pci_info *info, 	pci_device_module_info* pci, pci_device* device, Sta
 		fCmdIdx(0),
 		fEventCcs(1),
 		fCmdCcs(1),
+		fRecoverySem(-1),
+		fRecoveryThread(-1),
+		fRecoveryHead(0),
+		fRecoveryCount(0),
+		fRecoveryRunning(NULL),
 		fLastTransferErrorLog(0),
 		fSuppressedTransferErrors(0),
 		fLastTransferErrorCode(COMP_INVALID)
@@ -372,6 +379,8 @@ XHCI::XHCI(pci_info *info, 	pci_device_module_info* pci, pci_device* device, Sta
 	B_INITIALIZE_SPINLOCK(&fSpinlock);
 	mutex_init(&fFinishedLock, "XHCI finished transfers");
 	mutex_init(&fEventLock, "XHCI event handler");
+	mutex_init(&fRecoveryLock, "XHCI endpoint recovery");
+	mutex_init(&fRecoveryCommandLock, "XHCI endpoint recovery commands");
 
 	if (BusManager::InitCheck() < B_OK) {
 		TRACE_ERROR("bus manager failed to init\n");
@@ -515,7 +524,9 @@ XHCI::XHCI(pci_info *info, 	pci_device_module_info* pci, pci_device* device, Sta
 	fCmdCompSem = create_sem(0, "XHCI Command Complete");
 	fFinishTransfersSem = create_sem(0, "XHCI Finish Transfers");
 	fEventSem = create_sem(0, "XHCI Event");
-	if (fFinishTransfersSem < B_OK || fCmdCompSem < B_OK || fEventSem < B_OK) {
+	fRecoverySem = create_sem(0, "XHCI Endpoint Recovery");
+	if (fFinishTransfersSem < B_OK || fCmdCompSem < B_OK || fEventSem < B_OK
+			|| fRecoverySem < B_OK) {
 		TRACE_ERROR("failed to create semaphores\n");
 		return;
 	}
@@ -529,6 +540,14 @@ XHCI::XHCI(pci_info *info, 	pci_device_module_info* pci, pci_device* device, Sta
 	fFinishThread = spawn_kernel_thread(FinishThread, "xhci finish thread",
 		B_URGENT_PRIORITY - 1, (void *)this);
 	resume_thread(fFinishThread);
+
+	if (fBayTrail) {
+		// Recovery commands wait for command completion, so they must run
+		// outside the event thread.
+		fRecoveryThread = spawn_kernel_thread(RecoveryThread,
+			"xhci endpoint recovery", B_URGENT_PRIORITY - 2, (void *)this);
+		resume_thread(fRecoveryThread);
+	}
 
 	// Find the right interrupt vector, using MSIs if available.
 	fIRQ = fPCIInfo->u.h0.interrupt_line;
@@ -546,7 +565,10 @@ XHCI::XHCI(pci_info *info, 	pci_device_module_info* pci, pci_device* device, Sta
 		}
 	} else
 #endif
-	if (fPci->get_msi_count(fDevice) >= 1) {
+	if (fBayTrail) {
+		// Bay Trail xHCI stays on its firmware-assigned legacy PCI IRQ.
+		TRACE_ALWAYS("Bay Trail xHCI: using legacy PCI IRQ %" B_PRIu32 "\n", fIRQ);
+	} else if (fPci->get_msi_count(fDevice) >= 1) {
 		uint32 msiVector = 0;
 		if (fPci->configure_msi(fDevice, 1, &msiVector) == B_OK
 			&& fPci->enable_msi(fDevice) == B_OK) {
@@ -582,12 +604,17 @@ XHCI::~XHCI()
 
 	int32 result = 0;
 	fStopThreads = true;
+	delete_sem(fRecoverySem);
 	delete_sem(fCmdCompSem);
 	delete_sem(fFinishTransfersSem);
 	delete_sem(fEventSem);
+	if (fRecoveryThread >= 0)
+		wait_for_thread(fRecoveryThread, &result);
 	wait_for_thread(fFinishThread, &result);
 	wait_for_thread(fEventThread, &result);
 
+	mutex_destroy(&fRecoveryCommandLock);
+	mutex_destroy(&fRecoveryLock);
 	mutex_destroy(&fFinishedLock);
 	mutex_destroy(&fEventLock);
 
@@ -1930,6 +1957,12 @@ XHCI::FreeDevice(Device *usbDevice)
 void
 XHCI::CleanupDevice(xhci_device *device)
 {
+	// Endpoint 0 is never removed through _RemoveEndpointForPipe(), and the
+	// recovery queue holds raw pointers into this structure, which is about to
+	// be zeroed and reused for the next device in this slot.
+	for (uint32 i = 0; i < XHCI_MAX_ENDPOINTS - 1; i++)
+		PurgeEndpointRecovery(&device->endpoints[i]);
+
 	if (device->slot != 0) {
 		DisableSlot(device->slot);
 		fDcba->baseAddress[device->slot] = 0;
@@ -2004,6 +2037,15 @@ XHCI::_InsertEndpointForPipe(Pipe *pipe)
 		endpoint->used = 0;
 		endpoint->next = 0;
 
+		endpoint->quarantined = false;
+		endpoint->tearingDown = false;
+		endpoint->recoveryAttempted = false;
+		endpoint->firstFailTime = 0;
+		endpoint->failureWindowStart = 0;
+		endpoint->lastFailedTrb = 0;
+		endpoint->failureCount = 0;
+		endpoint->validationCount = 0;
+
 		endpoint->trbs = device->trbs + id * XHCI_ENDPOINT_RING_SIZE;
 		endpoint->trb_addr = device->trb_addr
 			+ id * XHCI_ENDPOINT_RING_SIZE * sizeof(xhci_trb);
@@ -2066,6 +2108,10 @@ XHCI::_RemoveEndpointForPipe(Pipe *pipe)
 	pipe->SetControllerCookie(NULL);
 
 	if (endpoint->id > 0) {
+		// Don't destroy the endpoint while deferred recovery may still use it,
+		// and make sure the StopEndpoint() below cannot queue a new one.
+		PurgeEndpointRecovery(endpoint);
+
 		xhci_device *device = endpoint->device;
 		uint8 epNumber = endpoint->id + 1;
 		StopEndpoint(true, endpoint);
@@ -2099,6 +2145,10 @@ XHCI::_LinkDescriptorForPipe(xhci_td *descriptor, xhci_endpoint *endpoint)
 
 	// Use mutex_trylock first, in case we are in KDL.
 	MutexLocker endpointLocker(&endpoint->lock, mutex_trylock(&endpoint->lock) == B_OK);
+
+	// Checked under the lock: _QuarantineEndpoint() sets the flag with it held.
+	if (endpoint->quarantined)
+		return B_DEV_STALLED;
 
 	// "used" refers to the number of currently linked TDs, not the number of
 	// used TRBs on the ring (we use 2 TRBs on the ring per transfer.)
@@ -2708,8 +2758,10 @@ XHCI::HandleTransferComplete(xhci_trb* trb)
 	const uint8 endpointNumber = TRB_3_ENDPOINT_GET(flags),
 		slot = TRB_3_SLOT_GET(flags);
 
-	if (slot > fSlotCount)
+	if (slot > fSlotCount) {
 		TRACE_ERROR("invalid slot\n");
+		return;
+	}
 	if (endpointNumber == 0 || endpointNumber >= XHCI_MAX_ENDPOINTS) {
 		TRACE_ERROR("invalid endpoint\n");
 		return;
@@ -2735,6 +2787,7 @@ XHCI::HandleTransferComplete(xhci_trb* trb)
 		  (flags & TRB_3_EVENT_DATA_BIT), trb->status);
 
 	uint8 completionCode = TRB_2_COMP_CODE_GET(trb->status);
+	const uint8 eventCompletionCode = completionCode;
 
 	if (completionCode == COMP_RING_OVERRUN || completionCode == COMP_RING_UNDERRUN) {
 		// These occur on isochronous endpoints when there is no TRB ready to be
@@ -2852,6 +2905,11 @@ XHCI::HandleTransferComplete(xhci_trb* trb)
 		// But if we have an unsuccessful completion code, the transfer
 		// likely failed midway; so just accept it anyway.
 		if (offset == (td->trb_used - 1) || completionCode != COMP_SUCCESS) {
+			if (fBayTrail) {
+				// Only genuine successes count as proof of recovery.
+				_NoteTransferResult(endpoint, eventCompletionCode == COMP_SUCCESS
+					|| eventCompletionCode == COMP_SHORT_PACKET);
+			}
 			_UnlinkDescriptorForPipe(td, endpoint);
 			endpointLocker.Unlock();
 
@@ -2873,7 +2931,368 @@ XHCI::HandleTransferComplete(xhci_trb* trb)
 		}
 		return;
 	}
+	if (fBayTrail && fRecoveryThread >= 0) {
+		_HandleUnmatchedTransfer(endpoint, endpointLocker, eventCompletionCode,
+			source);
+		return;
+	}
+
 	TRACE_ERROR("TRB 0x%" B_PRIxPHYSADDR " was not found in the endpoint!\n", source);
+}
+
+
+// #pragma mark - Bay Trail stale-TRB recovery
+//
+// On Bay Trail, the xHC can keep reporting events for a TRB address that is no
+// longer on the ring (ring dequeue desync). The matching transfer is then never
+// completed and callers only recover via their own timeout, hitting the same
+// desync again. We detect that per endpoint, try one deferred
+// STOP/RESET/SET_TR_DEQUEUE recovery, and if the same stale event survives it,
+// quarantine the endpoint (failing further submissions) until its pipe is
+// re-created. Quarantining stops the endpoint before any TD is failed or freed.
+// Endpoints being torn down are purged from the recovery queue first. A
+// phantom COMP_STOPPED with an empty ring is simply ignored.
+
+static const bigtime_t kMaxStuckDuration = 15000000;		// 15s
+static const bigtime_t kChronicCycleWindow = 60000000;		// 60s
+static const uint32 kChronicCycleThreshold = 5;
+static const uint32 kRecoveryValidationCompletions = 3;
+
+
+bool
+XHCI::_IsRecoveryPending(xhci_endpoint* endpoint)
+{
+	bool pending = false;
+
+	mutex_lock(&fRecoveryLock);
+	if (fRecoveryRunning == endpoint)
+		pending = true;
+	else {
+		for (uint32 i = 0, index = fRecoveryHead; i < fRecoveryCount; i++) {
+			if (fRecoveryQueue[index] == endpoint) {
+				pending = true;
+				break;
+			}
+			index = (index + 1) % XHCI_MAX_RECOVERY_REQUESTS;
+		}
+	}
+	mutex_unlock(&fRecoveryLock);
+
+	return pending;
+}
+
+
+void
+XHCI::_StartEndpointRecovery(xhci_endpoint* endpoint, MutexLocker& locker,
+	phys_addr_t source)
+{
+	TRACE_ERROR("endpoint %p: queueing deferred endpoint recovery\n", endpoint);
+
+	endpoint->recoveryAttempted = true;
+	endpoint->validationCount = 0;
+	endpoint->firstFailTime = system_time();
+	endpoint->lastFailedTrb = source;
+
+	locker.Unlock();
+	QueueEndpointRecovery(endpoint);
+}
+
+
+/*! Marks the endpoint unusable and hands it to the recovery thread. Unlocks
+	*\a locker.
+
+	The TDs are deliberately not touched here: the controller may still be
+	walking the ring (and DMAing into the transfers' buffers), so they may only
+	be failed and freed once the endpoint has been stopped. RecoverEndpoint()
+	does that, and keeps them linked if the stop fails. The flag is set under
+	the endpoint lock, so _LinkDescriptorForPipe() cannot link a TD behind the
+	drain.
+*/
+void
+XHCI::_QuarantineEndpoint(xhci_endpoint* endpoint, MutexLocker& locker)
+{
+	TRACE_ALWAYS("endpoint %p: stale TRB survived recovery; quarantined\n",
+		endpoint);
+	endpoint->quarantined = true;
+
+	locker.Unlock();
+	QueueEndpointRecovery(endpoint);
+}
+
+
+/*! Called with the endpoint lock held (via \a locker) for an event that
+	*matched no TD. May unlock \a locker.
+*/
+void
+XHCI::_HandleUnmatchedTransfer(xhci_endpoint* endpoint, MutexLocker& locker,
+	uint8 completionCode, phys_addr_t source)
+{
+	if (endpoint->quarantined || endpoint->tearingDown)
+		return;
+
+	const bigtime_t now = system_time();
+
+	if (completionCode == COMP_STOPPED
+			|| completionCode == COMP_STOPPED_LENGTH_INVALID) {
+		// Phantom stop for the empty-ring sentinel: endpoint is still
+		// Running, nothing to do. Must be checked before the recovery state.
+		if (endpoint->used == 0)
+		return;
+
+		if (!endpoint->recoveryAttempted) {
+			if (endpoint->device != NULL)
+				_StartEndpointRecovery(endpoint, locker, source);
+			} else if (!_IsRecoveryPending(endpoint)) {
+				_QuarantineEndpoint(endpoint, locker);
+			}
+			return;
+	}
+
+	TRACE_ERROR("TRB 0x%" B_PRIxPHYSADDR " was not found in the endpoint!\n",
+		source);
+
+	// Track the time since the FIRST unresolved failure rather than an event
+	// count in a fixed window: the real failure mode is the same stale TRB
+	// repeating every few seconds, which a short window misses.
+	bool sameTrb = false;
+	if (endpoint->firstFailTime == 0) {
+		endpoint->firstFailTime = now;
+		endpoint->failureWindowStart = now;
+		endpoint->failureCount = 1;
+	} else {
+		sameTrb = endpoint->lastFailedTrb == source;
+		if (endpoint->failureWindowStart == 0
+				|| now - endpoint->failureWindowStart > kChronicCycleWindow) {
+			endpoint->failureWindowStart = now;
+			endpoint->failureCount = 1;
+		} else if (sameTrb)
+			endpoint->failureCount++;
+		else
+			endpoint->failureCount = 1;
+	}
+	endpoint->lastFailedTrb = source;
+
+	if (endpoint->td_list.IsEmpty())
+		return;
+
+	if (endpoint->recoveryAttempted && sameTrb && !_IsRecoveryPending(endpoint)) {
+		_QuarantineEndpoint(endpoint, locker);
+		return;
+	}
+
+	const bool chronic = endpoint->failureCount >= kChronicCycleThreshold
+		&& now - endpoint->failureWindowStart <= kChronicCycleWindow;
+	if (now - endpoint->firstFailTime >= kMaxStuckDuration || chronic) {
+		if (endpoint->recoveryAttempted)
+			_QuarantineEndpoint(endpoint, locker);
+		else
+			_StartEndpointRecovery(endpoint, locker, source);
+	}
+}
+
+
+/*! A TD match alone doesn't prove recovery worked; several genuine successful
+	*completions are required before the failure state is cleared.
+*/
+void
+XHCI::_NoteTransferResult(xhci_endpoint* endpoint, bool success)
+{
+	if (!success) {
+		if (endpoint->recoveryAttempted)
+			endpoint->validationCount = 0;
+		return;
+	}
+
+	if (endpoint->recoveryAttempted) {
+		if (++endpoint->validationCount < kRecoveryValidationCompletions)
+			return;
+		TRACE_ALWAYS("endpoint %p: recovery validated\n", endpoint);
+		endpoint->recoveryAttempted = false;
+	}
+
+	endpoint->validationCount = 0;
+	endpoint->firstFailTime = 0;
+	endpoint->failureCount = 0;
+	endpoint->lastFailedTrb = 0;
+}
+
+
+int32
+XHCI::RecoveryThread(void* data)
+{
+	((XHCI*)data)->ProcessRecoveryRequests();
+	return B_OK;
+}
+
+
+void
+XHCI::QueueEndpointRecovery(xhci_endpoint* endpoint)
+{
+	if (_IsRecoveryPending(endpoint))
+		return;
+
+	mutex_lock(&fRecoveryLock);
+	// tearingDown is only ever set under fRecoveryLock, so once
+	// PurgeEndpointRecovery() has run nothing can be queued again.
+	if (fStopThreads || endpoint->tearingDown
+			|| fRecoveryCount == XHCI_MAX_RECOVERY_REQUESTS) {
+		TRACE_ERROR("endpoint recovery unavailable for endpoint %p\n", endpoint);
+		mutex_unlock(&fRecoveryLock);
+		return;
+	}
+
+	fRecoveryQueue[(fRecoveryHead + fRecoveryCount) % XHCI_MAX_RECOVERY_REQUESTS]
+		= endpoint;
+	fRecoveryCount++;
+	mutex_unlock(&fRecoveryLock);
+
+	release_sem_etc(fRecoverySem, 1, B_DO_NOT_RESCHEDULE);
+}
+
+
+/*! Must be called before an endpoint is torn down or its device is cleaned
+	up. Drops the endpoint's queued recovery requests, forbids new ones, and
+	waits for one that is already running, so the recovery thread never
+	touches an endpoint that is being (or has been) destroyed.
+*/
+void
+XHCI::PurgeEndpointRecovery(xhci_endpoint* endpoint)
+{
+	if (fRecoveryThread < 0)
+		return;
+
+	mutex_lock(&fRecoveryLock);
+	endpoint->tearingDown = true;
+
+	uint32 kept = 0;
+	for (uint32 i = 0; i < fRecoveryCount; i++) {
+		xhci_endpoint* queued
+			= fRecoveryQueue[(fRecoveryHead + i) % XHCI_MAX_RECOVERY_REQUESTS];
+		if (queued != endpoint) {
+			fRecoveryQueue[(fRecoveryHead + kept) % XHCI_MAX_RECOVERY_REQUESTS]
+				= queued;
+			kept++;
+		}
+	}
+	fRecoveryCount = kept;
+
+	// Recovery callbacks run after fRecoveryRunning is cleared, so a
+	// callback-triggered teardown cannot deadlock here.
+	while (fRecoveryRunning == endpoint) {
+		mutex_unlock(&fRecoveryLock);
+		snooze(1000);
+		mutex_lock(&fRecoveryLock);
+	}
+	mutex_unlock(&fRecoveryLock);
+	// _RecoverHaltedEndpoint() runs on the finisher thread and is not queued;
+	// it checks tearingDown under this lock, so this waits out one in flight.
+	mutex_lock(&fRecoveryCommandLock);
+	mutex_unlock(&fRecoveryCommandLock);
+}
+
+
+void
+XHCI::ProcessRecoveryRequests()
+{
+	while (!fStopThreads) {
+		if (acquire_sem(fRecoverySem) < B_OK)
+			continue;
+
+		for (;;) {
+			xhci_endpoint* endpoint = NULL;
+
+			mutex_lock(&fRecoveryLock);
+			if (fRecoveryCount != 0) {
+				endpoint = fRecoveryQueue[fRecoveryHead];
+				fRecoveryHead = (fRecoveryHead + 1) % XHCI_MAX_RECOVERY_REQUESTS;
+				fRecoveryCount--;
+				fRecoveryRunning = endpoint;
+			}
+			mutex_unlock(&fRecoveryLock);
+
+			if (endpoint == NULL)
+				break;
+
+			Transfer* transfers[XHCI_MAX_TRANSFERS];
+			int32 transfersCount = 0;
+			status_t status = RecoverEndpoint(endpoint, transfers,
+				&transfersCount);
+
+			// Quarantine while the endpoint is still protected from pipe
+			// teardown; after clearing fRecoveryRunning it must not be touched.
+			if (status != B_OK && status != B_NO_INIT) {
+				TRACE_ERROR("endpoint %p recovery failed: %s; quarantining\n",
+					endpoint, strerror(status));
+				endpoint->quarantined = true;
+			}
+
+			mutex_lock(&fRecoveryLock);
+			fRecoveryRunning = NULL;
+			mutex_unlock(&fRecoveryLock);
+
+			for (int32 i = 0; i < transfersCount; i++) {
+				transfers[i]->Finished(B_CANCELED, 0);
+				delete transfers[i];
+			}
+		}
+	}
+}
+
+
+/*! Like CancelQueuedTransfers(), but the transfer callbacks are left to the
+	caller, and failures of the dequeue command are reported.
+*/
+status_t
+XHCI::RecoverEndpoint(xhci_endpoint* endpoint, Transfer** transfers,
+	int32* transfersCount)
+{
+	if (endpoint->trbs == NULL || endpoint->device == NULL)
+		return B_NO_INIT;
+
+	MutexLocker recoveryLocker(fRecoveryCommandLock);
+	MutexLocker endpointLocker(endpoint->lock);
+
+	*transfersCount = 0;
+	for (xhci_td* td = endpoint->td_list.Head(); td != NULL;
+			td = endpoint->td_list.GetNext(td)) {
+		if (td->transfer == NULL)
+			continue;
+		transfers[(*transfersCount)++] = td->transfer;
+		td->transfer = NULL;
+	}
+
+	endpointLocker.Unlock();
+
+	status_t status = StopEndpoint(false, endpoint);
+	if (status != B_OK && status != B_DEV_STALLED)
+		status = StopEndpoint(false, endpoint);
+	if (status == B_DEV_STALLED)
+		status = ResetEndpoint(false, endpoint);
+
+	endpointLocker.Lock();
+
+	DoublyLinkedList<xhci_td> tdList;
+	tdList.TakeFrom(&endpoint->td_list);
+
+	if (status == B_OK) {
+		memset(endpoint->trbs, 0, sizeof(xhci_trb) * XHCI_ENDPOINT_RING_SIZE);
+		endpoint->used = 0;
+		endpoint->next = 0;
+
+		status = SetTRDequeue(endpoint->trb_addr, 0, endpoint->id + 1,
+			endpoint->device->slot);
+	} else {
+		// Hardware may still reference these TDs; keep them.
+		endpoint->td_list.TakeFrom(&tdList);
+	}
+
+	endpointLocker.Unlock();
+
+	xhci_td* td;
+	while ((td = tdList.RemoveHead()) != NULL)
+		FreeDescriptor(td);
+
+	return status;
 }
 
 

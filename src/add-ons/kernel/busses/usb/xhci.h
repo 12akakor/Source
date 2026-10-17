@@ -12,6 +12,7 @@
 #define XHCI_H
 
 
+#include <util/AutoLock.h>
 #include <util/DoublyLinkedList.h>
 
 #include "usb_private.h"
@@ -30,6 +31,9 @@ class XHCIRootHub;
 /* The endpoint ring needs space for 2 TRBs per transfer
  * (one for the link TRB, and one for the Event Data TRB). */
 #define XHCI_ENDPOINT_RING_SIZE	(XHCI_MAX_TRANSFERS * 2)
+
+// Maximum number of deferred endpoint recovery requests queued at once.
+#define XHCI_MAX_RECOVERY_REQUESTS	32
 
 
 struct xhci_td : public DoublyLinkedListLinkImpl<xhci_td> {
@@ -65,6 +69,17 @@ struct xhci_endpoint {
 
 	xhci_trb*		trbs; // [XHCI_ENDPOINT_RING_SIZE]
 	phys_addr_t 	trb_addr;
+
+	// Bay Trail stale-TRB quirk state (see XHCI::_HandleUnmatchedTransfer).
+	// Cleared along with the rest of the endpoint when the pipe is removed.
+	bool			quarantined;
+	bool			tearingDown;	// guarded by XHCI::fRecoveryLock
+	bool			recoveryAttempted;
+	bigtime_t		firstFailTime;
+	bigtime_t		failureWindowStart;
+	phys_addr_t		lastFailedTrb;
+	uint32			failureCount;
+	uint32			validationCount;
 };
 
 
@@ -153,6 +168,24 @@ private:
 			void				CompleteEvents();
 			void				ProcessEvents();
 
+			// Bay Trail quirk: deferred endpoint recovery
+	static	int32				RecoveryThread(void *data);
+			void				ProcessRecoveryRequests();
+			void				QueueEndpointRecovery(xhci_endpoint* endpoint);
+			void				PurgeEndpointRecovery(xhci_endpoint* endpoint);
+			status_t			RecoverEndpoint(xhci_endpoint* endpoint,
+									Transfer** transfers, int32* transfersCount);
+			bool				_IsRecoveryPending(xhci_endpoint* endpoint);
+			void				_StartEndpointRecovery(xhci_endpoint* endpoint,
+									MutexLocker& locker, phys_addr_t source);
+			void				_QuarantineEndpoint(xhci_endpoint* endpoint,
+									MutexLocker& locker);
+			void				_HandleUnmatchedTransfer(xhci_endpoint* endpoint,
+									MutexLocker& locker, uint8 completionCode,
+									phys_addr_t source);
+			void				_NoteTransferResult(xhci_endpoint* endpoint,
+									bool success);
+
 			// Transfer management
 	static	int32				FinishThread(void *data);
 			void				FinishTransfers();
@@ -239,6 +272,7 @@ private:
 			Stack *				fStack;
 			uint32				fIRQ;
 			bool				fUseMSI;
+			bool				fBayTrail;
 
 			area_id				fErstArea;
 			xhci_erst_element *	fErst;
@@ -286,6 +320,22 @@ private:
 			uint16				fCmdIdx;
 			uint8				fEventCcs;
 			uint8				fCmdCcs;
+
+			// Deferred endpoint recovery (Bay Trail only). Recovery commands use
+			// DoCommand(), which waits for a command-completion event, so they must
+			// never be issued from ProcessEvents() (the event thread would wait on
+			// an event only it can dispatch).
+			sem_id				fRecoverySem;
+			thread_id			fRecoveryThread;
+			mutex				fRecoveryLock;
+			// Serialises the command sequences that re-sync an endpoint's ring
+			// (RecoverEndpoint() and _RecoverHaltedEndpoint()): each captures or
+			// rewrites endpoint->next around unlocked commands.
+			mutex				fRecoveryCommandLock;
+			xhci_endpoint*		fRecoveryQueue[XHCI_MAX_RECOVERY_REQUESTS];
+			uint32				fRecoveryHead;
+			uint32				fRecoveryCount;
+			xhci_endpoint*		fRecoveryRunning;
 
 			// Transfer error log rate limiting; guarded by fEventLock.
 			bigtime_t			fLastTransferErrorLog;
