@@ -2294,8 +2294,14 @@ ieee80211_add_powercapability(uint8_t *frm, const struct ieee80211_channel *c)
 {
 	frm[0] = IEEE80211_ELEMID_PWRCAP;
 	frm[1] = 2;
+#if defined(__HAIKU__)
+	/* The element is in dBm, ic_{min,max}power are in .5 dBm. */
+	frm[2] = c->ic_minpower / 2;
+	frm[3] = c->ic_maxpower / 2;
+#else
 	frm[2] = c->ic_minpower;
 	frm[3] = c->ic_maxpower;
+#endif
 	return frm + 4;
 }
 
@@ -2305,6 +2311,48 @@ ieee80211_add_powercapability(uint8_t *frm, const struct ieee80211_channel *c)
 static uint8_t *
 ieee80211_add_supportedchannels(uint8_t *frm, struct ieee80211com *ic)
 {
+#if defined(__HAIKU__)
+	/*
+	 * 802.11-2020 9.4.2.17: (first channel, number of channels) tuples
+	 * for runs of channels in the current band (spaced 1 apart on
+	 * 2.4 GHz, 4 apart on 5 GHz). The caller reserves 2 + 26 bytes.
+	 */
+	static const int maxtuples = 13;
+	const struct ieee80211_channel *cur = ic->ic_curchan;
+	uint8_t chans[IEEE80211_CHAN_BYTES * NBBY];
+	int nchans = 0, ntuples = 0, i, j, step;
+	uint8_t *p = frm + 2;
+
+	step = IEEE80211_IS_CHAN_2GHZ(cur) ? 1 : 4;
+	for (i = 0; i < ic->ic_nchans; i++) {
+		const struct ieee80211_channel *c = &ic->ic_channels[i];
+
+		if (IEEE80211_IS_CHAN_2GHZ(c) != IEEE80211_IS_CHAN_2GHZ(cur) ||
+		    IEEE80211_IS_CHAN_5GHZ(c) != IEEE80211_IS_CHAN_5GHZ(cur))
+			continue;
+		/* sorted insert, dropping duplicates (one per HT/legacy mode) */
+		for (j = 0; j < nchans && chans[j] < c->ic_ieee; j++)
+			;
+		if (j < nchans && chans[j] == c->ic_ieee)
+			continue;
+		if (nchans == nitems(chans))
+			break;
+		memmove(&chans[j + 1], &chans[j], nchans - j);
+		chans[j] = c->ic_ieee;
+		nchans++;
+	}
+	for (i = 0; i < nchans && ntuples < maxtuples; ntuples++) {
+		for (j = i + 1; j < nchans && chans[j] == chans[j - 1] + step;
+		    j++)
+			;
+		*p++ = chans[i];
+		*p++ = j - i;
+		i = j;
+	}
+	frm[0] = IEEE80211_ELEMID_SUPPCHAN;
+	frm[1] = 2 * ntuples;
+	return frm + 2 + 2 * ntuples;
+#else
 	static const int ielen = 26;
 
 	frm[0] = IEEE80211_ELEMID_SUPPCHAN;
@@ -2312,6 +2360,7 @@ ieee80211_add_supportedchannels(uint8_t *frm, struct ieee80211com *ic)
 	/* XXX not correct */
 	memcpy(frm+2, ic->ic_chan_avail, ielen);
 	return frm + 2 + ielen;
+#endif
 }
 
 /*
