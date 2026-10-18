@@ -649,6 +649,25 @@ sta_input(struct ieee80211_node *ni, struct mbuf *m,
 			if (IEEE80211_QOS_HAS_SEQ(wh) &&
 			    TID_TO_WME_AC(tid) >= WME_AC_VI)
 				ic->ic_wme.wme_hipri_traffic++;
+#if defined(__HAIKU__)
+			/*
+			 * Some APs (TP-Link Deco Wi-Fi 7 seen) send their
+			 * auth and (re)assoc responses all with sequence
+			 * number 0. When the first assoc response is lost,
+			 * its retry then matches the auth response's seq and
+			 * would be dropped as a duplicate, failing the join.
+			 * A (re)assoc response is only acted on in ASSOC,
+			 * which it leaves, so a genuine duplicate is ignored
+			 * by the state machine anyway. (Auth frames keep the
+			 * check: multi-frame auth must filter retries.)
+			 */
+			if (type == IEEE80211_FC0_TYPE_MGT &&
+			    vap->iv_state == IEEE80211_S_ASSOC &&
+			    (subtype == IEEE80211_FC0_SUBTYPE_ASSOC_RESP ||
+			    subtype == IEEE80211_FC0_SUBTYPE_REASSOC_RESP))
+				;
+			else
+#endif
 			if (! ieee80211_check_rxseq(ni, wh, bssid, rxs))
 				goto out;
 		}
