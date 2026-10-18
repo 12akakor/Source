@@ -439,6 +439,19 @@ cancel_scan(struct ieee80211vap *vap, int any, const char *func)
 	int signal;
 
 	IEEE80211_LOCK(ic);
+#if defined(__HAIKU__)
+	/*
+	 * Outbound traffic (ieee80211_start_pkt) pauses any scan. Only a
+	 * background scan is resumed later; a requested scan paused this
+	 * way just ends, and scan_done() skips the "scan done" event for
+	 * an interrupted scan - BNetworkDevice::Scan() waits for that event
+	 * without a timeout. Let requested scans run to the end.
+	 */
+	if (any && (ss->ss_flags & IEEE80211_SCAN_BGSCAN) == 0) {
+		IEEE80211_UNLOCK(ic);
+		return;
+	}
+#endif
 	signal = any ? ISCAN_PAUSE : ISCAN_CANCEL;
 	if ((ic->ic_flags & IEEE80211_F_SCAN) &&
 	    (any || ss->ss_vap == vap) &&
