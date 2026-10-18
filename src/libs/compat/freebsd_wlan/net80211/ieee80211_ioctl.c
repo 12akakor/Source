@@ -3673,6 +3673,21 @@ ieee80211_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 	case SIOCSIFMEDIA:
 	case SIOCGIFMEDIA:
 		ifr = (struct ifreq *)data;
+#if defined(__HAIKU__)
+		/*
+		 * Haiku's SIOCGIFMEDIA reports the active media word (mode of the
+		 * current channel), not FreeBSD's configured ifm_current.
+		 * wpa_supplicant reads it, edits the option bits and writes it
+		 * back on every associate, which would pin iv_des_mode to the
+		 * band last in use: scans and joins then skip the other band.
+		 * Take only the option bits from the request.
+		 */
+		if (cmd == SIOCSIFMEDIA && vap->iv_media.ifm_cur != NULL) {
+			ifr->ifr_media =
+			    (vap->iv_media.ifm_cur->ifm_media & ~IFM_OMASK)
+			    | (ifr->ifr_media & IFM_OMASK);
+		}
+#endif
 		error = ifmedia_ioctl(ifp, ifr, &vap->iv_media, cmd);
 		break;
 	case SIOCG80211:
