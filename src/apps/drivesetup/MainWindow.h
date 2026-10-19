@@ -84,6 +84,11 @@ private:
 			void				_Initialize(BDiskDevice* disk,
 									partition_id selectedPartition,
 									const BString& diskSystemName);
+			status_t			_UnmountAll(BPartition* partition);
+			status_t			_InitializeGpt(BDiskDevice* disk);
+			status_t			_InstallEfiLoader(BPartition* partition);
+			void				_CreateBootLayout(BDiskDevice* disk);
+
 			void				_Create(BDiskDevice* disk,
 									partition_id selectedPartition);
 			void				_Delete(BDiskDevice* disk,

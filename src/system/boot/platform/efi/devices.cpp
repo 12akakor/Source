@@ -16,6 +16,8 @@
 
 #include "efi_platform.h"
 #include <efi/protocol/block-io.h>
+#include <efi/protocol/loaded-image.h>
+#include <util/convertutf.h>
 
 #include "gpt.h"
 #include "gpt_known_guids.h"
@@ -139,6 +141,117 @@ device_contains_partition(EfiDevice *device, boot::Partition *partition)
 }
 
 
+static efi_guid sLoadedImageGUID = EFI_LOADED_IMAGE_PROTOCOL_GUID;
+static efi_guid sLoadedImageDevicePathGUID
+	= EFI_LOADED_IMAGE_DEVICE_PATH_PROTOCOL_GUID;
+static efi_guid sDevicePathGUID = EFI_DEVICE_PATH_PROTOCOL_GUID;
+
+
+/*!	Whether the load options ask for a network boot with an "ip=" token.
+
+	That is how a network boot is requested when the loader itself came from
+	local media; it is also what EFIEthernetInterface::Init() looks for, and
+	without it that function gives up anyway.
+*/
+static bool
+load_options_request_network(void)
+{
+	efi_loaded_image_protocol *loadedImage = NULL;
+	if (kBootServices->HandleProtocol(kImage, &sLoadedImageGUID,
+			(void**)&loadedImage) != EFI_SUCCESS || loadedImage == NULL
+		|| loadedImage->LoadOptions == NULL
+		|| loadedImage->LoadOptionsSize == 0) {
+		return false;
+	}
+
+	char buffer[256];
+	buffer[0] = '\0';
+	utf16le_to_utf8((uint16*)loadedImage->LoadOptions,
+		loadedImage->LoadOptionsSize / 2, buffer, sizeof(buffer));
+
+	for (const char *token = buffer; *token != '\0'; token++) {
+		if ((token == buffer || token[-1] == ' ')
+			&& strncmp(token, "ip=", 3) == 0) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+
+static efi_device_path_protocol*
+device_path_for(efi_handle handle)
+{
+	efi_device_path_protocol *path = NULL;
+	if (handle == NULL || kBootServices->HandleProtocol(handle,
+			&sDevicePathGUID, (void**)&path) != EFI_SUCCESS) {
+		return NULL;
+	}
+
+	return path;
+}
+
+
+static size_t
+device_path_length(efi_device_path_protocol *path)
+{
+	efi_device_path_protocol *node = path;
+	while (node->Type != DEVICE_PATH_END
+		&& node->Length >= sizeof(efi_device_path_protocol)) {
+		node = (efi_device_path_protocol*)(((uint8*)node) + node->Length);
+	}
+
+	return (uint8*)node - (uint8*)path;
+}
+
+
+/*!	Whether \a path names the disk, or something on it, that \a prefix names.
+
+	The device path of a partition starts with the path of the disk holding
+	it, so this says whether the loader came off that disk.
+*/
+static bool
+device_path_starts_with(efi_device_path_protocol *path,
+	efi_device_path_protocol *prefix)
+{
+	if (path == NULL || prefix == NULL)
+		return false;
+
+	size_t prefixLength = device_path_length(prefix);
+	return prefixLength > 0 && device_path_length(path) >= prefixLength
+		&& memcmp(prefix, path, prefixLength) == 0;
+}
+
+
+/*!	Whether this loader was itself loaded over the network. */
+static bool
+booted_from_network(void)
+{
+	efi_device_path_protocol *devicePath = NULL;
+	if (kBootServices->HandleProtocol(kImage, &sLoadedImageDevicePathGUID,
+			(void**)&devicePath) != EFI_SUCCESS || devicePath == NULL) {
+		return false;
+	}
+
+	for (; devicePath->Length >= sizeof(efi_device_path_protocol);
+		devicePath = (efi_device_path_protocol*)(((uint8*)devicePath)
+			+ devicePath->Length)) {
+		if (devicePath->Type == DEVICE_PATH_END)
+			break;
+		if (devicePath->Type != DEVICE_PATH_MESSAGING)
+			continue;
+		if (devicePath->SubType == DEVICE_PATH_MESSAGING_MAC
+			|| devicePath->SubType == DEVICE_PATH_MESSAGING_IPV4
+			|| devicePath->SubType == DEVICE_PATH_MESSAGING_IPV6) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+
 status_t
 platform_add_boot_device(struct stage2_args *args, NodeList *devicesList)
 {
@@ -147,10 +260,31 @@ platform_add_boot_device(struct stage2_args *args, NodeList *devicesList)
 	efi_block_io_protocol *blockIo;
 	size_t memSize = 0;
 
-	// If the bootloader was started from the network (net_stack_init will find
-	// the ip= parameter in the LoadOptions), add network booting as the first
-	// entry if available
-	status_t error = net_stack_init();
+	// Which disk this loader came off. Every disk the firmware knows gets
+	// added below and the first one carrying a Haiku system wins, so on a
+	// machine that already has Haiku installed the boot medium has to come
+	// first -- otherwise booting a USB stick quietly starts the loader on
+	// the installed volume instead, and the kernel is then told to mount a
+	// partition it cannot match.
+	efi_loaded_image_protocol *loadedImage = NULL;
+	efi_device_path_protocol *bootDevicePath = NULL;
+	if (kBootServices->HandleProtocol(kImage, &sLoadedImageGUID,
+			(void**)&loadedImage) == EFI_SUCCESS && loadedImage != NULL)
+		bootDevicePath = device_path_for(loadedImage->DeviceHandle);
+
+	// If the bootloader was started from the network, add network booting as
+	// the first entry if available.
+	//
+	// Only when the network was actually asked for: bringing the stack up
+	// means locating and starting the Simple Network Protocol, and on Apple's
+	// EFI that leaves the firmware unable to answer any Block I/O lookup
+	// afterwards -- LocateProtocol for EFI_BLOCK_IO_PROTOCOL never returns --
+	// so a Mac booting from USB hangs before it ever looks at the stick.
+	// EFIEthernetInterface::Init() gives up without an "ip=" load option in
+	// any case, so nothing that used to work is skipped here.
+	status_t error = B_ERROR;
+	if (booted_from_network() || load_options_request_network())
+		error = net_stack_init();
 	if (error != B_OK) {
 		TRACE("Can't init network...\n");
 	} else {
@@ -205,7 +339,12 @@ platform_add_boot_device(struct stage2_args *args, NodeList *devicesList)
 		EfiDevice *device = new(std::nothrow)EfiDevice(blockIo);
 		if (device == NULL)
 			panic("Can't allocate memory for block devices!");
-		devicesList->Insert(device);
+
+		bool isBootDisk = device_path_starts_with(bootDevicePath,
+			device_path_for(handles[n]));
+		if (isBootDisk)
+			TRACE("%s: booted off this disk\n", __func__);
+		devicesList->Insert(device, !isBootDisk);
 	}
 
 	return devicesList->Count() > 0 ? B_OK : B_ENTRY_NOT_FOUND;

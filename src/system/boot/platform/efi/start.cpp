@@ -95,6 +95,7 @@ convert_kernel_args()
 	fix_address(gKernelArgs.vesa_modes);
 	fix_address(gKernelArgs.edid_info);
 	fix_address(gKernelArgs.debug_output);
+	fix_address(gKernelArgs.previous_debug_output);
 	fix_address(gKernelArgs.boot_splash);
 
 	arch_convert_kernel_args();
@@ -242,6 +243,7 @@ efi_main(efi_handle image, efi_system_table *systemTable)
 
 	call_ctors();
 
+	debug_claim_syslog_memory();
 	console_init();
 	serial_init();
 	serial_enable();

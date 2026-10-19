@@ -176,6 +176,29 @@ platform_allocate_region_below(void **_address, size_t size, phys_addr_t maxAddr
 }
 
 
+/*!	Records pages already obtained from AllocatePages(), so that they are
+	mapped for the kernel like any other region.
+*/
+extern "C" status_t
+platform_add_allocated_region(void *address, size_t size)
+{
+	TRACE("%s: called\n", __func__);
+
+	memory_region *region = new(std::nothrow) memory_region {
+		next: allocated_regions,
+		vaddr: 0,
+		paddr: (phys_addr_t)(addr_t)address,
+		size: size
+	};
+
+	if (region == NULL)
+		return B_NO_MEMORY;
+
+	allocated_regions = region;
+	return B_OK;
+}
+
+
 /*!
 	Neither \a virtualAddress nor \a size need to be aligned, but the function
 	will map all pages the range intersects with.
