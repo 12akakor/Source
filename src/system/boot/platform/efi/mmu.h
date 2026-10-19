@@ -52,6 +52,8 @@ extern status_t platform_bootloader_address_to_kernel_address(void *address,
 extern status_t platform_allocate_region_below(void **_address,
 	size_t size, phys_addr_t maxAddress);
 
+extern status_t platform_add_allocated_region(void *address, size_t size);
+
 #ifdef __cplusplus
 }
 #endif

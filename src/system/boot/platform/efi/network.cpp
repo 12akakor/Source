@@ -165,7 +165,16 @@ EFIEthernetInterface::Init()
 		kImage, &sLoadedImageProtocolGUID, (void**)&loadedImageProtocol);
 
 	if (status == EFI_SUCCESS) {
+		if (loadedImageProtocol->LoadOptions == NULL
+			|| loadedImageProtocol->LoadOptionsSize == 0) {
+			// Nothing to parse, and LoadOptions may be NULL, which is not
+			// safe to walk. Same outcome as parsing an empty string.
+			TRACE("No load options\n");
+			return B_ERROR;
+		}
+
 		char buffer[256];
+		buffer[0] = '\0';
 		utf16le_to_utf8((uint16*)loadedImageProtocol->LoadOptions,
 			loadedImageProtocol->LoadOptionsSize / 2, buffer, sizeof(buffer));
 		TRACE("Load options: %s\n", buffer);
@@ -173,16 +182,13 @@ EFIEthernetInterface::Init()
 		char* base = buffer;
 		char* ptr = base;
 		while (*ptr != '\0') {
-			if (*ptr == '=') {
-				TRACE("Key at %ld: %s\n", ptr - base, base);
-				// Found a key-value separator, see if it's a known option
-				if (ptr - base != 2)
-					continue;
-
-				if (strncmp(base, "ip", 2) == 0) {
-					TRACE("Found ip configuration in command line\n");
-					break;
-				}
+			// Note the key length and name are tested together: an '=' whose
+			// key is not "ip" used to `continue` without advancing ptr, which
+			// left this loop spinning on that character forever.
+			if (*ptr == '=' && ptr - base == 2
+				&& strncmp(base, "ip", 2) == 0) {
+				TRACE("Found ip configuration in command line\n");
+				break;
 			}
 
 			// At any space, reset the base pointer to the start of the next

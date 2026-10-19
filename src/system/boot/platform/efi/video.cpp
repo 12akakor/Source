@@ -291,6 +291,17 @@ platform_switch_to_logo(void)
 	gKernelArgs.frame_buffer.bytes_per_row = sGraphicsOutput->Mode->Info->PixelsPerScanLine
 			* ((depth + 7) / 8);
 
+	// Clear the whole mode to black before the splash goes up. Without this
+	// whatever the firmware left on screen -- on a Mac, the boot picker --
+	// stays visible around the splash for the rest of the boot.
+	efi_graphics_output_blt_pixel black;
+	black.Red = 0;
+	black.Green = 0;
+	black.Blue = 0;
+	black.Reserved = 0;
+	sGraphicsOutput->Blt(sGraphicsOutput, &black, EfiBltVideoFill, 0, 0, 0, 0,
+		gKernelArgs.frame_buffer.width, gKernelArgs.frame_buffer.height, 0);
+
 	video_display_splash(gKernelArgs.frame_buffer.physical_buffer.start);
 }
 

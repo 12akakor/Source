@@ -401,24 +401,48 @@ get_boot_partitions(KMessage& bootVolume, PartitionStack& partitions)
 			BootMethod*		fBootMethod;
 	} visitor(bootMethod, partitions);
 
-	bool strict = true;
+	// A disk slower to enumerate than the medium the loader came from is
+	// not necessarily here yet. On a machine booted from its own disk with
+	// a USB stick still plugged in, the stick turns up on the first scan
+	// and the internal disk does not, which leaves the boot volume missing
+	// and used to panic. Scan again a few times before giving up.
+	const int32 kScanAttempts = 30;
+	const bigtime_t kScanDelay = 1000000;
 
-	while (true) {
-		KDiskDevice *device;
-		int32 cookie = 0;
-		while ((device = manager->NextDevice(&cookie)) != NULL) {
-			if (!bootMethod->IsBootDevice(device, strict))
-				continue;
+	for (int32 attempt = 0; true; attempt++) {
+		bool strict = true;
 
-			if (device->VisitEachDescendant(&visitor) != NULL)
+		while (true) {
+			KDiskDevice *device;
+			int32 cookie = 0;
+			while ((device = manager->NextDevice(&cookie)) != NULL) {
+				if (!bootMethod->IsBootDevice(device, strict))
+					continue;
+
+				if (device->VisitEachDescendant(&visitor) != NULL)
+					break;
+			}
+
+			if (!partitions.IsEmpty() || !strict)
 				break;
+
+			// we couldn't find any potential boot devices, try again less
+			// strict
+			strict = false;
 		}
 
-		if (!partitions.IsEmpty() || !strict)
+		if (!partitions.IsEmpty() || attempt + 1 >= kScanAttempts)
 			break;
 
-		// we couldn't find any potential boot devices, try again less strict
-		strict = false;
+		int32 deviceCount = 0;
+		int32 countCookie = 0;
+		while (manager->NextDevice(&countCookie) != NULL)
+			deviceCount++;
+
+		dprintf("boot: no boot partition after %" B_PRId32 " scan(s), %"
+			B_PRId32 " device(s) so far\n", attempt + 1, deviceCount);
+		snooze(kScanDelay);
+		manager->InitialDeviceScan();
 	}
 
 	// sort partition list (e.g.. when booting from CD, CDs should come first in
@@ -478,6 +502,34 @@ vfs_mount_boot_file_system(kernel_args* args)
 		panic("get_boot_partitions failed!");
 	}
 	if (partitions.IsEmpty()) {
+		// Say what was being looked for and what was actually there. The
+		// panic puts the tail of the syslog on screen, so this is the only
+		// place a machine that cannot be reached otherwise can report it.
+		dprintf("boot: wanted offset %" B_PRIdOFF ", method %" B_PRId32
+			", from image %d\n",
+			bootVolume.GetInt64(BOOT_VOLUME_PARTITION_OFFSET, -1),
+			bootVolume.GetInt32(BOOT_METHOD, -1),
+			bootVolume.GetBool(BOOT_VOLUME_BOOTED_FROM_IMAGE, false) ? 1 : 0);
+
+		struct PartitionPrinter : KPartitionVisitor {
+			virtual bool VisitPre(KPartition* partition)
+			{
+				dprintf("boot:   offset %" B_PRIdOFF " size %" B_PRIdOFF
+					" %s\n", partition->Offset(), partition->Size(),
+					partition->ContentType() != NULL
+						? partition->ContentType() : "-");
+				return false;
+			}
+		} printer;
+
+		KDiskDeviceManager* manager = KDiskDeviceManager::Default();
+		KDiskDevice* device;
+		int32 deviceCookie = 0;
+		while ((device = manager->NextDevice(&deviceCookie)) != NULL) {
+			dprintf("boot: device %s\n", device->Path());
+			device->VisitEachDescendant(&printer);
+		}
+
 		panic("did not find any boot partitions! @! syslog | tail 15");
 	}
 

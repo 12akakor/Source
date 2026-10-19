@@ -25,11 +25,14 @@
 #include <ColumnTypes.h>
 #include <ControlLook.h>
 #include <Debug.h>
+#include <Directory.h>
 #include <DiskDevice.h>
 #include <DiskDeviceRoster.h>
 #include <DiskDeviceVisitor.h>
 #include <DiskDeviceTypes.h>
 #include <DiskSystem.h>
+#include <File.h>
+#include <FindDirectory.h>
 #include <IconUtils.h>
 #include <LayoutBuilder.h>
 #include <Locale.h>
@@ -82,6 +85,83 @@ enum {
 
 	MSG_PARTITION_ROW_SELECTED	= 'prsl',
 };
+
+
+// The name EFI firmware looks for on the removable-media path. Keeping the
+// Installer's list here would duplicate it; this is the one DriveSetup needs.
+#if defined(__i386__)
+static const char* const kEfiLoaderName = "BOOTIA32.EFI";
+#elif defined(__x86_64__)
+static const char* const kEfiLoaderName = "BOOTX64.EFI";
+#elif defined(__arm__)
+static const char* const kEfiLoaderName = "BOOTARM.EFI";
+#elif defined(__aarch64__)
+static const char* const kEfiLoaderName = "BOOTAA64.EFI";
+#elif defined(__riscv) && __riscv_xlen == 32
+static const char* const kEfiLoaderName = "BOOTRISCV32.EFI";
+#elif defined(__riscv) && __riscv_xlen == 64
+static const char* const kEfiLoaderName = "BOOTRISCV64.EFI";
+#else
+static const char* const kEfiLoaderName = NULL;
+#endif
+
+
+/*!	Creates \a directory on the mounted volume if it is not there yet, and
+	opens \a name inside it for writing.
+*/
+static status_t
+create_file_at(const BPath& mountPoint, const char* directory,
+	const char* name, BFile& file)
+{
+	BPath path;
+	status_t status = path.SetTo(mountPoint.Path(), directory);
+	if (status == B_OK)
+		status = create_directory(path.Path(), 0755);
+	if (status != B_OK)
+		return status;
+
+	BDirectory target(path.Path());
+	status = target.InitCheck();
+	if (status != B_OK)
+		return status;
+
+	return target.CreateFile(name, &file, false);
+}
+
+
+static status_t
+copy_loader_to(BFile& loader, const BPath& mountPoint, const char* directory,
+	const char* name)
+{
+	BFile file;
+	status_t status = create_file_at(mountPoint, directory, name, file);
+	if (status != B_OK)
+		return status;
+
+	if (loader.Seek(0, SEEK_SET) < 0)
+		return B_IO_ERROR;
+
+	// A FAT volume has no attributes to carry over, so a plain copy will do.
+	const size_t kChunkSize = 64 * 1024;
+	char* buffer = new(std::nothrow) char[kChunkSize];
+	if (buffer == NULL)
+		return B_NO_MEMORY;
+
+	while (status == B_OK) {
+		ssize_t read = loader.Read(buffer, kChunkSize);
+		if (read <= 0) {
+			status = read < 0 ? (status_t)read : B_OK;
+			break;
+		}
+
+		ssize_t written = file.Write(buffer, read);
+		if (written != read)
+			status = written < 0 ? (status_t)written : B_IO_ERROR;
+	}
+
+	delete[] buffer;
+	return status;
+}
 
 
 class ListPopulatorVisitor : public BDiskDeviceVisitor {
@@ -1481,14 +1561,16 @@ MainWindow::_Initialize(BDiskDevice* disk, partition_id selectedPartition,
 		return;
 	}
 
-	if (partition->IsMounted()) {
-		if (partition->Unmount() != B_OK) {
-			// Probably it's the system partition
-			_DisplayPartitionError(
-				B_TRANSLATE("The partition cannot be unmounted."));
+	// Unmount the partition and, when a whole device was selected, everything
+	// on it: initializing a device fails while any partition it contains is
+	// still mounted, and on a disk that came from another operating system
+	// something usually is -- an EFI system partition, for instance.
+	if (_UnmountAll(partition) != B_OK) {
+		// Probably it's the system partition
+		_DisplayPartitionError(
+			B_TRANSLATE("The partition cannot be unmounted."));
 
-			return;
-		}
+		return;
 	}
 
 	BDiskSystem diskSystem;
@@ -1513,6 +1595,41 @@ MainWindow::_Initialize(BDiskDevice* disk, partition_id selectedPartition,
 	if (diskSystem.IsFileSystem()) {
 		BString intelExtendedPartition = "Intel Extended Partition";
 		if (disk->ID() == selectedPartition) {
+			// Formatting a whole disk with a file system leaves it with no
+			// partition table, which EFI firmware cannot boot from. When the
+			// disk is empty anyway, offer the layout that can be booted
+			// instead of just warning about it.
+			BAlert* rawAlert = new BAlert("raw disk",
+				B_TRANSLATE("Formatting the whole disk leaves it without a "
+					"partition table, which EFI firmware cannot boot from.\n\n"
+					"Set the disk up for booting Haiku instead? That writes a "
+					"GUID partition table, a 64 MiB EFI system partition for "
+					"the boot loader, and gives the rest to Be File System.\n\n"
+					"Either way, everything on the disk is lost."),
+				B_TRANSLATE("Set up for booting"),
+				B_TRANSLATE("Format the whole disk"), B_TRANSLATE("Cancel"),
+				B_WIDTH_FROM_WIDEST, B_IDEA_ALERT);
+			rawAlert->SetShortcut(2, B_ESCAPE);
+			int32 rawChoice = rawAlert->Go();
+			if (rawChoice == 2)
+				return;
+			if (rawChoice == 0) {
+				if (_UnmountAll(partition) != B_OK) {
+					_DisplayPartitionError(B_TRANSLATE("The partition "
+						"cannot be unmounted."));
+					return;
+				}
+				status_t status = _InitializeGpt(disk);
+				if (status != B_OK) {
+					_DisplayPartitionError(B_TRANSLATE("Could not write a "
+						"GUID partition table to the disk."), NULL, status);
+					return;
+				}
+				disk->Update();
+				_CreateBootLayout(disk);
+				return;
+			}
+
 			message = B_TRANSLATE("Are you sure you "
 				"want to format a raw disk? (Most people initialize the disk "
 				"with a partitioning system first) You will be asked "
@@ -1645,6 +1762,25 @@ MainWindow::_Initialize(BDiskDevice* disk, partition_id selectedPartition,
 		} else {
 			_DisplayPartitionError(B_TRANSLATE("The disk has been "
 				"successfully initialized.\n"), partition);
+
+			// A freshly partitioned disk is empty, and laying it out for
+			// booting Haiku by hand is fiddly: EFI firmware needs its loader
+			// on a FAT32 "EFI system data" partition, and the Installer only
+			// offers a partition that is exactly that. Offer to do it here.
+			if (strcmp(diskSystem.PrettyName(), kPartitionTypeEFI) == 0
+				&& partition != NULL && partition->IsDevice()) {
+				BAlert* layoutAlert = new BAlert("boot layout",
+					B_TRANSLATE("Set this disk up for booting Haiku?\n\n"
+						"This creates a 64 MiB EFI system partition for the "
+						"boot loader, and gives the rest of the disk to a Be "
+						"File System partition to install onto.\n\n"
+						"You can also create the partitions yourself."),
+					B_TRANSLATE("Set up"), B_TRANSLATE("Not now"), NULL,
+					B_WIDTH_FROM_WIDEST, B_IDEA_ALERT);
+				layoutAlert->SetShortcut(1, B_ESCAPE);
+				if (layoutAlert->Go() == 0)
+					_CreateBootLayout(disk);
+			}
 		}
 	} else {
 		if (diskSystem.IsFileSystem()) {
@@ -1655,6 +1791,300 @@ MainWindow::_Initialize(BDiskDevice* disk, partition_id selectedPartition,
 				"disk %s!\n"), partition, status);
 		}
 	}
+
+	_ScanDrives();
+}
+
+
+/*!	Writes an empty GUID partition table to \a disk. */
+status_t
+MainWindow::_InitializeGpt(BDiskDevice* disk)
+{
+	BDiskSystem gptSystem;
+	fDiskDeviceRoster.RewindDiskSystems();
+	bool found = false;
+	while (fDiskDeviceRoster.GetNextDiskSystem(&gptSystem) == B_OK) {
+		if (gptSystem.SupportsInitializing()
+			&& strcmp(gptSystem.PrettyName(), kPartitionTypeEFI) == 0) {
+			found = true;
+			break;
+		}
+	}
+	if (!found)
+		return B_ENTRY_NOT_FOUND;
+
+	ModificationPreparer modificationPreparer(disk);
+	status_t status = modificationPreparer.ModificationStatus();
+	if (status != B_OK)
+		return status;
+
+	BString name;
+	status = disk->ValidateInitialize(gptSystem.PrettyName(), &name, "");
+	if (status == B_OK)
+		status = disk->Initialize(gptSystem.PrettyName(), name.String(), "");
+	if (status != B_OK)
+		return status;
+
+	return modificationPreparer.CommitModifications();
+}
+
+
+/*!	Unmounts \a partition and everything below it. */
+status_t
+MainWindow::_UnmountAll(BPartition* partition)
+{
+	if (partition == NULL)
+		return B_BAD_VALUE;
+
+	for (int32 i = 0; i < partition->CountChildren(); i++) {
+		status_t status = _UnmountAll(partition->ChildAt(i));
+		if (status != B_OK)
+			return status;
+	}
+
+	if (partition->IsMounted())
+		return partition->Unmount();
+
+	return B_OK;
+}
+
+
+/*!	Copies the EFI loader onto the EFI system partition.
+
+	Without this the firmware has nothing to boot: a Mac shows the folder with
+	a question mark, and a PC falls through to the next device. The Installer
+	can do the same from its EFI loader menu, but that is a step of its own
+	that is easy to miss.
+
+	EFI/BOOT/<arch>.EFI is the path a UEFI firmware falls back to when no boot
+	entry names a loader, which is what makes the disk boot by itself. It is
+	the only place the loader may go: the boot loader takes any volume with a
+	top-level "system" directory for a Haiku volume, and FAT does not
+	distinguish case, so laying out Apple's \System\Library\CoreServices here
+	would make it pick the EFI partition and leave the kernel with nothing to
+	mount.
+*/
+status_t
+MainWindow::_InstallEfiLoader(BPartition* partition)
+{
+	if (kEfiLoaderName == NULL)
+		return B_NOT_SUPPORTED;
+
+	BPath loaderPath;
+	if (find_directory(B_SYSTEM_DATA_DIRECTORY, &loaderPath) != B_OK
+		|| loaderPath.Append("platform_loaders/haiku_loader.efi") != B_OK) {
+		return B_ENTRY_NOT_FOUND;
+	}
+
+	BFile loader(loaderPath.Path(), B_READ_ONLY);
+	status_t status = loader.InitCheck();
+	if (status != B_OK)
+		return status;
+
+	bool wasMounted = partition->IsMounted();
+	if (!wasMounted) {
+		status = partition->Mount();
+		if (status < B_OK)
+			return status;
+	}
+
+	BPath mountPoint;
+	status = partition->GetMountPoint(&mountPoint);
+
+	if (status == B_OK)
+		status = copy_loader_to(loader, mountPoint, "EFI/BOOT", kEfiLoaderName);
+
+	if (!wasMounted)
+		partition->Unmount();
+
+	return status;
+}
+
+
+/*!	Lays an empty GPT disk out the way an EFI machine needs to boot Haiku:
+	a FAT32 EFI system partition for the loader, then the rest as BFS.
+
+	One partition per modification session, each committed before the next is
+	placed: the free-space list does not account for a child that has been
+	created but not yet written, so sizing the second partition inside the
+	same session puts it on top of the first.
+
+	The EFI partition is deliberately formatted as FAT32 rather than letting
+	the FAT driver pick by size -- at 64 MiB it would choose FAT16, and the
+	Installer only offers an EFI partition whose content type is FAT32.
+*/
+void
+MainWindow::_CreateBootLayout(BDiskDevice* disk)
+{
+	static const off_t kEfiPartitionSize = 64 * 1024 * 1024;
+	static const char* kEfiPartitionType = "EFI system data";
+
+	BAlert* alert = new BAlert("final notice", B_TRANSLATE("Are you sure you "
+		"want to write the changes back to disk now?\n\n"
+		"All data on the disk will be irretrievably lost if you do so!"),
+		B_TRANSLATE("Write changes"), B_TRANSLATE("Cancel"), NULL,
+		B_WIDTH_FROM_WIDEST, B_WARNING_ALERT);
+	alert->SetShortcut(1, B_ESCAPE);
+	if (alert->Go() == 1)
+		return;
+
+	// Two passes over the same two partitions: create them, then format
+	// them. A partition cannot be given a file system before it exists.
+	const char* types[2] = { kEfiPartitionType, kPartitionTypeBFS };
+	const char* names[2] = { "EFI", "Haiku" };
+
+	for (int32 pass = 0; pass < 2; pass++) {
+		off_t wanted = pass == 0 ? kEfiPartitionSize : -1;
+
+		ModificationPreparer modificationPreparer(disk);
+		status_t status = modificationPreparer.ModificationStatus();
+
+		BPartitioningInfo partitioningInfo;
+		off_t offset = 0;
+		off_t size = 0;
+		if (status == B_OK)
+			status = disk->GetPartitioningInfo(&partitioningInfo);
+		if (status == B_OK && partitioningInfo.CountPartitionableSpaces() == 0)
+			status = B_ENTRY_NOT_FOUND;
+		if (status == B_OK) {
+			// Take the largest free span, so a small gap left in front of the
+			// first partition does not get picked for the big one.
+			off_t bestOffset = 0;
+			off_t bestSize = 0;
+			for (int32 i = 0;
+				i < partitioningInfo.CountPartitionableSpaces(); i++) {
+				off_t spaceOffset;
+				off_t spaceSize;
+				if (partitioningInfo.GetPartitionableSpaceAt(i, &spaceOffset,
+						&spaceSize) != B_OK) {
+					continue;
+				}
+				if (spaceSize > bestSize) {
+					bestOffset = spaceOffset;
+					bestSize = spaceSize;
+				}
+			}
+			if (bestSize == 0)
+				status = B_ENTRY_NOT_FOUND;
+
+			// Start on a 1 MiB boundary, the alignment every other
+			// partitioning tool uses. The first usable GPT block is 34,
+			// which is neither aligned to a 4 KiB physical sector nor
+			// somewhere other systems expect a partition to begin.
+			static const off_t kAlignment = 1024 * 1024;
+			off_t alignedOffset = (bestOffset + kAlignment - 1)
+				/ kAlignment * kAlignment;
+			if (alignedOffset - bestOffset < bestSize)
+				bestSize -= alignedOffset - bestOffset;
+			else
+				bestSize = 0;
+			bestOffset = alignedOffset;
+
+			// And keep the size a whole number of MiB.
+			bestSize = bestSize / kAlignment * kAlignment;
+
+			if (bestSize == 0)
+				status = B_ENTRY_NOT_FOUND;
+			offset = bestOffset;
+			size = wanted > 0 && wanted < bestSize ? wanted : bestSize;
+		}
+
+		if (status == B_OK && pass == 0 && size < kEfiPartitionSize) {
+			_DisplayPartitionError(B_TRANSLATE("This disk is too small to lay "
+				"out for booting."));
+			return;
+		}
+
+		BString name(names[pass]);
+		if (status == B_OK) {
+			status = disk->ValidateCreateChild(&offset, &size, types[pass],
+				&name, "");
+		}
+		if (status == B_OK) {
+			status = disk->CreateChild(offset, size, types[pass],
+				name.String(), "");
+		}
+		if (status == B_OK)
+			status = modificationPreparer.CommitModifications();
+
+		if (status != B_OK) {
+			_DisplayPartitionError(pass == 0
+				? B_TRANSLATE("Could not create the EFI system partition.")
+				: B_TRANSLATE("Could not create the Haiku partition."),
+				NULL, status);
+			_ScanDrives();
+			return;
+		}
+
+		disk->Update();
+	}
+
+	// Now give each of them a file system.
+	for (int32 i = 0; i < disk->CountChildren(); i++) {
+		BPartition* child = disk->ChildAt(i);
+		if (child == NULL || child->Type() == NULL)
+			continue;
+
+		const char* diskSystem = NULL;
+		const char* parameters = "";
+		BString name;
+		if (strcmp(child->Type(), kEfiPartitionType) == 0) {
+			diskSystem = kPartitionTypeFAT32;
+			parameters = "fat 32";
+			name = "EFI";
+		} else if (strcmp(child->Type(), kPartitionTypeBFS) == 0) {
+			diskSystem = kPartitionTypeBFS;
+			name = "Haiku";
+		} else
+			continue;
+
+		ModificationPreparer modificationPreparer(disk);
+		status_t status = modificationPreparer.ModificationStatus();
+		if (status == B_OK) {
+			status = child->ValidateInitialize(diskSystem, &name, parameters);
+			if (status == B_OK)
+				status = child->Initialize(diskSystem, name.String(), parameters);
+			if (status == B_OK)
+				status = modificationPreparer.CommitModifications();
+		}
+
+		if (status != B_OK) {
+			_DisplayPartitionError(B_TRANSLATE("The partitions were created, "
+				"but one of them could not be formatted. Format it from the "
+				"Partition menu."), NULL, status);
+			_ScanDrives();
+			return;
+		}
+
+		disk->Update();
+	}
+
+	// The loader has to go on after the format, not before: initializing the
+	// partition would throw it away again.
+	status_t loaderStatus = B_ENTRY_NOT_FOUND;
+	for (int32 i = 0; i < disk->CountChildren(); i++) {
+		BPartition* child = disk->ChildAt(i);
+		if (child == NULL || child->Type() == NULL
+			|| strcmp(child->Type(), kEfiPartitionType) != 0) {
+			continue;
+		}
+
+		loaderStatus = _InstallEfiLoader(child);
+		break;
+	}
+
+	if (loaderStatus != B_OK) {
+		_DisplayPartitionError(B_TRANSLATE("The partitions were created, but "
+			"the boot loader could not be copied to the EFI partition. The "
+			"Installer can put it there from its EFI loader menu."), NULL,
+			loaderStatus);
+		_ScanDrives();
+		return;
+	}
+
+	_DisplayPartitionError(B_TRANSLATE("The disk is ready. The boot loader is "
+		"already on the EFI partition, so installing onto the Haiku partition "
+		"is all that is left."));
 
 	_ScanDrives();
 }
