@@ -44,6 +44,7 @@ struct internal_intr {
 	thread_id		thread;
 	sem_id			sem;
 	int32			handling;
+	bool			continuePolling;
 };
 
 static int32 intr_wrapper(void *data);
@@ -331,6 +332,17 @@ intr_wrapper(void *data)
 }
 
 
+// Private to the linked driver: only its active threaded handler may call.
+// free_internal_intr() joins that thread before releasing this cookie.
+extern "C" void
+bus_continue_intr(void* cookie)
+{
+	struct internal_intr* intr = (struct internal_intr*)cookie;
+	if (intr != NULL && find_thread(NULL) == intr->thread)
+		intr->continuePolling = true;
+}
+
+
 static int32
 intr_handler(void *data)
 {
@@ -348,11 +360,18 @@ intr_handler(void *data)
 		if ((intr->flags & INTR_MPSAFE) == 0)
 			mtx_lock(&Giant);
 
+		intr->continuePolling = false;
 		intr->handler(intr->arg);
 
 		if ((intr->flags & INTR_MPSAFE) == 0)
 			mtx_unlock(&Giant);
 		atomic_and(&intr->handling, 0);
+		if (intr->continuePolling) {
+			// Release Giant between bounded polls, but keep the hardware
+			// source masked until the ring is drained. No timer-tick gap.
+			release_sem_etc(intr->sem, 1, B_DO_NOT_RESCHEDULE);
+			continue;
+		}
 		HAIKU_REENABLE_INTERRUPTS(intr->dev);
 	}
 
@@ -391,8 +410,10 @@ bus_setup_intr(device_t dev, struct resource *res, int flags,
 	intr->arg = arg;
 	intr->irq = res->r_bushandle;
 	intr->flags = flags;
+	intr->handling = 0;
 	intr->sem = -1;
 	intr->thread = -1;
+	intr->continuePolling = false;
 
 	if (filter != NULL) {
 		status = install_io_interrupt_handler(intr->irq,

@@ -679,8 +679,8 @@ ieee80211_crypto_get_txkey(struct ieee80211_node *ni, struct mbuf *m)
 /*
  * Add privacy headers appropriate for the specified key.
  */
-struct ieee80211_key *
-ieee80211_crypto_encap(struct ieee80211_node *ni, struct mbuf *m)
+static struct ieee80211_key *
+renku_crypto_encap_locked(struct ieee80211_node *ni, struct mbuf *m)
 {
 	struct ieee80211_key *k;
 	const struct ieee80211_cipher *cip;
@@ -697,8 +697,8 @@ ieee80211_crypto_encap(struct ieee80211_node *ni, struct mbuf *m)
  * Validate and strip privacy headers (and trailer) for a
  * received frame that has the WEP/Privacy bit set.
  */
-int
-ieee80211_crypto_decap(struct ieee80211_node *ni, struct mbuf *m, int hdrlen,
+static int
+renku_crypto_decap_locked(struct ieee80211_node *ni, struct mbuf *m, int hdrlen,
     struct ieee80211_key **key)
 {
 #define	IEEE80211_WEP_HDRLEN	(IEEE80211_WEP_IVLEN + IEEE80211_WEP_KIDLEN)
@@ -1011,4 +1011,31 @@ ieee80211_crypto_init_aad(const struct ieee80211_frame *wh, uint8_t *aad,
 	}
 
 	return (aad_len);
+}
+
+/* The private driver supplies both hooks. Other static WLAN consumers retain
+ * their existing locking behavior. These wrappers include key selection and
+ * PN commit; locking only the cipher function would leave a rekey race. */
+extern void renku_crypto_enter(struct ieee80211vap*) __attribute__((weak));
+extern void renku_crypto_leave(struct ieee80211vap*) __attribute__((weak));
+
+struct ieee80211_key *
+ieee80211_crypto_encap(struct ieee80211_node *ni, struct mbuf *m)
+{
+	bool locked = renku_crypto_enter != NULL && renku_crypto_leave != NULL;
+	if (locked) renku_crypto_enter(ni->ni_vap);
+	struct ieee80211_key* key = renku_crypto_encap_locked(ni, m);
+	if (locked) renku_crypto_leave(ni->ni_vap);
+	return key;
+}
+
+int
+ieee80211_crypto_decap(struct ieee80211_node *ni, struct mbuf *m, int hdrlen,
+    struct ieee80211_key **key)
+{
+	bool locked = renku_crypto_enter != NULL && renku_crypto_leave != NULL;
+	if (locked) renku_crypto_enter(ni->ni_vap);
+	int result = renku_crypto_decap_locked(ni, m, hdrlen, key);
+	if (locked) renku_crypto_leave(ni->ni_vap);
+	return result;
 }
