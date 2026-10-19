@@ -1,3 +1,4 @@
+#include <KernelExport.h>
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
@@ -61,7 +62,33 @@ struct ccmp_ctx {
 	struct ieee80211vap *cc_vap;	/* for diagnostics+statistics */
 	struct ieee80211com *cc_ic;
 	rijndael_ctx	     cc_aes;
+	uint8_t cc_vector_key[244];
+	bool cc_vector;
+	int32 cc_rx_slot;
 };
+
+#if defined(__x86_64__)
+// Weak hooks keep other drivers using the same static WLAN library scalar.
+extern void renku_vpaes_ccmp_blocks(uint8_t*, size_t, const void*,
+	uint8_t*, uint8_t*, unsigned) __attribute__((weak));
+extern bool renku_ccmp_vector_supported(void) __attribute__((weak));
+extern int renku_vpaes_set_encrypt_key(const uint8_t*, int, void*)
+	__attribute__((weak));
+extern void renku_vpaes_encrypt(const uint8_t*, uint8_t*, const void*)
+	__attribute__((weak));
+#endif
+
+static void
+ccmp_encrypt_block(struct ccmp_ctx* ctx, const uint8_t* input, uint8_t* output)
+{
+#if defined(__x86_64__)
+	if (ctx->cc_vector) {
+		renku_vpaes_encrypt(input, output, ctx->cc_vector_key);
+		return;
+	}
+#endif
+	rijndael_encrypt(&ctx->cc_aes, input, output);
+}
 
 static	void *ccmp_attach(struct ieee80211vap *, struct ieee80211_key *);
 static	void ccmp_detach(struct ieee80211_key *);
@@ -185,6 +212,7 @@ ccmp_setkey(struct ieee80211_key *k)
 {
 	uint32_t keylen;
 	struct ccmp_ctx *ctx = k->wk_private;
+	atomic_set(&ctx->cc_rx_slot, -1);
 
 	switch (k->wk_cipher->ic_cipher) {
 	case IEEE80211_CIPHER_AES_CCM:
@@ -206,8 +234,21 @@ ccmp_setkey(struct ieee80211_key *k)
 			__func__, k->wk_keylen, keylen/NBBY);
 		return 0;
 	}
-	if (k->wk_flags & IEEE80211_KEY_SWENCRYPT)
+	ctx->cc_vector = false;
+	if (k->wk_flags & IEEE80211_KEY_SWENCRYPT) {
 		rijndael_set_key(&ctx->cc_aes, k->wk_key, k->wk_keylen*NBBY);
+#if defined(__x86_64__)
+		if (renku_ccmp_vector_supported != NULL
+			&& renku_vpaes_set_encrypt_key != NULL
+			&& renku_vpaes_encrypt != NULL
+			&& renku_ccmp_vector_supported()) {
+			ctx->cc_vector = renku_vpaes_set_encrypt_key(k->wk_key,
+				k->wk_keylen*NBBY, ctx->cc_vector_key) == 0;
+		}
+#endif
+		dprintf("net80211: CCMP block backend %s\n",
+			ctx->cc_vector ? "SSSE3" : "scalar");
+	}
 	return 1;
 }
 
@@ -234,6 +275,8 @@ ccmp_setiv(struct ieee80211_key *k, uint8_t *ivp)
 /*
  * Add privacy headers appropriate for the specified key.
  */
+extern int renku_ccmp_tx_prepare(const struct ieee80211_key*, struct mbuf*) __attribute__((weak));
+
 static int
 ccmp_encap(struct ieee80211_key *k, struct mbuf *m)
 {
@@ -270,6 +313,10 @@ ccmp_encap(struct ieee80211_key *k, struct mbuf *m)
 	ivp += hdrlen;
 
 	ccmp_setiv(k, ivp);
+    if (renku_ccmp_tx_prepare != NULL) {
+        int hardware = renku_ccmp_tx_prepare(k, m);
+        if (hardware != 0) return hardware > 0;
+    }
 
 	/*
 	 * Finally, do software encrypt if needed.
@@ -546,11 +593,11 @@ ccmp_init_blocks(rijndael_ctx *ctx, struct ieee80211_frame *wh,
 #define	CCMP_ENCRYPT(_i, _b, _b0, _pos, _e, _len) do {	\
 	/* Authentication */				\
 	xor_block(_b, _pos, _len);			\
-	rijndael_encrypt(&ctx->cc_aes, _b, _b);		\
+	ccmp_encrypt_block(ctx, _b, _b);		\
 	/* Encryption, with counter */			\
 	_b0[14] = (_i >> 8) & 0xff;			\
 	_b0[15] = _i & 0xff;				\
-	rijndael_encrypt(&ctx->cc_aes, _b0, _e);	\
+	ccmp_encrypt_block(ctx, _b0, _e);	\
 	xor_block(_pos, _e, _len);			\
 } while (0)
 
@@ -692,12 +739,32 @@ done:
 	/* Decrypt, with counter */			\
 	_b0[14] = (_i >> 8) & 0xff;			\
 	_b0[15] = _i & 0xff;				\
-	rijndael_encrypt(&ctx->cc_aes, _b0, _b);	\
+	ccmp_encrypt_block(ctx, _b0, _b);	\
 	xor_block(_pos, _b, _len);			\
 	/* Authentication */				\
 	xor_block(_a, _pos, _len);			\
-	rijndael_encrypt(&ctx->cc_aes, _a, _a);		\
+	ccmp_encrypt_block(ctx, _a, _a);		\
 } while (0)
+
+// Group keys use slots 1..3, pairwise keys 4..53. A slot is reused only
+// after a quarantine longer than any receive path can hold old-key plaintext,
+// so a late packet from a previous key cannot pass validation by a new one.
+void
+renku_ccmp_rx_slot(const struct ieee80211_key* key, int slot)
+{
+	if (key->wk_private == NULL || key->wk_cipher == NULL
+		|| key->wk_cipher->ic_cipher != IEEE80211_CIPHER_AES_CCM)
+		return;
+	struct ccmp_ctx* ctx = key->wk_private;
+	atomic_set(&ctx->cc_rx_slot, slot >= 1 && slot < 54 ? slot : -1);
+}
+
+static bool
+ccmp_hw_slot_matches(struct ccmp_ctx* ctx, uint32 flags)
+{
+	int slot = atomic_get(&ctx->cc_rx_slot);
+	return slot >= 1 && slot < 54 && ((flags >> 24) & 63) == (uint32)slot;
+}
 
 static int
 ccmp_decrypt(struct ieee80211_key *key, u_int64_t pn, struct mbuf *m, int hdrlen)
@@ -715,6 +782,8 @@ ccmp_decrypt(struct ieee80211_key *key, u_int64_t pn, struct mbuf *m, int hdrlen
 	u_int space;
 
 	rxs = ieee80211_get_rx_params_ptr(m);
+	if (rxs != NULL && (rxs->c_pktflags & 0x80000000U) != 0)
+		return ccmp_hw_slot_matches(ctx, rxs->c_pktflags);
 	if ((rxs != NULL) && (rxs->c_pktflags & IEEE80211_RX_F_DECRYPTED) != 0)
 		return (1);
 
@@ -735,6 +804,20 @@ ccmp_decrypt(struct ieee80211_key *key, u_int64_t pn, struct mbuf *m, int hdrlen
 	for (;;) {
 		if (space > data_len)
 			space = data_len;
+#if defined(__x86_64__)
+		/* Only contiguous final mbufs use the fused full-block loop.
+		 * Chained/partial blocks and MIC checks retain the original path. */
+		if (m->m_next == NULL && ctx->cc_vector
+			&& renku_vpaes_ccmp_blocks != NULL && space >= AES_BLOCK_LEN) {
+			u_int blocks = space / AES_BLOCK_LEN;
+			renku_vpaes_ccmp_blocks(pos, blocks, ctx->cc_vector_key, b0, a, i);
+			u_int bytes = blocks * AES_BLOCK_LEN;
+			pos += bytes;
+			space -= bytes;
+			data_len -= bytes;
+			i += blocks;
+		}
+#endif
 		while (space >= AES_BLOCK_LEN) {
 			CCMP_DECRYPT(i, b, b0, pos, a, AES_BLOCK_LEN);
 			pos += AES_BLOCK_LEN, space -= AES_BLOCK_LEN;
@@ -805,3 +888,24 @@ ccmp_decrypt(struct ieee80211_key *key, u_int64_t pn, struct mbuf *m, int hdrlen
  */
 IEEE80211_CRYPTO_MODULE(ccmp, 1);
 IEEE80211_CRYPTO_MODULE_ADD(ccmp_256);
+
+int
+renku_ccmp_key_slot(const struct ieee80211_key* key)
+{
+    if (key == NULL || key->wk_private == NULL || key->wk_cipher == NULL
+        || key->wk_cipher->ic_cipher != IEEE80211_CIPHER_AES_CCM
+        || key->wk_keylen != 16 || (key->wk_flags & IEEE80211_KEY_XMIT) == 0)
+        return -1;
+    struct ccmp_ctx* ctx = key->wk_private;
+    return atomic_get(&ctx->cc_rx_slot);
+}
+
+int
+renku_ccmp_installed_slot(const struct ieee80211_key* key)
+{
+    if (key == NULL || key->wk_private == NULL || key->wk_cipher == NULL
+        || key->wk_cipher->ic_cipher != IEEE80211_CIPHER_AES_CCM)
+        return -1;
+    struct ccmp_ctx* ctx = key->wk_private;
+    return atomic_get(&ctx->cc_rx_slot);
+}

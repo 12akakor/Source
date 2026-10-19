@@ -221,6 +221,9 @@ if_free_inplace(struct ifnet *ifp)
 	IF_ADDR_LOCK_DESTROY(ifp);
 
 	delete_sem(ifp->receive_sem);
+	// The consumer stops when the device closes. Release packets it did
+	// not dequeue before destroying the queue and the driver's mbuf cache.
+	IF_DRAIN(&ifp->receive_queue);
 	ifq_uninit(&ifp->receive_queue);
 }
 
@@ -334,8 +337,6 @@ if_attach(struct ifnet *ifp)
 	TAILQ_INIT(&ifp->if_prefixhead);
 	TAILQ_INIT(&ifp->if_multiaddrs);
 
-	IF_ADDR_LOCK_INIT(ifp);
-
 	ifp->if_lladdr.sdl_family = AF_LINK;
 
 	ifq_init((struct ifqueue *) &ifp->if_snd, ifp->if_xname);
@@ -391,7 +392,6 @@ if_detach(struct ifnet *ifp)
 	if (HAIKU_DRIVER_REQUIRES(FBSD_SWI_TASKQUEUE))
 		taskqueue_drain(taskqueue_swi, &ifp->if_linktask);
 
-	IF_ADDR_LOCK_DESTROY(ifp);
 	ifq_uninit((struct ifqueue *) &ifp->if_snd);
 }
 
