@@ -15,6 +15,8 @@
 #include <stdio.h>
 
 #include <bus/PCI.h>
+#include <ACPI.h>
+#include "acpi.h"
 #include <USB3.h>
 #include <KernelExport.h>
 
@@ -47,6 +49,98 @@ typedef struct {
 	device_node* node;
 	device_node* driver_node;
 } xhci_pci_sim_info;
+
+
+// ACPI attachment ("PNP0D10", generic xHCI), used for example by the
+// Raspberry Pi 4 UEFI firmware. We describe the controller with a synthetic
+// pci_info so that the rest of the driver does not need to care.
+struct xhci_acpi_crs {
+	phys_addr_t	address;
+	uint64		length;
+	uint32		irq;
+};
+
+
+static acpi_status
+xhci_acpi_parse_crs(ACPI_RESOURCE* resource, void* context)
+{
+	xhci_acpi_crs* crs = (xhci_acpi_crs*)context;
+	switch (resource->Type) {
+		case ACPI_RESOURCE_TYPE_FIXED_MEMORY32:
+			if (crs->address == 0) {
+				crs->address = resource->Data.FixedMemory32.Address;
+				crs->length = resource->Data.FixedMemory32.AddressLength;
+			}
+			break;
+		case ACPI_RESOURCE_TYPE_ADDRESS32:
+			if (crs->address == 0
+				&& resource->Data.Address32.ResourceType == ACPI_MEMORY_RANGE) {
+				crs->address = resource->Data.Address32.Address.Minimum;
+				crs->length = resource->Data.Address32.Address.AddressLength;
+			}
+			break;
+		case ACPI_RESOURCE_TYPE_ADDRESS64:
+			if (crs->address == 0
+				&& resource->Data.Address64.ResourceType == ACPI_MEMORY_RANGE) {
+				crs->address = resource->Data.Address64.Address.Minimum;
+				crs->length = resource->Data.Address64.Address.AddressLength;
+			}
+			break;
+		case ACPI_RESOURCE_TYPE_IRQ:
+			if (crs->irq == 0 && resource->Data.Irq.InterruptCount > 0)
+				crs->irq = resource->Data.Irq.Interrupts[0];
+			break;
+		case ACPI_RESOURCE_TYPE_EXTENDED_IRQ:
+			if (crs->irq == 0 && resource->Data.ExtendedIrq.InterruptCount > 0)
+				crs->irq = resource->Data.ExtendedIrq.Interrupts[0];
+			break;
+	}
+	return B_OK;
+}
+
+
+static status_t
+init_device_acpi(device_node* node, xhci_pci_sim_info* bus)
+{
+	acpi_device_module_info* acpi;
+	acpi_device device;
+	device_node* acpiParent = gDeviceManager->get_parent_node(node);
+	gDeviceManager->get_driver(acpiParent, (driver_module_info**)&acpi,
+		(void**)&device);
+	gDeviceManager->put_node(acpiParent);
+
+	xhci_acpi_crs crs = {};
+	if (acpi->walk_resources(device, (ACPI_STRING)"_CRS", xhci_acpi_parse_crs,
+			&crs) != B_OK || crs.address == 0 || crs.irq == 0) {
+		TRACE_MODULE_ERROR("ACPI: missing xHCI resources\n");
+		return B_DEVICE_NOT_FOUND;
+	}
+	if (crs.irq > 0xff) {
+		TRACE_MODULE_ERROR("ACPI: interrupt %" B_PRIu32 " out of range\n",
+			crs.irq);
+		return B_DEVICE_NOT_FOUND;
+	}
+
+	dprintf("xhci: ACPI controller at %#" B_PRIxPHYSADDR ", length %#"
+		B_PRIx64 ", irq %" B_PRIu32 "\n", crs.address, crs.length, crs.irq);
+
+	pci_info* info = &bus->pciinfo;
+	memset(info, 0, sizeof(pci_info));
+	info->vendor_id = 0xffff;
+	info->device_id = 0xffff;
+	info->class_base = PCI_serial_bus;
+	info->class_sub = PCI_usb;
+	info->class_api = PCI_usb_xhci;
+	info->u.h0.base_registers[0] = (uint32)crs.address;
+	info->u.h0.base_registers[1] = (uint32)(crs.address >> 32);
+	info->u.h0.base_register_flags[0] = PCI_address_type_64;
+	info->u.h0.base_register_sizes[0] = crs.length != 0 ? crs.length : 0x10000;
+	info->u.h0.interrupt_line = crs.irq;
+
+	bus->pci = NULL;
+	bus->device = NULL;
+	return B_OK;
+}
 
 
 //	#pragma mark -
@@ -133,6 +227,25 @@ init_device(device_node* node, void** device_cookie)
 	if (bus == NULL)
 		return B_NO_MEMORY;
 
+	bus->driver_node = node;
+
+	{
+		const char* busName = NULL;
+		device_node* parent = gDeviceManager->get_parent_node(node);
+		gDeviceManager->get_attr_string(parent, B_DEVICE_BUS, &busName, false);
+		bool isACPI = busName != NULL && strcmp(busName, "acpi") == 0;
+		gDeviceManager->put_node(parent);
+		if (isACPI) {
+			status_t status = init_device_acpi(node, bus);
+			if (status != B_OK) {
+				free(bus);
+				return status;
+			}
+			*device_cookie = bus;
+			return B_OK;
+		}
+	}
+
 	pci_device_module_info* pci;
 	pci_device* device;
 	{
@@ -188,6 +301,19 @@ supports_device(device_node* parent)
 	if (gDeviceManager->get_attr_string(parent, B_DEVICE_BUS, &bus, false)
 		< B_OK) {
 		return -1;
+	}
+
+	if (strcmp(bus, "acpi") == 0) {
+		const char* hid;
+		uint32 type;
+		if (gDeviceManager->get_attr_uint32(parent, ACPI_DEVICE_TYPE_ITEM,
+				&type, false) == B_OK && type == ACPI_TYPE_DEVICE
+			&& gDeviceManager->get_attr_string(parent, ACPI_DEVICE_HID_ITEM,
+				&hid, false) == B_OK && strcmp(hid, "PNP0D10") == 0) {
+			TRACE_MODULE("XHCI ACPI device found!\n");
+			return 0.8f;
+		}
+		return 0.0f;
 	}
 
 	if (strcmp(bus, "pci") != 0)
@@ -391,11 +517,13 @@ XHCI::XHCI(pci_info *info, 	pci_device_module_info* pci, pci_device* device, Sta
 	fInitOK = false;
 
 	// enable busmaster and memory mapped access
-	uint16 command = fPci->read_pci_config(fDevice, PCI_command, 2);
-	command &= ~(PCI_command_io | PCI_command_int_disable);
-	command |= PCI_command_master | PCI_command_memory;
+	if (fPci != NULL) {
+		uint16 command = fPci->read_pci_config(fDevice, PCI_command, 2);
+		command &= ~(PCI_command_io | PCI_command_int_disable);
+		command |= PCI_command_master | PCI_command_memory;
 
-	fPci->write_pci_config(fDevice, PCI_command, 2, command);
+		fPci->write_pci_config(fDevice, PCI_command, 2, command);
+	}
 
 	// map the registers (low + high for 64-bit when requested)
 	phys_addr_t physicalAddress = fPCIInfo->u.h0.base_registers[0];
@@ -568,7 +696,7 @@ XHCI::XHCI(pci_info *info, 	pci_device_module_info* pci, pci_device* device, Sta
 	if (fBayTrail) {
 		// Bay Trail xHCI stays on its firmware-assigned legacy PCI IRQ.
 		TRACE_ALWAYS("Bay Trail xHCI: using legacy PCI IRQ %" B_PRIu32 "\n", fIRQ);
-	} else if (fPci->get_msi_count(fDevice) >= 1) {
+	} else if (fPci != NULL && fPci->get_msi_count(fDevice) >= 1) {
 		uint32 msiVector = 0;
 		if (fPci->configure_msi(fDevice, 1, &msiVector) == B_OK
 			&& fPci->enable_msi(fDevice) == B_OK) {
@@ -626,7 +754,7 @@ XHCI::~XHCI()
 		delete_area(fScratchpadArea[i]);
 	delete_area(fDcbaArea);
 
-	if (fUseMSI) {
+	if (fUseMSI && fPci != NULL) {
 		fPci->disable_msi(fDevice);
 		fPci->unconfigure_msi(fDevice);
 	}
