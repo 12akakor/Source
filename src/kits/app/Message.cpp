@@ -83,12 +83,16 @@ port_id BMessage::sReplyPorts[sNumReplyPorts];
 int32 BMessage::sReplyPortInUse[sNumReplyPorts];
 
 
+// The field data need not be aligned in the message buffer: copy it out
+// first, as unaligned floating point loads fault on ARM.
+
 template<typename Type>
 static void
 print_to_stream_type(uint8* pointer)
 {
-	Type* item = (Type*)pointer;
-	item->PrintToStream();
+	Type item;
+	memcpy((void*)&item, pointer, sizeof(Type));
+	item.PrintToStream();
 }
 
 
@@ -96,8 +100,9 @@ template<typename Type>
 static void
 print_type(const char* format, uint8* pointer)
 {
-	Type* item = (Type*)pointer;
-	printf(format,* item,* item);
+	Type item;
+	memcpy(&item, pointer, sizeof(Type));
+	printf(format, item, item);
 }
 
 
@@ -105,8 +110,9 @@ template<typename Type>
 static void
 print_type3(const char* format, uint8* pointer)
 {
-	Type* item = (Type*)pointer;
-	printf(format, *item, *item, *item);
+	Type item;
+	memcpy(&item, pointer, sizeof(Type));
+	printf(format, item, item, item);
 }
 
 
