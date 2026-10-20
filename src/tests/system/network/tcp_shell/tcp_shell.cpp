@@ -115,6 +115,37 @@ static bool sSimultaneousConnect = false;
 static bool sSimultaneousClose = false;
 static bool sServerActiveClose = false;
 
+// What a SYN-ACK has to carry again when it is retransmitted, and what the
+// client's handshake-completing ACK says it understood. Used by the
+// lost_synack command; see do_lost_synack() for the full story.
+//
+// Nothing is forged here: the segments these checks need are ones the harness
+// already produces by itself. All the arrangement does is lose segments and
+// compare what goes over the wire afterwards against what went before.
+struct synchronize_acknowledge {
+	uint32	sequence;
+	uint32	acknowledge;
+	uint16	maxSegmentSize;
+	uint8	windowShift;
+	bool	sackPermitted;
+	bool	seen;
+};
+
+static const int32 kMaxRecordedSynAcknowledges = 2;
+
+static bool sRecordHandshake = false;
+static int32 sLoseSynAcknowledges = 0;
+	// how many of the server's SYN-ACKs to lose; -1 loses all of them
+static bool sLoseClientSynchronize = false;
+static int32 sClientSynchronizeCount = 0;
+static int32 sSynAcknowledgeCount = 0;
+static int32 sSynAcknowledgeTotal = 0;
+	// sSynAcknowledgeCount stops at the two that are compared; this one counts
+	// every SYN-ACK, which is what a test of how many go out needs
+static synchronize_acknowledge sSynAcknowledges[kMaxRecordedSynAcknowledges];
+static uint32 sClientAcknowledge = 0;
+static bool sClientAcknowledgeSeen = false;
+
 static struct net_domain sDomain = {
 	"ipv4",
 	AF_INET,
@@ -619,6 +650,36 @@ socket_connected(net_socket *socket)
 
 
 status_t
+socket_set_aborted(net_socket *_socket)
+{
+	net_socket_private *socket = (net_socket_private *)_socket;
+	net_socket_private *parent = (net_socket_private *)socket->parent;
+	if (parent == NULL)
+		return B_BAD_VALUE;
+
+	MutexLocker _(parent->lock);
+
+	// Re-check under the lock, as the kernel's socket_aborted() does: the
+	// socket may have concurrently been removed from this parent.
+	if ((net_socket_private *)socket->parent != parent)
+		return B_BAD_VALUE;
+
+	if (parent->pending_children.Contains(socket))
+		parent->pending_children.Remove(socket);
+	else
+		parent->connected_children.Remove(socket);
+
+	parent->child_count--;
+	socket->parent = NULL;
+
+	// The real socket module releases the parent's reference to the child
+	// here; this shell does not count references, so the aborted socket is
+	// simply leaked -- fine for a test harness.
+	return B_OK;
+}
+
+
+status_t
 socket_notify(net_socket *_socket, uint8 event, int32 value)
 {
 	net_socket_private *socket = (net_socket_private *)_socket;
@@ -685,7 +746,7 @@ net_socket_module_info gNetSocketModule = {
 	socket_set_max_backlog,
 	socket_has_parent,
 	socket_connected,
-	NULL, // set_aborted
+	socket_set_aborted,
 
 	// notifications
 	NULL, // request_notification,
@@ -975,6 +1036,101 @@ domain_get_mtu(net_protocol *protocol, const struct sockaddr *address)
 }
 
 
+/*!	Records the handshake segments the lost_synack checks compare.
+
+	Done here rather than from a packet monitor so the check does not depend on
+	which dump mode the run happens to be in, and so that it sees the SYN-ACK
+	that is about to be dropped -- which is the one every comparison is made
+	against.
+*/
+static void
+record_handshake(net_buffer* buffer)
+{
+	NetBufferHeaderReader<tcp_header> bufferHeader(buffer);
+	if (bufferHeader.Status() < B_OK)
+		return;
+
+	tcp_header& header = bufferHeader.Data();
+	const uint8 flags = header.flags;
+	const uint8 handshake = TCP_FLAG_SYNCHRONIZE | TCP_FLAG_ACKNOWLEDGE;
+
+	if (!is_server((sockaddr*)buffer->source)) {
+		if ((flags & handshake) == TCP_FLAG_SYNCHRONIZE)
+			sClientSynchronizeCount++;
+
+		// The first bare acknowledgement from the client is the one that
+		// completes the handshake, and what it acknowledges is the server's
+		// initial sequence number as the client understood it -- the same
+		// off-by-one seen from the other end, and the one that costs the
+		// stream its first byte.
+		if ((flags & handshake) == TCP_FLAG_ACKNOWLEDGE
+			&& !sClientAcknowledgeSeen) {
+			sClientAcknowledge = header.Acknowledge();
+			sClientAcknowledgeSeen = true;
+		}
+		return;
+	}
+
+	if ((flags & handshake) != handshake)
+		return;
+
+	sSynAcknowledgeTotal++;
+
+	if (sSynAcknowledgeCount >= kMaxRecordedSynAcknowledges)
+		return;
+
+	synchronize_acknowledge& record = sSynAcknowledges[sSynAcknowledgeCount++];
+	record.seen = true;
+	record.sequence = header.Sequence();
+	record.acknowledge = header.Acknowledge();
+	record.maxSegmentSize = 0;
+	record.windowShift = 0;
+	record.sackPermitted = false;
+
+	int32 size = header.HeaderLength() - sizeof(tcp_header);
+	if (size <= 0)
+		return;
+
+	uint8 optionsBuffer[64];
+	if (size > (int32)sizeof(optionsBuffer))
+		size = sizeof(optionsBuffer);
+	if (gNetBufferModule.read(buffer, sizeof(tcp_header), optionsBuffer, size)
+			!= B_OK)
+		return;
+
+	tcp_option* option = (tcp_option*)optionsBuffer;
+	while (size > 0 && option->kind != TCP_OPTION_END) {
+		uint32 length = 1;
+		switch (option->kind) {
+			case TCP_OPTION_NOP:
+				break;
+			case TCP_OPTION_MAX_SEGMENT_SIZE:
+				record.maxSegmentSize = ntohs(option->max_segment_size);
+				length = 4;
+				break;
+			case TCP_OPTION_WINDOW_SHIFT:
+				record.windowShift = option->window_shift;
+				length = 3;
+				break;
+			case TCP_OPTION_SACK_PERMITTED:
+				record.sackPermitted = true;
+				length = 2;
+				break;
+
+			default:
+				length = option->length;
+				// make sure we don't end up in an endless loop
+				if (length == 0)
+					size = 0;
+				break;
+		}
+
+		size -= length;
+		option = (tcp_option*)((uint8*)option + length);
+	}
+}
+
+
 status_t
 domain_receive_data(net_buffer *buffer)
 {
@@ -984,6 +1140,34 @@ domain_receive_data(net_buffer *buffer)
 	if (sDropList.find(packetNumber) != sDropList.end()
 		|| (sRandomDrop > 0.0 && (1.0 * rand() / RAND_MAX) > sRandomDrop))
 		drop = true;
+
+	// Losing the SYN-ACK by what it is rather than by its packet number: the
+	// number depends on how many segments precede the handshake, which is not
+	// something a test of the handshake should have to know.
+	if (sLoseSynAcknowledges != 0 && is_server((sockaddr*)buffer->source)
+		&& (tcp_segment_flags(buffer)
+				& (TCP_FLAG_SYNCHRONIZE | TCP_FLAG_ACKNOWLEDGE))
+			== (TCP_FLAG_SYNCHRONIZE | TCP_FLAG_ACKNOWLEDGE)) {
+		if (sLoseSynAcknowledges > 0)
+			sLoseSynAcknowledges--;
+		drop = true;
+	}
+
+	// Losing the client's SYN retransmissions as well leaves the server's own
+	// retransmission of its SYN-ACK as the only thing that can complete the
+	// handshake, which is what makes that a test rather than a race: both ends
+	// start from the same one-second initial timeout, so watching which RTO
+	// fires first would decide nothing.
+	if (sLoseClientSynchronize && sClientSynchronizeCount > 0
+		&& !is_server((sockaddr*)buffer->source)
+		&& (tcp_segment_flags(buffer)
+				& (TCP_FLAG_SYNCHRONIZE | TCP_FLAG_ACKNOWLEDGE))
+			== TCP_FLAG_SYNCHRONIZE) {
+		drop = true;
+	}
+
+	if (sRecordHandshake)
+		record_handshake(buffer);
 
 	if (!drop && (sRoundTripTime > 0 || sRandomRoundTrip || sIncreasingRoundTrip)) {
 		bigtime_t add = 0;
@@ -1600,6 +1784,138 @@ do_close(int argc, char** argv)
 }
 
 
+/*!	Loses the server's first SYN-ACK and checks the one that replaces it.
+
+	A retransmitted SYN arriving in SYN-RECEIVED is out of window by
+	construction -- a zero-length segment at RCV.NXT - 1 -- so the generic
+	out-of-window path answered it with a freshly built segment. In this state
+	that is a SYN-ACK again, but one stamped with SND.NXT (the ISN plus one,
+	once the first SYN-ACK is out) and without options, because they are only
+	added at the initial send sequence. The client reads that sequence number
+	as the server's ISN and spends the rest of the connection one byte ahead
+	of the stream, which is fatal to anything that cares about its first byte.
+
+	All three symptoms are on the wire, so all three are checked: the sequence
+	number, the options, and -- from the opposite endpoint, independently of
+	what the server believes it sent -- what the client's handshake-completing
+	acknowledgement says the server's ISN was.
+*/
+static void
+do_lost_synack(int argc, char** argv)
+{
+	const bool serverOnly = argc == 2 && !strcmp(argv[1], "-s");
+	const bool giveUp = argc == 2 && !strcmp(argv[1], "-g");
+
+	if (argc > 1 && !serverOnly && !giveUp) {
+		puts("usage: lost_synack [-s|-g]\n\n"
+			"Drops the server's first SYN-ACK, lets the client's SYN\n"
+			"retransmission provoke the next one, and checks that it is a\n"
+			"retransmission of the first rather than a new segment: same\n"
+			"sequence number, same MSS, window-scale and SACK-permitted, and\n"
+			"a client acknowledging the ISN + 1 it was originally offered.\n"
+			"Prints PASS or FAIL and does its own connect, so it replaces\n"
+			"the connect command rather than following it.\n\n"
+			"-s also drops every SYN the client retransmits, which leaves\n"
+			"the server's own retransmission of its SYN-ACK as the only way\n"
+			"the handshake can complete at all. Both ends start from the\n"
+			"same one-second timeout, so this is the test that does not come\n"
+			"down to which RTO happens to fire first.\n\n"
+			"-g drops every SYN-ACK as well, so the server runs out of\n"
+			"retransmissions and has to give up on the half-open connection\n"
+			"instead of retrying it for as long as the listener lives.\n"
+			"Takes as long as connect() does to time out.");
+		return;
+	}
+
+	for (int32 i = 0; i < kMaxRecordedSynAcknowledges; i++)
+		sSynAcknowledges[i].seen = false;
+	sSynAcknowledgeCount = 0;
+	sSynAcknowledgeTotal = 0;
+	sClientSynchronizeCount = 0;
+	sClientAcknowledgeSeen = false;
+	sRecordHandshake = true;
+	sLoseSynAcknowledges = giveUp ? -1 : 1;
+	sLoseClientSynchronize = serverOnly || giveUp;
+
+	char* connect = (char*)"connect";
+	do_connect(1, &connect);
+
+	// connect() returns once the client is established, which is after it has
+	// sent the acknowledgement this looks at -- but only just, so give the
+	// send path room rather than racing it.
+	snooze(250000);
+
+	sLoseSynAcknowledges = 0;
+	sLoseClientSynchronize = false;
+	sRecordHandshake = false;
+
+	int32 failures = 0;
+
+	if (giveUp) {
+		// One SYN-ACK plus the retransmissions it is allowed, and then the
+		// half-open connection has to be given up rather than retried for as
+		// long as the listener lives. connect() timing out is what bounds the
+		// wait here, and it outlasts the last retransmission by design.
+		const int32 expected = TCP_MAX_SYN_ACKNOWLEDGE_RETRANSMITS + 1;
+		if (sSynAcknowledgeTotal != expected) {
+			printf("FAIL: the server put %" B_PRId32 " SYN-ACK(s) on the wire, "
+				"expected %" B_PRId32 "\n", sSynAcknowledgeTotal, expected);
+			failures++;
+		} else {
+			printf("the server sent %" B_PRId32 " SYN-ACKs and stopped\n",
+				sSynAcknowledgeTotal);
+		}
+	} else if (sSynAcknowledgeCount < 2) {
+		if (serverOnly) {
+			printf("FAIL: the server never retransmitted its SYN-ACK; with "
+				"the client's %" B_PRId32 " SYN retransmission(s) lost too, "
+				"nothing was left to complete the handshake\n",
+				sClientSynchronizeCount - 1);
+		} else {
+			printf("FAIL: the server sent %" B_PRId32 " SYN-ACK(s); the lost "
+				"one was never answered again\n", sSynAcknowledgeCount);
+		}
+		failures++;
+	} else {
+		const synchronize_acknowledge& first = sSynAcknowledges[0];
+		const synchronize_acknowledge& second = sSynAcknowledges[1];
+
+		if (second.sequence != first.sequence) {
+			printf("FAIL: the second SYN-ACK is at %" B_PRIu32 ", not the ISN "
+				"%" B_PRIu32 " it must repeat (off by %" B_PRId32 ")\n",
+				second.sequence, first.sequence,
+				(int32)(second.sequence - first.sequence));
+			failures++;
+		}
+
+		if (second.maxSegmentSize != first.maxSegmentSize
+			|| second.windowShift != first.windowShift
+			|| second.sackPermitted != first.sackPermitted) {
+			printf("FAIL: the second SYN-ACK renegotiates the handshake "
+				"options: mss %u -> %u, window shift %u -> %u, "
+				"sack-permitted %s -> %s\n", first.maxSegmentSize,
+				second.maxSegmentSize, first.windowShift, second.windowShift,
+				first.sackPermitted ? "yes" : "no",
+				second.sackPermitted ? "yes" : "no");
+			failures++;
+		}
+
+		if (!sClientAcknowledgeSeen) {
+			puts("FAIL: the client never acknowledged the handshake");
+			failures++;
+		} else if (sClientAcknowledge != first.sequence + 1) {
+			printf("FAIL: the client acknowledged %" B_PRIu32 ", so it took "
+				"%" B_PRIu32 " for the server's ISN instead of %" B_PRIu32
+				" -- the first byte of the server's stream is lost\n",
+				sClientAcknowledge, sClientAcknowledge - 1, first.sequence);
+			failures++;
+		}
+	}
+
+	printf("lost_synack: %s\n", failures == 0 ? "PASS" : "FAIL");
+}
+
+
 static void
 do_drop(int argc, char** argv)
 {
@@ -1761,6 +2077,7 @@ static cmd_entry sBuiltinCommands[] = {
 	{"dprintf", do_dprintf, "Toggles debug output"},
 	{"drop", do_drop, "Lets you drop packets during transfer"},
 	{"reorder", do_reorder, "Lets you reorder packets during transfer"},
+	{"lost_synack", do_lost_synack, "Checks the SYN-ACK retransmission"},
 	{"help", do_help, "prints this help text"},
 	{"rtt", do_round_trip_time, "Specifies the round trip time"},
 	{"quit", NULL, "exits the application"},
