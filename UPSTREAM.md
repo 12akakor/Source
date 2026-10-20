@@ -25,6 +25,9 @@ upstream honest and the fix attributable.
 | 2026-09-21 | `056cd81185` | deskbar: fix replicant loop guard regression on first empty row | Follow-up to `fcdee3a787`: with the clock shown, a replicant too wide for the first row but narrow enough for a full row was forced onto the first row and overlapped the clock, instead of moving to the second row |
 | 2026-10-06 | `d1111656df` | usb_manager: check descriptors length integrity | A device reporting a malformed configuration could make the USB stack overread its descriptor buffer: a total length shorter than the configuration header, descriptors of length 1, or interface and endpoint descriptors shorter than their structures. Also refuses a device with no configurations |
 | 2026-10-07 | `7f32a78c62` | radeon_hd: fix crtc control register state tracing on evergreen+ | The mode-set register dump read the pre-Evergreen D1/D2 addresses on every card, so it showed nothing useful on DCE4 and later. Debug output only (`TRACE_MODE`). Taken ahead of the RadeonHD port, which edits the same files |
+| 2026-10-20 | `1d73eca40b` | freebsd_network: enable on arm64 | Prerequisite of `ae25f101ad`, which rewrites the same lines |
+| 2026-10-20 | `ae25f101ad` | freebsd_network: use generic bus.h and cpufunc.h for all non-x86 architectures | The FreeBSD compatibility layer did not build for 32-bit ARM, so no FreeBSD network driver could be built there (the USB Ethernet adapters used with the Toshiba AC100) |
+| 2026-10-20 | `5f79cf3d8e` | freebsd_network: add missing bpf stub | Companion of `ae25f101ad`: a stub the drivers need once the layer builds on the other architectures |
 
 ## Declined
 
