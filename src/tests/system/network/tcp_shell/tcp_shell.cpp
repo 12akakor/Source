@@ -209,9 +209,13 @@ dummy_is_restarted_syscall(void)
 }
 
 
-static void
+static bigtime_t
 dummy_store_syscall_restart_timeout(bigtime_t timeout)
 {
+	// callers wait until the absolute time this returns
+	if (timeout == 0 || timeout == B_INFINITE_TIMEOUT)
+		return timeout;
+	return system_time() + timeout;
 }
 
 
@@ -867,6 +871,22 @@ domain_control(net_protocol *protocol, int level, int option, void *value,
 
 
 status_t
+domain_getsockopt(net_protocol *protocol, int level, int option, void *value,
+	int *_length)
+{
+	return ENOPROTOOPT;
+}
+
+
+status_t
+domain_setsockopt(net_protocol *protocol, int level, int option,
+	const void *value, int length)
+{
+	return B_OK;
+}
+
+
+status_t
 domain_bind(net_protocol *protocol, const struct sockaddr *address)
 {
 	memcpy(&protocol->socket->address, address, sizeof(struct sockaddr_in));
@@ -1020,8 +1040,8 @@ net_protocol_module_info gDomainModule = {
 	domain_connect,
 	domain_accept,
 	domain_control,
-	NULL, // getsockopt
-	NULL, // setsockopt
+	domain_getsockopt,
+	domain_setsockopt,
 	domain_bind,
 	domain_unbind,
 	domain_listen,
@@ -1255,13 +1275,19 @@ receiving_thread(void* _data)
 				// delay getting the SYN request, and connect as well
 				sockaddr_in address;
 				memset(&address, 0, sizeof(address));
+				address.sin_len = sizeof(sockaddr_in);
 				address.sin_family = AF_INET;
 				address.sin_port = htons(1023);
 				address.sin_addr.s_addr = htonl(0xc0a80001);
 
+				// This thread delivers the server's segments, so it must not
+				// block waiting for the handshake it is needed to complete.
+				bigtime_t timeout = gServerSocket->send.timeout;
+				gServerSocket->send.timeout = 0;
 				status_t status = socket_connect(gServerSocket,
 					(struct sockaddr *)&address, sizeof(struct sockaddr));
-				if (status < B_OK)
+				gServerSocket->send.timeout = timeout;
+				if (status < B_OK && status != EINPROGRESS)
 					fprintf(stderr, "tcp_tester: simultaneous connect failed: %s\n", strerror(status));
 
 				sSimultaneousConnect = false;
@@ -1424,6 +1450,7 @@ do_connect(int argc, char** argv)
 		// bind to a port first, so the other end can find us
 		sockaddr_in address;
 		memset(&address, 0, sizeof(address));
+		address.sin_len = sizeof(sockaddr_in);
 		address.sin_family = AF_INET;
 		address.sin_port = htons(1023);
 		address.sin_addr.s_addr = htonl(0xc0a80001);
@@ -1441,6 +1468,7 @@ do_connect(int argc, char** argv)
 
 	sockaddr_in address;
 	memset(&address, 0, sizeof(address));
+	address.sin_len = sizeof(sockaddr_in);
 	address.sin_family = AF_INET;
 	address.sin_port = htons(port);
 	address.sin_addr.s_addr = htonl(0xc0a80001);
