@@ -344,6 +344,11 @@ standard_gcc_settings()
 			boot32CxxHeaders="$headers/$gccMachine/32"
 			bootCxxHeaders="$headers/$gccMachine"
 			;;
+		arm-*)
+			# Kernel and boot loader use the libgcc.a built by the cross-compiler,
+			# so that they match its FPU configuration (e.g. VFPv3-D16)
+			bootLibgcc=`$gcc -print-file-name=libgcc.a`
+			;;
 	esac
 
 	# determine whether graphite loop optimization should/can be used
