@@ -21,6 +21,8 @@ SimpleTest unix_dgram_test : unix_dgram_test.cpp : $(TARGET_NETWORK_LIBS) ;
 
 SimpleTest unix_recv_test : unix_recv_test.c : $(TARGET_NETWORK_LIBS) ;
 SimpleTest unix_send_test : unix_send_test.c : $(TARGET_NETWORK_LIBS) ;
+SimpleTest unix_stream_rights_test : unix_stream_rights_test.cpp
+	: $(TARGET_NETWORK_LIBS) ;
 
 SimpleTest tcp_connection_test : tcp_connection_test.cpp
 	: $(TARGET_NETWORK_LIBS) ;
