@@ -345,9 +345,11 @@ standard_gcc_settings()
 			bootCxxHeaders="$headers/$gccMachine"
 			;;
 		arm-*)
-			# Kernel and boot loader use the libgcc.a built by the cross-compiler,
-			# so that they match its FPU configuration (e.g. VFPv3-D16)
+			# The kernel uses the libgcc.a built by the cross-compiler, so that
+			# it matches its FPU configuration (e.g. VFPv3-D16); so does
+			# libroot, with its libsupc++.a
 			bootLibgcc=`$gcc -print-file-name=libgcc.a`
+			bootLibSupCxx=`$gcc -print-file-name=libsupc++.a`
 			;;
 	esac
 
