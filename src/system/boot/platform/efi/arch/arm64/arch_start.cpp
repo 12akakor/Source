@@ -67,11 +67,14 @@ arm64_common_cpu_startup()
 	// EL2 without E2H enabled does not, so we need to drop to EL1
 	if (el == 1 || e2h) {
 		arm64_mmu_setup();
-		WRITE_SPECIALREG(CNTKCTL_EL1, 0b11);
 	} else {
 		arm64_mmu_setup();
 		_arch_transition_EL2_EL1();
 	}
+
+	// Allow userland to read the counter (system_time() in the commpage),
+	// whichever exception level we were started in.
+	WRITE_SPECIALREG(CNTKCTL_EL1, 0b11);
 
 	WRITE_SPECIALREG(SCTLR_EL1, SCTLR_LSMAOE | SCTLR_nTLSMD
 		| SCTLR_UCI | SCTLR_SPAN | SCTLR_IESB | SCTLR_nTWE | SCTLR_nTWI
