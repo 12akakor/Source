@@ -445,3 +445,16 @@ for repository in $(HAIKU_REPOSITORIES) {
 	AddFilesToHaikuImage system cache package-repositories
 		: $(cache) : $(repository:G=) ;
 }
+
+# third-party repository configs, for architectures that have one; the build
+# does not use these repositories, and their caches are fetched on the first
+# refresh
+if $(HAIKU_IS_BOOTSTRAP) != 1 {
+	local thirdPartyRepositoryConfigs = [ Glob
+		[ FDirName $(HAIKU_TOP) data settings package-repositories ]
+		: spritz-depot-$(HAIKU_PACKAGING_ARCH) ] ;
+	thirdPartyRepositoryConfigs
+		= $(thirdPartyRepositoryConfigs:G=third-party-repository-config) ;
+	AddFilesToHaikuImage system settings package-repositories
+		: $(thirdPartyRepositoryConfigs) ;
+}
