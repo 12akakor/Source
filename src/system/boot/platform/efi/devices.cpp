@@ -71,24 +71,48 @@ EfiDevice::ReadAt(void *cookie, off_t pos, void *buffer, size_t bufferSize)
 	TRACE("%s called. pos: %" B_PRIdOFF ", %p, %" B_PRIuSIZE "\n", __func__,
 		pos, buffer, bufferSize);
 
-	off_t offset = pos % BlockSize();
-	pos /= BlockSize();
-
-	uint32 numBlocks = (offset + bufferSize + BlockSize() - 1) / BlockSize();
-
-	// TODO: We really should implement memalign and align all requests to
-	// fBlockIo->Media->IoAlign. This static alignment is large enough though
-	// to catch most required alignments.
-	char readBuffer[numBlocks * BlockSize()]
-		__attribute__((aligned(2048)));
-
-	if (fBlockIo->ReadBlocks(fBlockIo, fBlockIo->Media->MediaId,
-		pos, sizeof(readBuffer), readBuffer) != EFI_SUCCESS) {
-		dprintf("%s: blockIo error reading from device!\n", __func__);
-		return B_ERROR;
+	// Reads go through a page aligned bounce buffer, in bounded chunks.
+	// This used to be a variable length array on the stack, sized after the
+	// request, which overflowed the (small) firmware stack for large reads,
+	// e.g. on the Raspberry Pi 4.
+	static const size_t kBounceSize = 256 * 1024;
+	static char* sBounceBuffer = NULL;
+	if (sBounceBuffer == NULL) {
+		efi_physical_addr address;
+		if (kBootServices->AllocatePages(AllocateAnyPages, EfiLoaderData,
+				kBounceSize / B_PAGE_SIZE, &address) != EFI_SUCCESS) {
+			dprintf("%s: could not allocate bounce buffer\n", __func__);
+			return B_NO_MEMORY;
+		}
+		sBounceBuffer = (char*)(addr_t)address;
 	}
 
-	memcpy(buffer, readBuffer + offset, bufferSize);
+	const uint32 blockSize = BlockSize();
+	if (blockSize == 0 || blockSize > kBounceSize)
+		return B_ERROR;
+	const size_t maxBlocks = kBounceSize / blockSize;
+
+	size_t done = 0;
+	while (done < bufferSize) {
+		off_t current = pos + done;
+		off_t block = current / blockSize;
+		size_t offset = current % blockSize;
+		size_t toCopy = bufferSize - done;
+		size_t numBlocks = (offset + toCopy + blockSize - 1) / blockSize;
+		if (numBlocks > maxBlocks) {
+			numBlocks = maxBlocks;
+			toCopy = numBlocks * blockSize - offset;
+		}
+
+		if (fBlockIo->ReadBlocks(fBlockIo, fBlockIo->Media->MediaId,
+				block, numBlocks * blockSize, sBounceBuffer) != EFI_SUCCESS) {
+			dprintf("%s: blockIo error reading from device!\n", __func__);
+			return B_ERROR;
+		}
+
+		memcpy((char*)buffer + done, sBounceBuffer + offset, toCopy);
+		done += toCopy;
+	}
 
 	return bufferSize;
 }
