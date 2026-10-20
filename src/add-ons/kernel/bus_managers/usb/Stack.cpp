@@ -339,6 +339,8 @@ Stack::AllocateArea(void **logicalAddress, phys_addr_t *physicalAddress, size_t 
 		return B_ERROR;
 	}
 
+	usb_prepare_dma_area(area, logAddress, size);
+
 	physical_entry physicalEntry;
 	status_t result = get_memory_map(logAddress, size, &physicalEntry, 1);
 	if (result < B_OK) {

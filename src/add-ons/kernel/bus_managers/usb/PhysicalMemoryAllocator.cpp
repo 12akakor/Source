@@ -14,6 +14,7 @@
 #include <util/kernel_cpp.h>
 
 #include "PhysicalMemoryAllocator.h"
+#include "usb_dma.h"
 
 
 //#define TRACE_PHYSICAL_MEMORY_ALLOCATOR
@@ -82,6 +83,8 @@ PhysicalMemoryAllocator::PhysicalMemoryAllocator(const char *name,
 		TRACE_ERROR(("PMA: failed to create memory area\n"));
 		return;
 	}
+
+	usb_prepare_dma_area(fArea, fLogicalBase, roundedSize);
 
 	physical_entry physicalEntry;
 	if (get_memory_map(fLogicalBase, roundedSize, &physicalEntry, 1) < B_OK) {
