@@ -241,6 +241,27 @@ efi_main(efi_handle image, efi_system_table *systemTable)
 	kBootServices = systemTable->BootServices;
 	kRuntimeServices = systemTable->RuntimeServices;
 
+#ifdef __aarch64__
+	{
+		// Some firmware (e.g. on the Raspberry Pi 4) leaves alignment
+		// checking enabled; the loader is not built to cope with that.
+		uint64 el, sctlr;
+		asm volatile("mrs %0, CurrentEL" : "=r"(el));
+		el >>= 2;
+		if (el == 2)
+			asm volatile("mrs %0, sctlr_el2" : "=r"(sctlr));
+		else
+			asm volatile("mrs %0, sctlr_el1" : "=r"(sctlr));
+		if ((sctlr & 2) != 0) {
+			sctlr &= ~(uint64)2;
+			if (el == 2)
+				asm volatile("msr sctlr_el2, %0; isb" : : "r"(sctlr));
+			else
+				asm volatile("msr sctlr_el1, %0; isb" : : "r"(sctlr));
+		}
+	}
+#endif
+
 	call_ctors();
 
 	debug_claim_syslog_memory();
