@@ -529,14 +529,20 @@ common_accept(int fd, struct sockaddr *address, socklen_t *_addressLength, int f
 	if (error != B_OK)
 		return error;
 
+	// Acquire the stack interface reference for the new FD before
+	// create_socket_fd() publishes it, mirroring common_socket().
+	// Publishing first left a window in which a concurrent close() of the
+	// just published FD would put() a reference it never acquired,
+	// briefly unbalancing sStackInterfaceConsumers and, under KDEBUG,
+	// unloading the net stack while the listening socket was still live.
+	get_stack_interface_module();
+
 	// allocate the FD
 	int acceptedFD = create_socket_fd(acceptedSocket, flags, kernel);
 	if (acceptedFD < 0) {
 		sStackInterface->close(acceptedSocket);
 		sStackInterface->free(acceptedSocket);
-	} else {
-		// we need a reference for the new FD
-		get_stack_interface_module();
+		put_stack_interface_module();
 	}
 
 	return acceptedFD;
@@ -693,19 +699,49 @@ common_socketpair(int family, int type, int protocol, int fds[2], bool kernel)
 		return error;
 	}
 
+	// Each FD needs its own stack interface reference; the entry reference
+	// above covers the first. Acquire the second one now, while the entry
+	// reference still pins the module (so the get cannot fail), and before
+	// create_socket_fd() publishes either FD: with both references taken up
+	// front, a concurrent close() of a just published FD can never release
+	// the last reference and, under KDEBUG, unload the net stack while the
+	// other socket of the pair is still live. Publishing first left exactly
+	// that window, in which the close() would also put() a reference the FD
+	// never acquired, briefly unbalancing sStackInterfaceConsumers.
+	get_stack_interface_module();
+
 	// allocate the FDs
 	for (int i = 0; i < 2; i++) {
 		fds[i] = create_socket_fd(sockets[i], sflags, kernel);
 		if (fds[i] < 0) {
 			sStackInterface->close(sockets[i]);
 			sStackInterface->free(sockets[i]);
+
+			if (i == 0) {
+				// The second socket hasn't been published yet; dispose of
+				// it, and its reference, directly.
+				sStackInterface->close(sockets[1]);
+				sStackInterface->free(sockets[1]);
+				put_stack_interface_module();
+			}
+
 			put_stack_interface_module();
+
+			if (i > 0) {
+				// The first FD has already been published; closing it also
+				// closes and frees sockets[0] and releases its stack
+				// interface reference. If the application has already
+				// closed fds[0], close_fd_index() on the emptied slot is
+				// a no-op; but if the slot has since been reused, this
+				// closes an unrelated FD, as the existing cleanup close in
+				// _user_accept() can.
+				close_fd_index(get_current_io_context(kernel), fds[0]);
+			}
+
 			return fds[i];
 		}
 	}
 
-	// We need another reference for the second socket
-	get_stack_interface_module();
 	return B_OK;
 }
 
