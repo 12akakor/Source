@@ -792,6 +792,15 @@ socket_aborted(net_socket* _socket)
 
 	MutexLocker _(parent->lock);
 
+	// Re-check the parentage under the lock: between taking the reference
+	// above and acquiring the lock, the socket may have been removed from this
+	// parent concurrently -- by socket_set_max_backlog() trimming the backlog,
+	// or by socket_dequeue_connected() handing it to accept() -- and it must
+	// then not be taken out of the child lists, nor the parent's reference to
+	// it released, a second time.
+	if (socket->parent.GetReference() != parent)
+		return B_BAD_VALUE;
+
 	if (socket->is_connected)
 		parent->connected_children.Remove(socket);
 	else
