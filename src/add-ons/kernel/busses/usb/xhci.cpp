@@ -1673,11 +1673,13 @@ XHCI::CreateDescriptor(uint32 trbCount, uint32 bufferCount, size_t bufferSize)
 	// _LinkDescriptorForPipe() has room to insert a link TRB.
 	trbCount++;
 	if (fStack->AllocateChunk((void **)&result->trbs, &result->trb_addr,
-			(trbCount * sizeof(xhci_trb))) < B_OK) {
+			((trbCount + XHCI_TRB_PREFETCH_PAD) * sizeof(xhci_trb))) < B_OK) {
 		TRACE_ERROR("failed to allocate TRBs\n");
 		FreeDescriptor(result);
 		return NULL;
 	}
+	memset(result->trbs, 0,
+		(trbCount + XHCI_TRB_PREFETCH_PAD) * sizeof(xhci_trb));
 	result->trb_count = trbCount;
 	result->trb_used = 0;
 
@@ -1762,7 +1764,8 @@ XHCI::FreeDescriptor(xhci_td *descriptor)
 
 	if (descriptor->trbs != NULL) {
 		fStack->FreeChunk(descriptor->trbs, descriptor->trb_addr,
-			(descriptor->trb_count * sizeof(xhci_trb)));
+			((descriptor->trb_count + XHCI_TRB_PREFETCH_PAD)
+				* sizeof(xhci_trb)));
 	}
 	if (descriptor->buffers != NULL) {
 		size_t totalSize = descriptor->buffer_size * descriptor->buffer_count;
@@ -2009,7 +2012,7 @@ XHCI::AllocateDevice(Hub *parent, int8 hubAddress, uint8 hubPort,
 
 	device->trb_area = fStack->AllocateArea((void **)&device->trbs,
 		&device->trb_addr, sizeof(xhci_trb) * (XHCI_MAX_ENDPOINTS - 1)
-			* XHCI_ENDPOINT_RING_SIZE, "XHCI endpoint trbs");
+			* XHCI_ENDPOINT_RING_STRIDE, "XHCI endpoint trbs");
 	if (device->trb_area < B_OK) {
 		TRACE_ERROR("unable to create a device trbs area\n");
 		CleanupDevice(device);
@@ -2300,9 +2303,9 @@ XHCI::_InsertEndpointForPipe(Pipe *pipe)
 		endpoint->failureCount = 0;
 		endpoint->validationCount = 0;
 
-		endpoint->trbs = device->trbs + id * XHCI_ENDPOINT_RING_SIZE;
+		endpoint->trbs = device->trbs + id * XHCI_ENDPOINT_RING_STRIDE;
 		endpoint->trb_addr = device->trb_addr
-			+ id * XHCI_ENDPOINT_RING_SIZE * sizeof(xhci_trb);
+			+ id * XHCI_ENDPOINT_RING_STRIDE * sizeof(xhci_trb);
 		memset(endpoint->trbs, 0,
 			sizeof(xhci_trb) * XHCI_ENDPOINT_RING_SIZE);
 

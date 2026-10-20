@@ -71,7 +71,7 @@ PhysicalMemoryAllocator::PhysicalMemoryAllocator(const char *name,
 
 	size_t roundedSize = biggestSize * minCountPerBlock;
 	fDebugBase = roundedSize;
-	fDebugChunkSize = 128;
+	fDebugChunkSize = 1024;
 	fDebugUseMap = 0;
 	roundedSize += sizeof(fDebugUseMap) * 8 * fDebugChunkSize;
 	roundedSize = (roundedSize + B_PAGE_SIZE - 1) & ~(B_PAGE_SIZE - 1);

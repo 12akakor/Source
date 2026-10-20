@@ -31,6 +31,12 @@ class XHCIRootHub;
 /* The endpoint ring needs space for 2 TRBs per transfer
  * (one for the link TRB, and one for the Event Data TRB). */
 #define XHCI_ENDPOINT_RING_SIZE	(XHCI_MAX_TRANSFERS * 2)
+// Some controllers (e.g. the VIA VL805 on the Raspberry Pi 4) prefetch and
+// cache TRBs past the end of a ring or TD, including past Link TRBs. Keep that
+// much unused (zeroed) space after every TRB array, so that prefetched TRBs
+// are never ones we write later.
+#define XHCI_TRB_PREFETCH_PAD	32
+#define XHCI_ENDPOINT_RING_STRIDE	(XHCI_ENDPOINT_RING_SIZE + XHCI_TRB_PREFETCH_PAD)
 
 // Maximum number of deferred endpoint recovery requests queued at once.
 #define XHCI_MAX_RECOVERY_REQUESTS	32
