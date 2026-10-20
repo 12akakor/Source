@@ -45,10 +45,12 @@
 
 
 FUNCTION(_arch_transition_EL2_EL1):
-	// Translation Table Base Register
-	mreg TTBR0_EL2, TTBR0_EL1, x10
-	// Memory Attribute Indirection Register
-	mreg MAIR_EL2, MAIR_EL1, x10
+	// Note: TCR_EL1, MAIR_EL1, TTBR0_EL1 and TTBR1_EL1 have already been set
+	// up by arm64_mmu_setup(). They must not be overwritten with the EL2
+	// values: the loader's page tables use Haiku's MAIR layout, not the one
+	// of the firmware, and the kernel would end up mapped with the wrong
+	// memory attributes.
+
 	// Vector Base Address Register
 	mreg vbar_el2, vbar_el1, x10
 	// Migrate SP
