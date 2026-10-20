@@ -22,6 +22,8 @@
 
 #include <ByteOrder.h>
 #include <util/AutoLock.h>
+#include <debug.h>
+#include <vm/vm.h>
 
 #include "xhci.h"
 
@@ -30,6 +32,83 @@
 
 
 #define USB_MODULE_NAME	"xhci"
+
+
+// The controller may not be cache coherent with the CPU (e.g. the VL805 on
+// the Raspberry Pi 4, whose rings live in uncached memory). Stores to the
+// rings must be visible to the whole system before the controller is told
+// about them, and ring contents written by the controller must not be read
+// before the cycle bit that marks them valid.
+static inline void
+xhci_dma_write_barrier()
+{
+#if defined(__aarch64__)
+	__asm__ __volatile__("dsb st" : : : "memory");
+#else
+	memory_write_barrier();
+#endif
+}
+
+
+static inline void
+xhci_dma_read_barrier()
+{
+#if defined(__aarch64__)
+	__asm__ __volatile__("dsb ld" : : : "memory");
+#else
+	memory_read_barrier();
+#endif
+}
+
+
+/*!	Transfers on physical vectors (usb_disk) DMA straight to and from the
+	caller's memory. If the controller isn't cache coherent, that memory must
+	be written back before the controller reads it (OUT) and must not have
+	stale lines when the CPU reads what the controller wrote (IN). A clean and
+	invalidate before the transfer and an invalidate after an IN transfer
+	cover both.
+*/
+static void
+xhci_sync_physical_vectors(const generic_io_vec* vecs, size_t count)
+{
+#if defined(__aarch64__)
+	if (debug_debugger_running())
+		return;
+
+	uint64 ctr;
+	__asm__ __volatile__("mrs %0, ctr_el0" : "=r"(ctr));
+	const addr_t line = 4 << ((ctr >> 16) & 0xf);
+
+	for (size_t i = 0; i < count; i++) {
+		phys_addr_t address = vecs[i].base;
+		generic_size_t left = vecs[i].length;
+		while (left > 0) {
+			phys_addr_t page = address & ~(phys_addr_t)(B_PAGE_SIZE - 1);
+			size_t offset = address - page;
+			size_t chunk = B_PAGE_SIZE - offset;
+			if (chunk > left)
+				chunk = left;
+
+			addr_t virtualPage;
+			void* handle;
+			if (vm_get_physical_page(page, &virtualPage, &handle) == B_OK) {
+				addr_t start = (virtualPage + offset) & ~(line - 1);
+				addr_t end = virtualPage + offset + chunk;
+				for (addr_t p = start; p < end; p += line)
+					__asm__ __volatile__("dc civac, %0" : : "r"(p) : "memory");
+				vm_put_physical_page(virtualPage, handle);
+			}
+
+			address += chunk;
+			left -= chunk;
+		}
+	}
+	__asm__ __volatile__("dsb sy" : : : "memory");
+#else
+	(void)vecs;
+	(void)count;
+#endif
+}
 
 device_manager_info* gDeviceManager;
 static usb_for_controller_interface* gUSB;
@@ -1349,6 +1428,9 @@ XHCI::SubmitNormalRequest(Transfer *transfer)
 			transfer->VectorCount(), transfer->IsPhysical());
 	}
 
+	if (transfer->IsPhysical())
+		xhci_sync_physical_vectors(transfer->Vector(), transfer->VectorCount());
+
 	td->transfer = transfer;
 	status = _LinkDescriptorForPipe(td, endpoint);
 	if (status != B_OK) {
@@ -2407,7 +2489,7 @@ XHCI::_LinkDescriptorForPipe(xhci_td *descriptor, xhci_endpoint *endpoint)
 	endpoint->trbs[next].status = 0;
 	endpoint->trbs[next].flags = 0;
 
-	memory_write_barrier();
+	xhci_dma_write_barrier();
 
 	// Everything is ready, so write the cycle bit.
 	endpoint->trbs[link].flags |= B_HOST_TO_LENDIAN_INT32(TRB_3_CYCLE_BIT);
@@ -2860,6 +2942,9 @@ XHCI::Ring(uint8 slot, uint8 endpoint)
 	if (slot > fSlotCount || endpoint >= XHCI_MAX_ENDPOINTS)
 		panic("Ring() invalid slot or endpoint\n");
 
+	// Make sure the controller sees the TRBs before the doorbell.
+	xhci_dma_write_barrier();
+
 	WriteDoorReg32(XHCI_DOORBELL(slot), XHCI_DOORBELL_TARGET(endpoint)
 		| XHCI_DOORBELL_STREAMID(0));
 	ReadDoorReg32(XHCI_DOORBELL(slot));
@@ -2889,6 +2974,7 @@ XHCI::QueueCommand(xhci_trb* trb)
 	else
 		temp &= ~TRB_3_CYCLE_BIT;
 	temp &= ~TRB_3_TC_BIT;
+	xhci_dma_write_barrier();
 	fCmdRing[i].flags = B_HOST_TO_LENDIAN_INT32(temp);
 
 	fCmdAddr = fErst->rs_addr + (XHCI_MAX_EVENTS + i) * sizeof(xhci_trb);
@@ -2899,6 +2985,7 @@ XHCI::QueueCommand(xhci_trb* trb)
 		temp = TRB_3_TYPE(TRB_TYPE_LINK) | TRB_3_TC_BIT;
 		if (j)
 			temp |= TRB_3_CYCLE_BIT;
+		xhci_dma_write_barrier();
 		fCmdRing[i].flags = B_HOST_TO_LENDIAN_INT32(temp);
 
 		i = 0;
@@ -3814,6 +3901,10 @@ XHCI::ProcessEvents()
 		if (j != k)
 			break;
 
+		// The event is valid; only now read the rest of it (and the data
+		// the controller wrote before posting it).
+		xhci_dma_read_barrier();
+
 		switch (event) {
 		case TRB_TYPE_COMMAND_COMPLETION:
 			HandleCmdComplete(&fEventRing[i]);
@@ -3916,6 +4007,12 @@ XHCI::FinishTransfers()
 					actualLength = transfer->FragmentLength() - td->trb_left;
 				TRACE("transfer not successful, actualLength=%" B_PRIuSIZE "\n",
 					actualLength);
+			}
+
+			if (directionIn && actualLength > 0 && transfer->IsPhysical()) {
+				// drop lines the CPU may have speculatively fetched meanwhile
+				xhci_sync_physical_vectors(transfer->Vector(),
+					transfer->VectorCount());
 			}
 
 			if (directionIn && actualLength > 0 && !transfer->IsPhysical()) {
