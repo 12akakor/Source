@@ -71,7 +71,13 @@ PhysicalMemoryAllocator::PhysicalMemoryAllocator(const char *name,
 
 	size_t roundedSize = biggestSize * minCountPerBlock;
 	fDebugBase = roundedSize;
+#ifdef __aarch64__
+	// xHCI controllers with the TRB prefetch workaround (see xhci.h) need
+	// bigger TRB arrays than fit into 128 bytes, also in the kernel debugger.
 	fDebugChunkSize = 1024;
+#else
+	fDebugChunkSize = 128;
+#endif
 	fDebugUseMap = 0;
 	roundedSize += sizeof(fDebugUseMap) * 8 * fDebugChunkSize;
 	roundedSize = (roundedSize + B_PAGE_SIZE - 1) & ~(B_PAGE_SIZE - 1);

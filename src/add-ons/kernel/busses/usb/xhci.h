@@ -32,11 +32,11 @@ class XHCIRootHub;
  * (one for the link TRB, and one for the Event Data TRB). */
 #define XHCI_ENDPOINT_RING_SIZE	(XHCI_MAX_TRANSFERS * 2)
 // Some controllers (e.g. the VIA VL805 on the Raspberry Pi 4) prefetch and
-// cache TRBs past the end of a ring or TD, including past Link TRBs. Keep that
-// much unused (zeroed) space after every TRB array, so that prefetched TRBs
-// are never ones we write later.
+// cache TRBs past the end of a ring or TD, including past Link TRBs. For
+// those, XHCI::fTrbPad is set to this many unused (zeroed) TRBs kept after
+// every TRB array, so that prefetched TRBs are never ones we write later.
+// Other controllers don't get any padding.
 #define XHCI_TRB_PREFETCH_PAD	32
-#define XHCI_ENDPOINT_RING_STRIDE	(XHCI_ENDPOINT_RING_SIZE + XHCI_TRB_PREFETCH_PAD)
 
 // Maximum number of deferred endpoint recovery requests queued at once.
 #define XHCI_MAX_RECOVERY_REQUESTS	32
@@ -113,7 +113,7 @@ public:
 	static	status_t			AddTo(Stack *stack);
 
 								XHCI(pci_info *info, pci_device_module_info* pci, pci_device* device, Stack *stack,
-									device_node* node);
+									device_node* node, bool trbPrefetchQuirk);
 								~XHCI();
 
 	virtual	const char *		TypeName() const { return "xhci"; }
@@ -279,6 +279,8 @@ private:
 			uint32				fIRQ;
 			bool				fUseMSI;
 			bool				fBayTrail;
+			uint32				fTrbPad;
+			uint32				fRingStride;
 
 			area_id				fErstArea;
 			xhci_erst_element *	fErst;

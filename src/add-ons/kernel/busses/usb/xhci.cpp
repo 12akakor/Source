@@ -124,6 +124,7 @@ typedef struct {
 	pci_device* device;
 
 	pci_info pciinfo;
+	bool trb_prefetch_quirk;
 
 	device_node* node;
 	device_node* driver_node;
@@ -216,6 +217,21 @@ init_device_acpi(device_node* node, xhci_pci_sim_info* bus)
 	info->u.h0.base_register_sizes[0] = crs.length != 0 ? crs.length : 0x10000;
 	info->u.h0.interrupt_line = crs.irq;
 
+	// The Raspberry Pi 4 UEFI firmware describes its VIA VL805 by this ACPI
+	// node only, so its PCI IDs are not visible here; the node does declare
+	// it as not cache coherent (_CCA = 0). Apply the VL805's TRB prefetch
+	// workaround to non-coherent ACPI controllers.
+	acpi_object_type object;
+	acpi_data buffer;
+	buffer.pointer = &object;
+	buffer.length = sizeof(object);
+	bus->trb_prefetch_quirk = false;
+	if (acpi->evaluate_method(device, "_CCA", NULL, &buffer) == B_OK
+		&& object.object_type == ACPI_TYPE_INTEGER
+		&& object.integer.integer == 0) {
+		bus->trb_prefetch_quirk = true;
+	}
+
 	bus->pci = NULL;
 	bus->device = NULL;
 	return B_OK;
@@ -240,7 +256,8 @@ init_bus(device_node* node, void** bus_cookie)
 	if (gUSB->get_stack((void**)&stack) != B_OK)
 		return B_ERROR;
 
-	XHCI *xhci = new(std::nothrow) XHCI(&bus->pciinfo, bus->pci, bus->device, stack, node);
+	XHCI *xhci = new(std::nothrow) XHCI(&bus->pciinfo, bus->pci, bus->device,
+		stack, node, bus->trb_prefetch_quirk);
 	if (xhci == NULL) {
 		return B_NO_MEMORY;
 	}
@@ -543,7 +560,7 @@ module_info* modules[] = {
 
 
 XHCI::XHCI(pci_info *info, 	pci_device_module_info* pci, pci_device* device, Stack *stack,
-	device_node* node)
+	device_node* node, bool trbPrefetchQuirk)
 	:	BusManager(stack, node),
 		fRegisterArea(-1),
 		fRegisters(NULL),
@@ -555,6 +572,11 @@ XHCI::XHCI(pci_info *info, 	pci_device_module_info* pci, pci_device* device, Sta
 		fUseMSI(false),
 		fBayTrail(info->vendor_id == PCI_VENDOR_INTEL
 			&& info->device_id == PCI_DEVICE_INTEL_BAYTRAIL_XHCI),
+		fTrbPad(trbPrefetchQuirk
+			|| (info->vendor_id == PCI_VENDOR_VIA
+				&& info->device_id == PCI_DEVICE_VIA_VL805_XHCI)
+			? XHCI_TRB_PREFETCH_PAD : 0),
+		fRingStride(XHCI_ENDPOINT_RING_SIZE + fTrbPad),
 		fErstArea(-1),
 		fDcbaArea(-1),
 		fCmdCompSem(-1),
@@ -1673,13 +1695,13 @@ XHCI::CreateDescriptor(uint32 trbCount, uint32 bufferCount, size_t bufferSize)
 	// _LinkDescriptorForPipe() has room to insert a link TRB.
 	trbCount++;
 	if (fStack->AllocateChunk((void **)&result->trbs, &result->trb_addr,
-			((trbCount + XHCI_TRB_PREFETCH_PAD) * sizeof(xhci_trb))) < B_OK) {
+			((trbCount + fTrbPad) * sizeof(xhci_trb))) < B_OK) {
 		TRACE_ERROR("failed to allocate TRBs\n");
 		FreeDescriptor(result);
 		return NULL;
 	}
 	memset(result->trbs, 0,
-		(trbCount + XHCI_TRB_PREFETCH_PAD) * sizeof(xhci_trb));
+		(trbCount + fTrbPad) * sizeof(xhci_trb));
 	result->trb_count = trbCount;
 	result->trb_used = 0;
 
@@ -1764,7 +1786,7 @@ XHCI::FreeDescriptor(xhci_td *descriptor)
 
 	if (descriptor->trbs != NULL) {
 		fStack->FreeChunk(descriptor->trbs, descriptor->trb_addr,
-			((descriptor->trb_count + XHCI_TRB_PREFETCH_PAD)
+			((descriptor->trb_count + fTrbPad)
 				* sizeof(xhci_trb)));
 	}
 	if (descriptor->buffers != NULL) {
@@ -2012,7 +2034,7 @@ XHCI::AllocateDevice(Hub *parent, int8 hubAddress, uint8 hubPort,
 
 	device->trb_area = fStack->AllocateArea((void **)&device->trbs,
 		&device->trb_addr, sizeof(xhci_trb) * (XHCI_MAX_ENDPOINTS - 1)
-			* XHCI_ENDPOINT_RING_STRIDE, "XHCI endpoint trbs");
+			* fRingStride, "XHCI endpoint trbs");
 	if (device->trb_area < B_OK) {
 		TRACE_ERROR("unable to create a device trbs area\n");
 		CleanupDevice(device);
@@ -2303,9 +2325,9 @@ XHCI::_InsertEndpointForPipe(Pipe *pipe)
 		endpoint->failureCount = 0;
 		endpoint->validationCount = 0;
 
-		endpoint->trbs = device->trbs + id * XHCI_ENDPOINT_RING_STRIDE;
+		endpoint->trbs = device->trbs + id * fRingStride;
 		endpoint->trb_addr = device->trb_addr
-			+ id * XHCI_ENDPOINT_RING_STRIDE * sizeof(xhci_trb);
+			+ id * fRingStride * sizeof(xhci_trb);
 		memset(endpoint->trbs, 0,
 			sizeof(xhci_trb) * XHCI_ENDPOINT_RING_SIZE);
 
