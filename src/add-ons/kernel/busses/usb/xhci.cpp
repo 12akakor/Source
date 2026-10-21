@@ -400,15 +400,25 @@ supports_device(device_node* parent)
 	}
 
 	if (strcmp(bus, "acpi") == 0) {
+#ifdef __aarch64__
+		// Only xHCI controllers that firmware describes exclusively through
+		// ACPI. A node with an _ADR is the ACPI description of a device on
+		// PCI (or another enumerable bus), which the PCI path below attaches
+		// already; claiming it here as well would attach it twice.
 		const char* hid;
 		uint32 type;
+		uint32 address;
 		if (gDeviceManager->get_attr_uint32(parent, ACPI_DEVICE_TYPE_ITEM,
 				&type, false) == B_OK && type == ACPI_TYPE_DEVICE
 			&& gDeviceManager->get_attr_string(parent, ACPI_DEVICE_HID_ITEM,
-				&hid, false) == B_OK && strcmp(hid, "PNP0D10") == 0) {
+				&hid, false) == B_OK && strcmp(hid, "PNP0D10") == 0
+			&& gDeviceManager->get_attr_uint32(parent, ACPI_DEVICE_ADDR_ITEM,
+				&address, false) != B_OK) {
 			TRACE_MODULE("XHCI ACPI device found!\n");
 			return 0.8f;
 		}
+#endif
+		// Elsewhere xHCI controllers are only attached through PCI.
 		return 0.0f;
 	}
 
