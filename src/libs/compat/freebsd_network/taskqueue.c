@@ -11,6 +11,8 @@
 #include <compat/sys/taskqueue.h>
 #include <compat/sys/haiku-module.h>
 
+#include <interrupts.h>
+
 
 static int _taskqueue_start_threads(struct taskqueue **taskQueue,
 	int count, int priority, const char *name);
@@ -165,7 +167,14 @@ void
 taskqueue_thread_enqueue(void *context)
 {
 	struct taskqueue **tqp = context;
-	release_sem_etc((*tqp)->tq_sem, 1, B_DO_NOT_RESCHEDULE);
+	/* When enqueuing from thread context, let the scheduler dispatch the
+	 * worker right away. With B_DO_NOT_RESCHEDULE the woken worker only
+	 * runs at the next scheduling event, which on an idle system is the
+	 * next (device) interrupt - for wifi often the ~100ms beacon.
+	 * In interrupt context rescheduling here is not allowed; the
+	 * interrupt exit path takes care of it. */
+	release_sem_etc((*tqp)->tq_sem, 1,
+		are_interrupts_enabled() ? 0 : B_DO_NOT_RESCHEDULE);
 }
 
 
