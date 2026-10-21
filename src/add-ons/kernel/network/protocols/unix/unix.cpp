@@ -369,7 +369,7 @@ unix_add_ancillary_data(net_protocol *self, ancillary_data_container *container,
 ssize_t
 unix_process_ancillary_data(net_protocol *self,
 	const ancillary_data_container *container, void *buffer,
-	size_t bufferSize, int flags)
+	size_t bufferSize, int flags, int* _messageFlags)
 {
 	TRACE("[%" B_PRId32 "] unix_process_ancillary_data(%p, %p, %p, %p, %lu)\n",
 		find_thread(NULL), self, container, buffer, bufferSize);
@@ -386,16 +386,34 @@ unix_process_ancillary_data(net_protocol *self,
 		totalCount += header.len / sizeof(file_descriptor*);
 	}
 
-	// check if there's enough space in the buffer
-	size_t neededBufferSpace = CMSG_SPACE(sizeof(int) * totalCount);
-	if (bufferSize < neededBufferSpace)
-		return B_BAD_VALUE;
+	// Install only as many FDs as fit; like POSIX/Linux, report the rest via
+	// MSG_CTRUNC rather than failing the read -- the data has already been
+	// consumed from the FIFO, so an error here would lose it. The descriptors
+	// not installed are closed when the container is destroyed
+	// (destroy_scm_rights_descriptors()).
+	int installCount = 0;
+	if (bufferSize >= CMSG_LEN(sizeof(int))) {
+		installCount = min_c((size_t)totalCount,
+			(bufferSize - CMSG_LEN(0)) / sizeof(int));
+	}
+	if (installCount < totalCount)
+		*_messageFlags |= MSG_CTRUNC;
+	if ((installCount == 0 && totalCount > 0) || bufferSize < CMSG_LEN(0))
+		return 0;
+
+	size_t neededBufferSpace = min_c(
+		(size_t)CMSG_SPACE(sizeof(int) * installCount), bufferSize);
+
+	// Zero the whole returned space, so the CMSG_SPACE() padding past
+	// cmsg_len (and, on partial new_fd() failure, the truncated tail) does
+	// not leak uninitialized kernel heap to userland.
+	memset(buffer, 0, neededBufferSpace);
 
 	// init header
 	cmsghdr* messageHeader = (cmsghdr*)buffer;
 	messageHeader->cmsg_level = SOL_SOCKET;
 	messageHeader->cmsg_type = SCM_RIGHTS;
-	messageHeader->cmsg_len = CMSG_LEN(sizeof(int) * totalCount);
+	messageHeader->cmsg_len = CMSG_LEN(sizeof(int) * installCount);
 
 	// create FDs for the current process
 	int* fds = (int*)CMSG_DATA(messageHeader);
@@ -404,26 +422,30 @@ unix_process_ancillary_data(net_protocol *self,
 	status_t error = B_OK;
 	int i = 0;
 	data = NULL;
-	while ((data = gStackModule->next_ancillary_data(container, data, &header)) != NULL) {
+	while (i < installCount
+		&& (data = gStackModule->next_ancillary_data(container, data, &header))
+			!= NULL) {
 		int count = header.len / sizeof(file_descriptor*);
 		file_descriptor** descriptors = (file_descriptor**)data;
 
-		for (int k = 0; k < count; k++, i++) {
+		for (int k = 0; k < count && i < installCount; k++, i++) {
 			// Get an additional reference which will go to the FD table index. The
 			// reference and open reference acquired in unix_add_ancillary_data()
 			// will be released when the container is destroyed.
 			inc_fd_ref_count(descriptors[k]);
-			fds[i] = new_fd(ioContext, descriptors[k]);
+			int fd = new_fd(ioContext, descriptors[k]);
 
-			if (fds[i] < 0) {
-				error = fds[i];
+			if (fd < 0) {
+				// The FD table is full (e.g. B_NO_MORE_FDS). Keep the FDs
+				// installed so far and report the rest via MSG_CTRUNC, as on
+				// Linux -- the data has already been consumed from the FIFO,
+				// so failing the read here would lose it. The descriptors not
+				// installed are closed when the container is destroyed.
 				put_fd(descriptors[k]);
-
-				// close FD indices
-				for (int j = i - 1; j >= 0; j--)
-					close_fd_index(ioContext, fds[j]);
+				error = fd;
 				break;
 			}
+			fds[i] = fd;
 
 			WriteLocker locker(ioContext->lock);
 			if ((flags & MSG_CMSG_CLOEXEC) != 0)
@@ -435,7 +457,17 @@ unix_process_ancillary_data(net_protocol *self,
 			break;
 	}
 
-	return error == B_OK ? neededBufferSpace : error;
+	if (error != B_OK) {
+		// partial new_fd() failure: truncate to the FDs actually installed
+		*_messageFlags |= MSG_CTRUNC;
+		if (i == 0)
+			return 0;
+		messageHeader->cmsg_len = CMSG_LEN(sizeof(int) * i);
+		neededBufferSpace = min_c((size_t)CMSG_SPACE(sizeof(int) * i),
+			bufferSize);
+	}
+
+	return neededBufferSpace;
 }
 
 

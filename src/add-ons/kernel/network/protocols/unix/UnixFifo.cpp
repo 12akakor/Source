@@ -176,6 +176,18 @@ UnixBufferQueue::Read(UnixRequest& request)
 				"but only %lu bytes are readable\n", datagramEntry->size, readable);
 		else
 			readable = datagramEntry->size;
+	} else if (AncillaryDataEntry* entry = fAncillaryData.Head()) {
+		// A stream read must not take the ancillary data of more than one
+		// write, as on Linux (unix_stream_read_generic() stops once it has
+		// detached an skb's descriptors), which IPC users such as Ladybird's
+		// LibIPC rely on. Entry offsets are relative to the previous entry
+		// (see Write()), so if this read reaches the head entry, stop where
+		// the next entry's data begin.
+		if (readable > entry->offset) {
+			AncillaryDataEntry* next = fAncillaryData.GetNext(entry);
+			if (next != NULL && readable - entry->offset > next->offset)
+				readable = entry->offset + next->offset;
+		}
 	}
 
 	while (readable > 0 && request.GetCurrentChunk(data, size)) {
@@ -259,6 +271,8 @@ UnixBufferQueue::Read(UnixRequest& request)
 		AncillaryDataEntry* entry = fAncillaryData.Head();
 		size_t offsetDelta = request.BytesTransferred();
 		while (entry != NULL && offsetDelta > entry->offset) {
+			// offsets are relative to the previous entry, as in the read path
+			offsetDelta -= entry->offset;
 			request.CloneAncillaryData(entry->data);
 			entry = fAncillaryData.GetNext(entry);
 		}
