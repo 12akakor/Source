@@ -2297,7 +2297,6 @@ TCPEndpoint::_ShouldSendSegment(tcp_segment_header& segment, uint32 length,
 		//   or
 		// - we're retransmitting data
 		if (length == segmentMaxSize
-			|| (fOptions & TCP_NODELAY) != 0
 			|| tcp_sequence(fSendNext + length) == fSendQueue.LastSequence()
 			|| (fSendMaxWindow > 0 && length >= fSendMaxWindow / 2))
 			return true;
