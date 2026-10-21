@@ -115,7 +115,7 @@ static void	upgt_bulk_tx(struct upgt_softc *, struct upgt_data *);
 static int	upgt_fw_verify(struct upgt_softc *);
 static int	upgt_mem_init(struct upgt_softc *);
 static int	upgt_fw_load(struct upgt_softc *);
-static int	upgt_fw_copy(const uint8_t *, char *, int);
+static int	upgt_fw_copy(const uint8_t *, char *, int, int *);
 static uint32_t	upgt_crc32_le(const void *, size_t);
 static struct mbuf *
 		upgt_rxeof(struct usb_xfer *, struct upgt_data *, int *);
@@ -1244,6 +1244,9 @@ upgt_eeprom_parse_freq4(struct upgt_softc *sc, uint8_t *data, int len)
 
 	if (elements >= (int)(UPGT_EEPROM_SIZE / sizeof(freq4_1[0])))
 		return;
+	/* sc_eeprom_freq4[] holds 8 settings per channel */
+	if (settings > (int)nitems(sc->sc_eeprom_freq4[0]))
+		return;
 
 	for (i = 0; i < elements; i++) {
 		channel = ieee80211_mhz2ieee(le16toh(freq4_1[i].freq), 0);
@@ -1383,7 +1386,7 @@ upgt_rxeof(struct usb_xfer *xfer, struct upgt_data *data, int *rssi)
 	struct upgt_lmac_eeprom *eeprom;
 	uint8_t h1_type;
 	uint16_t h2_type;
-	int actlen, sumlen;
+	int actlen, sumlen, pkglen;
 
 	usbd_xfer_status(xfer, &actlen, &sumlen, NULL, NULL);
 
@@ -1420,6 +1423,14 @@ upgt_rxeof(struct usb_xfer *xfer, struct upgt_data *data, int *rssi)
 		    "received EEPROM block (offset=%d, len=%d)\n",
 		    eeprom_offset, eeprom_len);
 
+		/* the block must fit in the received data and in sc_eeprom */
+		if (eeprom_len > actlen - 4 - (int)sizeof(*eeprom) ||
+		    (size_t)eeprom_offset + eeprom_len > sizeof(sc->sc_eeprom)) {
+			device_printf(sc->sc_dev,
+			    "invalid EEPROM block (offset=%d, len=%d)\n",
+			    eeprom_offset, eeprom_len);
+			return (NULL);
+		}
 		memcpy(sc->sc_eeprom + eeprom_offset,
 		    data->buf + sizeof(struct upgt_lmac_eeprom) + 4,
 		    eeprom_len);
@@ -1435,8 +1446,15 @@ upgt_rxeof(struct usb_xfer *xfer, struct upgt_data *data, int *rssi)
 	    h1_type == UPGT_H1_TYPE_RX_DATA_MGMT) {
 		DPRINTF(sc, UPGT_DEBUG_RECV, "%s: received 802.11 RX data\n",
 		    __func__);
-		m = upgt_rx(sc, data->buf + 4, le16toh(header->header1.len),
-		    rssi);
+		pkglen = le16toh(header->header1.len);
+		/* payload must fit in the received data and be larger than FCS */
+		if (pkglen <= IEEE80211_CRC_LEN ||
+		    actlen < 4 + (int)sizeof(struct upgt_lmac_rx_desc) + pkglen) {
+			DPRINTF(sc, UPGT_DEBUG_RECV,
+			    "%s: invalid RX length %d\n", __func__, pkglen);
+			return (NULL);
+		}
+		m = upgt_rx(sc, data->buf + 4, pkglen, rssi);
 	} else if (h1_type == UPGT_H1_TYPE_CTRL &&
 	    h2_type == UPGT_H2_TYPE_STATS) {
 		DPRINTF(sc, UPGT_DEBUG_STAT, "%s: received statistic data\n",
@@ -1487,8 +1505,11 @@ upgt_rx(struct upgt_softc *sc, uint8_t *data, int pkglen, int *rssi)
 	rxdesc = (struct upgt_lmac_rx_desc *)data;
 
 	/* create mbuf which is suitable for strict alignment archs */
-	KASSERT((pkglen + ETHER_ALIGN) < MCLBYTES,
-	    ("A current mbuf storage is small (%d)", pkglen + ETHER_ALIGN));
+	if (pkglen + ETHER_ALIGN > MCLBYTES) {
+		DPRINTF(sc, UPGT_DEBUG_RECV, "%s: RX frame too large (%d)\n",
+		    __func__, pkglen);
+		return (NULL);
+	}
 	m = m_getcl(M_NOWAIT, MT_DATA, M_PKTHDR);
 	if (m == NULL) {
 		device_printf(sc->sc_dev, "could not create RX mbuf\n");
@@ -1596,6 +1617,7 @@ upgt_fw_load(struct upgt_softc *sc)
 	size_t offset;
 	int bsize;
 	int n;
+	int outlen;
 	uint32_t crc32;
 
 	fw = firmware_get(upgt_fwname);
@@ -1647,12 +1669,12 @@ upgt_fw_load(struct upgt_softc *sc)
 			goto fail;
 		}
 		n = upgt_fw_copy((const uint8_t *)fw->data + offset,
-		    data_cmd->buf, bsize);
-		data_cmd->buflen = bsize;
+		    data_cmd->buf, bsize, &outlen);
+		data_cmd->buflen = outlen;
 		upgt_bulk_tx(sc, data_cmd);
 
 		DPRINTF(sc, UPGT_DEBUG_FW, "FW offset=%zu, read=%d, sent=%d\n",
-		    offset, n, bsize);
+		    offset, n, outlen);
 		bsize = n;
 	}
 	DPRINTF(sc, UPGT_DEBUG_FW, "%s: firmware downloaded\n", __func__);
@@ -1705,11 +1727,18 @@ upgt_crc32_le(const void *buf, size_t size)
  * 0x7d -> 0x7d 0x5d
  */
 static int
-upgt_fw_copy(const uint8_t *src, char *dst, int size)
+upgt_fw_copy(const uint8_t *src, char *dst, int size, int *outlen)
 {
 	int i, j;
 
 	for (i = 0, j = 0; i < size && j < size; i++) {
+		/*
+		 * An escaped byte needs two bytes of room.  If only one is
+		 * left, end the block here, so the escape pair is never split
+		 * and no byte is lost.
+		 */
+		if ((src[i] == 0x7e || src[i] == 0x7d) && j + 2 > size)
+			break;
 		switch (src[i]) {
 		case 0x7e:
 			dst[j] = 0x7d;
@@ -1730,6 +1759,7 @@ upgt_fw_copy(const uint8_t *src, char *dst, int size)
 		}
 	}
 
+	*outlen = j;
 	return (i);
 }
 
@@ -1790,17 +1820,18 @@ upgt_fw_verify(struct upgt_softc *sc)
 	/*
 	 * Seek to beginning of Boot Record Area (BRA).
 	 */
-	for (offset = 0; offset < fw->datasize; offset += sizeof(*uc)) {
+	for (offset = 0; offset + sizeof(*uc) <= fw->datasize;
+	    offset += sizeof(*uc)) {
 		uc = (const uint32_t *)((const uint8_t *)fw->data + offset);
 		if (*uc == 0)
 			break;
 	}
-	for (; offset < fw->datasize; offset += sizeof(*uc)) {
+	for (; offset + sizeof(*uc) <= fw->datasize; offset += sizeof(*uc)) {
 		uc = (const uint32_t *)((const uint8_t *)fw->data + offset);
 		if (*uc != 0)
 			break;
 	}
-	if (offset == fw->datasize) { 
+	if (offset + sizeof(*uc) > fw->datasize) {
 		device_printf(sc->sc_dev,
 		    "firmware Boot Record Area not found\n");
 		error = EIO;
@@ -1813,12 +1844,28 @@ upgt_fw_verify(struct upgt_softc *sc)
 	/*
 	 * Parse Boot Record Area (BRA) options.
 	 */
-	while (offset < fw->datasize && bra_end == 0) {
+	while (bra_end == 0) {
+		/* the option header and its data must lie inside the image */
+		if (fw->datasize - offset < sizeof(*bra_opt)) {
+			device_printf(sc->sc_dev,
+			    "firmware Boot Record Area is truncated\n");
+			error = EIO;
+			goto fail;
+		}
+
 		/* get current BRA option */
 		p = (const uint8_t *)fw->data + offset;
 		bra_opt = (const struct upgt_fw_bra_option *)p;
 		bra_option_type = le32toh(bra_opt->type);
-		bra_option_len = le32toh(bra_opt->len) * sizeof(*uc);
+		bra_option_len = le32toh(bra_opt->len);
+		if (bra_option_len >
+		    (fw->datasize - offset - sizeof(*bra_opt)) / sizeof(*uc)) {
+			device_printf(sc->sc_dev,
+			    "firmware Boot Record Area option too long\n");
+			error = EIO;
+			goto fail;
+		}
+		bra_option_len *= sizeof(*uc);
 
 		switch (bra_option_type) {
 		case UPGT_BRA_TYPE_FW:
@@ -1861,6 +1908,12 @@ upgt_fw_verify(struct upgt_softc *sc)
 			DPRINTF(sc, UPGT_DEBUG_FW,
 			    "UPGT_BRA_TYPE_DESCR len=%d\n", bra_option_len);
 
+			if (bra_option_len < sizeof(*descr)) {
+				device_printf(sc->sc_dev,
+				    "wrong UPGT_BRA_TYPE_DESCR len\n");
+				error = EIO;
+				goto fail;
+			}
 			descr = (const struct upgt_fw_bra_descr *)bra_opt->data;
 
 			sc->sc_memaddr_frame_start =
@@ -2170,12 +2223,22 @@ upgt_tx_start(struct upgt_softc *sc, struct mbuf *m, struct ieee80211_node *ni,
 		if (k == NULL) {
 			device_printf(sc->sc_dev,
 			    "ieee80211_crypto_encap returns NULL.\n");
+			m_freem(m);
 			error = EIO;
 			goto done;
 		}
 
 		/* in case packet header moved, reset pointer */
 		wh = mtod(m, struct ieee80211_frame *);
+	}
+
+	/* the frame must fit in the TX buffer (MCLBYTES, 4 byte aligned) */
+	if (sizeof(*mem) + sizeof(*txdesc) + m->m_pkthdr.len + 3 > MCLBYTES) {
+		device_printf(sc->sc_dev, "TX frame too large (%d bytes)\n",
+		    m->m_pkthdr.len);
+		m_freem(m);
+		error = EIO;
+		goto done;
 	}
 
 	/* Transmit the URB containing the TX data.  */
