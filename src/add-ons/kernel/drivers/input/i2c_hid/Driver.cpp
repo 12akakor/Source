@@ -15,6 +15,7 @@
 #include "DeviceList.h"
 #include "Driver.h"
 #include "HIDDevice.h"
+#include "InputReadyLine.h"
 #include "ProtocolHandler.h"
 
 #include <lock.h>
@@ -363,12 +364,28 @@ i2c_hid_init_driver(device_node *node, void **driverCookie)
 	parent = sDeviceManager->get_parent_node(node);
 	sDeviceManager->get_driver(parent, (driver_module_info **)&device->i2c,
 		(void **)&device->i2c_cookie);
+
+	// The input ready line is optional: without it, the driver reads the
+	// input register on each poll.
+	InputReadyLine* inputReady = NULL;
+	uint64 handlePointer;
+	if (sDeviceManager->get_attr_uint64(parent, ACPI_DEVICE_HANDLE_ITEM,
+			&handlePointer, false) == B_OK) {
+		inputReady = new(std::nothrow) InputReadyLine;
+		if (inputReady != NULL
+			&& inputReady->Init(gACPI, (acpi_handle)handlePointer) != B_OK) {
+			delete inputReady;
+			inputReady = NULL;
+		}
+	}
 	sDeviceManager->put_node(parent);
 
 	mutex_lock(&sDriverLock);
 	HIDDevice *hidDevice
 		= new(std::nothrow) HIDDevice(descriptorAddress, device->i2c,
-			device->i2c_cookie);
+			device->i2c_cookie, inputReady);
+	if (hidDevice == NULL)
+		delete inputReady;
 
 	if (hidDevice != NULL && hidDevice->InitCheck() == B_OK) {
 		device->hidDevice = hidDevice;
