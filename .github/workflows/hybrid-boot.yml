@@ -96,6 +96,13 @@ jobs:
       - name: Brand the build
         run: |
           set -euo pipefail
+          # A fork does not carry upstream's hrev tags, and the revision is
+          # derived from them. Fetch them from the organisation repository.
+          if ! git describe --tags --match='hrev*' >/dev/null 2>&1; then
+            git fetch --quiet --no-recurse-submodules \
+              https://github.com/RenkuOS/Source.git \
+              'refs/tags/hrev*:refs/tags/hrev*'
+          fi
           REV="$(git describe --dirty --tags --match='hrev*' --abbrev=1 \
                  | sed 's/-g[0-9a-z]\+//' | sed 's/-/+/g')"
           if [ -z "${REV}" ]; then
