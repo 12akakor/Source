@@ -266,6 +266,71 @@ jobs:
             elapsed=$(( elapsed + 5 ))
           done
 
+      # One disk image for a USB stick: an MBR with the EFI system partition
+      # (type 0xef) and the Haiku BFS volume (type 0xeb), the same layout that
+      # Haiku's own anyboot image uses. It is booted once in QEMU as a single
+      # disk, so what ends up on the stick has been tried.
+      - name: Build and boot the combined USB image
+        run: |
+          set -uo pipefail
+          ESP="$(find images -name esp.image | head -1)"
+          SYS="$(find images -name system64.image | head -1)"
+          CODE="$(grep -E 'OVMF.*CODE.*\.fd$' ovmf-files.txt | grep -vi secboot | head -1)"
+          VARS="$(grep -E 'OVMF.*VARS.*\.fd$' ovmf-files.txt | grep -vi 'ms\|snakeoil' | head -1)"
+
+          ALIGN=2048   # 1 MiB in 512 byte sectors
+          ESP_SECT=$(( ($(stat -c %s "${ESP}") + 511) / 512 ))
+          SYS_SECT=$(( ($(stat -c %s "${SYS}") + 511) / 512 ))
+          START1=${ALIGN}
+          START2=$(( (START1 + ESP_SECT + ALIGN - 1) / ALIGN * ALIGN ))
+          TOTAL=$(( START2 + SYS_SECT + ALIGN ))
+
+          mkdir -p usb
+          truncate -s $(( TOTAL * 512 )) usb/hybrid-usb.img
+          sfdisk --quiet usb/hybrid-usb.img <<EOF
+          label: dos
+          start=${START1}, size=${ESP_SECT}, type=ef, bootable
+          start=${START2}, size=${SYS_SECT}, type=eb
+          EOF
+          dd if="${ESP}" of=usb/hybrid-usb.img bs=512 seek=${START1} conv=notrunc status=none
+          dd if="${SYS}" of=usb/hybrid-usb.img bs=512 seek=${START2} conv=notrunc status=none
+          sfdisk -l usb/hybrid-usb.img
+
+          cp "${VARS}" vars2.fd
+          : > serial-combined.log
+          qemu-system-x86_64 \
+            -machine q35 -cpu qemu64 -accel tcg -m 2048 \
+            -drive if=pflash,format=raw,readonly=on,file="${CODE}" \
+            -drive if=pflash,format=raw,file=vars2.fd \
+            -drive file=usb/hybrid-usb.img,format=raw,if=ide \
+            -display none -serial file:serial-combined.log -no-reboot &
+          QEMU=$!
+          trap "kill ${QEMU} 2>/dev/null || true" EXIT
+
+          elapsed=0
+          while ! grep -qF 'Haiku revision:' serial-combined.log 2>/dev/null; do
+            if ! kill -0 "${QEMU}" 2>/dev/null || [ "${elapsed}" -ge 300 ]; then
+              echo "::error::The combined image did not reach the kernel banner"
+              tail -30 serial-combined.log
+              exit 1
+            fi
+            sleep 5
+            elapsed=$(( elapsed + 5 ))
+          done
+          echo "Combined image reached the kernel banner after ${elapsed}s."
+          sleep 30
+          if grep -qE 'Kernel Debugging Land|^PANIC:' serial-combined.log; then
+            echo "::error::Kernel failed after the banner"; exit 1
+          fi
+
+      - name: Upload USB image
+        uses: actions/upload-artifact@v4
+        with:
+          name: hybrid-usb-image
+          path: usb/hybrid-usb.img
+          retention-days: 7
+          compression-level: 6
+
       - name: Stage report
         if: always()
         run: |
@@ -295,5 +360,6 @@ jobs:
           name: serial-hybrid
           path: |
             serial.log
+            serial-combined.log
             ovmf-files.txt
           retention-days: 14
