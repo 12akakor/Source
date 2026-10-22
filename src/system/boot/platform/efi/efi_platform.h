@@ -52,4 +52,7 @@ extern const efi_boot_services		*kBootServices;
 extern const efi_runtime_services	*kRuntimeServices;
 extern efi_handle kImage;
 
+// True when a 32-bit loader starts a 64-bit kernel (x86 only).
+extern bool gIsHybridPlatform;
+
 #endif	/* EFI_PLATFORM_H */
