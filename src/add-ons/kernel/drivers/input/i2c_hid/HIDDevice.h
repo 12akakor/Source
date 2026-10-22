@@ -13,13 +13,15 @@
 #include "I2CHIDProtocol.h"
 
 
+class InputReadyLine;
 class ProtocolHandler;
 
 
 class HIDDevice {
 public:
 								HIDDevice(uint16 descriptorAddress, i2c_device_interface* i2c,
-									i2c_device i2cCookie);
+									i2c_device i2cCookie,
+									InputReadyLine* inputReady);
 								~HIDDevice();
 
 			status_t			InitCheck() const { return fStatus; }
@@ -68,6 +70,7 @@ private:
 			int32				fTransferScheduled;
 			size_t				fTransferBufferSize;
 			uint8 *				fTransferBuffer;
+			InputReadyLine*		fInputReady;
 
 			int32				fOpenCount;
 			bool				fRemoved;

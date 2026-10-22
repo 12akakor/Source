@@ -7,12 +7,16 @@ SubDirSysHdrs $(HAIKU_TOP) src add-ons kernel drivers input hid_shared ;
 UsePrivateHeaders [ FDirName kernel util ] input drivers device i2c ;
 UsePrivateKernelHeaders ;
 
+SubDirHdrs [ FDirName $(HAIKU_TOP) src add-ons kernel bus_managers acpi acpica include ] ;
+SubDirHdrs [ FDirName $(HAIKU_TOP) src add-ons kernel bus_managers acpi acpica include platform ] ;
+
 SEARCH_SOURCE += [ FDirName $(HAIKU_TOP) src add-ons kernel drivers input hid_shared ] ;
 
 KernelAddon i2c_hid :
 	DeviceList.cpp
 	Driver.cpp
 	HIDDevice.cpp
+	InputReadyLine.cpp
 
 	HIDCollection.cpp
 	HIDParser.cpp
