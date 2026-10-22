@@ -134,6 +134,11 @@ wlan_close(void* cookie)
 	ifp->if_flags &= ~IFF_UP;
 	ifp->if_ioctl(ifp, SIOCSIFFLAGS, NULL);
 
+	// compat_close() holds Giant, so the watchdog callback is not running
+	// and will not run again.
+	mtx_assert(&Giant, MA_OWNED);
+	timeout_del(&((struct ieee80211com*)ifp)->ic_slowtimo);
+
 	return B_OK;
 }
 
