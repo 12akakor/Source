@@ -288,7 +288,9 @@ i2c_hid_support(device_node *parent)
 	if (sDeviceManager->get_attr_string(parent, ACPI_DEVICE_CID_ITEM, &name,
 		false) == B_OK && name != NULL && strcmp(name, ACPI_NAME_HID_DEVICE) == 0) {
 		TRACE("i2c_hid_support found a compatible hid i2c device\n");
-		return 0.6;
+		// A driver that matches the hardware ID, for example i2c_elan,
+		// comes first.
+		return 0.5;
 	}
 
 	uint16 slaveAddress;
