@@ -38,6 +38,10 @@ if $(HAIKU_BUILD_TYPE) = test {
 	packages += haiku_unittests ;
 }
 
+if $(HAIKU_BUILD_TYPE) = regular {
+	packages += mediatek_wifi_firmwares ;
+}
+
 local webPositiveIsAvailable ;
 local architectureObject ;
 for architectureObject in [ MultiArchSubDirSetup ] {

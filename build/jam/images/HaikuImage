@@ -39,5 +39,10 @@ if $(HAIKU_BUILD_TYPE) = test {
 	AddPackageFilesToHaikuImage system packages : haiku_unittests.hpkg ;
 }
 
+if $(HAIKU_BUILD_TYPE) = regular {
+	AddPackageFilesToHaikuImage system packages : mediatek_wifi_firmwares.hpkg
+		: nameFromMetaInfo ;
+}
+
 # import what is shared by all images
 include [ FDirName $(HAIKU_BUILD_RULES_DIR) images definitions common-tail ] ;
