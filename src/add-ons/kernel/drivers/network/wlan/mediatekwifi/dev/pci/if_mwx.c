@@ -388,6 +388,11 @@ struct mwx_softc {
 	struct task		sc_setkey_task;
 	struct task		sc_scan_task;
 	struct task		sc_reset_task;
+#ifdef __HAIKU__
+	struct task		sc_ba_task;
+	uint16_t		sc_ba_start;	/* RX BA TIDs to set up */
+	uint16_t		sc_ba_stop;	/* RX BA TIDs to tear down */
+#endif
 	struct timeout		sc_reset_to;
 	u_int			sc_flags;
 #define MWX_FLAG_SCANNING		0x01
@@ -720,6 +725,16 @@ int		 mt7921_mcu_wtbl_ht_tlv(struct mbuf *, uint16_t *,
 		    struct mwx_softc *, struct ieee80211_node *);
 int		 mt7921_mac_sta_update(struct mwx_softc *,
 		    struct ieee80211_node *, int, int);
+#ifdef __HAIKU__
+void		 mwx_setup_ht(struct mwx_softc *);
+int		 mwx_ampdu_rx_start(struct ieee80211com *,
+		    struct ieee80211_node *, uint8_t);
+void		 mwx_ampdu_rx_stop(struct ieee80211com *,
+		    struct ieee80211_node *, uint8_t);
+void		 mwx_ba_task(void *);
+int		 mt7921_mcu_rx_ba(struct mwx_softc *, struct ieee80211_node *,
+		    uint8_t, uint16_t, uint16_t, int);
+#endif
 int		 mt7925_mac_sta_update(struct mwx_softc *,
 		    struct ieee80211_node *, int);
 void		 mt7921_mcu_add_key_tlv(struct mbuf *, uint16_t *,
@@ -968,6 +983,10 @@ mwx_stop(struct ifnet *ifp)
 	task_del(sc->sc_nswq, &sc->sc_setkey_task);
 	task_del(sc->sc_nswq, &sc->sc_scan_task);
 	task_del(sc->sc_nswq, &sc->sc_reset_task);
+#ifdef __HAIKU__
+	task_del(sc->sc_nswq, &sc->sc_ba_task);
+	sc->sc_ba_start = sc->sc_ba_stop = 0;
+#endif
 	timeout_del(&sc->sc_reset_to);
 
 	/* XXX need a barrier here */
@@ -1297,6 +1316,14 @@ mwx_newstate_task(void *ptr)
 		else
 			mt7921_mcu_hw_scan_cancel(sc); /* XXX */
 		mwx_mcu_set_deep_sleep(sc, 0);
+#ifdef __HAIKU__
+		/*
+		 * HT was negotiated during association. Update the station
+		 * record so the firmware's rate control can use it.
+		 */
+		if (sc->sc_hwtype != MWX_HW_MT7925)
+			mt7921_mac_sta_update(sc, ic->ic_bss, 1, 0);
+#endif
 		if (sc->sc_hwtype == MWX_HW_MT7925)
 			mt7925_mcu_set_rts_thresh(sc, 0x92b);
 		else
@@ -1770,6 +1797,11 @@ mwx_preinit(struct mwx_softc *sc)
 	}
 #endif
 
+#ifdef __HAIKU__
+	if (sc->sc_hwtype != MWX_HW_MT7925)
+		mwx_setup_ht(sc);
+#endif
+
 	/* Configure channel information obtained from firmware. */
 	ieee80211_channel_init(ifp);
 
@@ -2049,6 +2081,10 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
 	ic->ic_bgscan_done = mwx_bgscan_done;
 	ic->ic_set_key = mwx_set_key;
 	ic->ic_delete_key = mwx_delete_key;
+#ifdef __HAIKU__
+	ic->ic_ampdu_rx_start = mwx_ampdu_rx_start;
+	ic->ic_ampdu_rx_stop = mwx_ampdu_rx_stop;
+#endif
 
 	sc->sc_nswq = taskq_create("mwxns", 1, IPL_NET, 0);
 	if (sc->sc_nswq == NULL) {
@@ -2061,6 +2097,9 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
 	task_set(&sc->sc_setkey_task, mwx_setkey_task, sc);
 	task_set(&sc->sc_scan_task, mwx_end_scan_task, sc);
 	task_set(&sc->sc_reset_task, mwx_reset_task, sc);
+#ifdef __HAIKU__
+	task_set(&sc->sc_ba_task, mwx_ba_task, sc);
+#endif
 	timeout_set(&sc->sc_reset_to, mwx_reset_timeo, sc);
 
 #ifdef __HAIKU__
@@ -4077,11 +4116,27 @@ mwx_mac_init(struct mwx_softc *sc)
 		dcr1 = MT_MDP_DCR1;
 	}
 
+#ifdef __HAIKU__
+	/*
+	 * Deliver A-MSDUs whole. The hardware would split them into
+	 * subframes that share one sequence number, and net80211's
+	 * Block Ack reordering keeps one frame per sequence number.
+	 * net80211 splits them after reordering instead.
+	 */
+	if (sc->sc_hwtype != MWX_HW_MT7925) {
+		mwx_rmw(sc, dcr1, MT_RX_MAX_LEN << MT_MDP_DCR1_MAX_RX_LEN_SHIFT,
+		    MT_MDP_DCR1_MAX_RX_LEN_MASK);
+		mwx_clear(sc, dcr0, MT_MDP_DCR0_DAMSDU_EN);
+	} else {
+#endif
 	mwx_rmw(sc, dcr1, 1536 << MT_MDP_DCR1_MAX_RX_LEN_SHIFT,
 	    MT_MDP_DCR1_MAX_RX_LEN_MASK);
 
 	/* enable hardware de-aggregation */
 	mwx_set(sc, dcr0, MT_MDP_DCR0_DAMSDU_EN);
+#ifdef __HAIKU__
+	}
+#endif
 
 	if (sc->sc_hwtype != MWX_HW_MT7925) {
 		/* enable hardware rx header translation */
@@ -7436,6 +7491,15 @@ mt7921_mcu_add_sta_tlv(struct mbuf *m, uint16_t *tlvnum, struct mwx_softc *sc,
 	}
 #endif
 
+#ifdef __HAIKU__
+	if (ni->ni_flags & IEEE80211_NODE_HT) {
+		struct sta_rec_ht *ht;
+
+		ht = mwx_append_tlv(m, tlvnum, STA_REC_HT, sizeof(*ht));
+		ht->ht_cap = htole16(ni->ni_htcaps);
+	}
+#endif
+
 	phy = mwx_append_tlv(m, tlvnum, STA_REC_PHY, sizeof(*phy));
 	/* XXX basic_rates: bitmap of basic rates, each bit stands for an
 	 *      index into the rate table configured by the driver in
@@ -7448,6 +7512,11 @@ mt7921_mcu_add_sta_tlv(struct mbuf *m, uint16_t *tlvnum, struct mwx_softc *sc,
 	    sta->deflink.ht_cap.ampdu_factor) |
 	    FIELD_PREP(IEEE80211_HT_AMPDU_PARM_DENSITY,
 	    sta->deflink.ht_cap.ampdu_density);
+#endif
+#ifdef __HAIKU__
+	if (ni->ni_flags & IEEE80211_NODE_HT)
+		phy->ampdu = ni->ni_ampdu_param &
+		    (IEEE80211_AMPDU_PARAM_LE | IEEE80211_AMPDU_PARAM_SS);
 #endif
 	// XXX phy->rcpi = rssi_to_rcpi(-ewma_rssi_read(&sc->sc_vif.rssi));
 	phy->rcpi = 0xdc;	/* XXX STOLEN FROM LINUX DUMP */
@@ -7466,6 +7535,16 @@ mt7921_mcu_add_sta_tlv(struct mbuf *m, uint16_t *tlvnum, struct mwx_softc *sc,
 	ra_info = mwx_append_tlv(m, tlvnum, STA_REC_RA,
 	    sizeof(*ra_info));
 	ra_info->legacy = htole16(supp_rates);
+#ifdef __HAIKU__
+	if (ni->ni_flags & IEEE80211_NODE_HT) {
+		int i;
+
+		/* MCS the peer can receive and we can send */
+		for (i = 0; i < HT_MCS_MASK_NUM; i++)
+			ra_info->rx_mcs_bitmask[i] =
+			    ni->ni_rxmcs[i] & sc->sc_ic.ic_sup_mcs[i];
+	}
+#endif
 #ifdef NOTYET
 	if (sta->deflink.ht_cap.ht_supported)
 		memcpy(ra_info->rx_mcs_bitmask,
@@ -7474,7 +7553,12 @@ mt7921_mcu_add_sta_tlv(struct mbuf *m, uint16_t *tlvnum, struct mwx_softc *sc,
 #endif
 
 	state = mwx_append_tlv(m, tlvnum, STA_REC_STATE, sizeof(*state));
+#ifdef __HAIKU__
+	state->state = new ? MT76_STA_INFO_STATE_NONE :
+	    MT76_STA_INFO_STATE_ASSOC;
+#else
 	state->state = /* XXX sta_state */ 0;
+#endif
 #ifdef NOTYET
 	if (sta->deflink.vht_cap.vht_supported) {
 		state->vht_opmode = sta->deflink.bandwidth;
@@ -7543,14 +7627,26 @@ mt7921_mcu_wtbl_ht_tlv(struct mbuf *m, uint16_t *tlvnum,
     struct mwx_softc *sc, struct ieee80211_node *ni)
 {
 	struct wtbl_smps *smps;
+	int len = 0;
 
 	/* XXX lots missing here */
+#ifdef __HAIKU__
+	if (ni->ni_flags & IEEE80211_NODE_HT) {
+		struct wtbl_ht *ht;
+
+		ht = mwx_append_tlv(m, tlvnum, WTBL_HT, sizeof(*ht));
+		ht->ht = 1;
+		ht->af = ni->ni_ampdu_param & IEEE80211_AMPDU_PARAM_LE;
+		ht->mm = (ni->ni_ampdu_param & IEEE80211_AMPDU_PARAM_SS) >> 2;
+		len += sizeof(*ht);
+	}
+#endif
 
 	smps = mwx_append_tlv(m, tlvnum, WTBL_SMPS, sizeof(*smps));
 	/* spatial multiplexing power save mode, off for now */
 	//smps->smps = (sta->deflink.smps_mode == IEEE80211_SMPS_DYNAMIC);
 
-	return sizeof(*smps);
+	return len + sizeof(*smps);
 }
 
 int
@@ -7596,6 +7692,162 @@ mt7921_mac_sta_update(struct mwx_softc *sc, struct ieee80211_node *ni,
 	    mn ? mn->wcid : 0, tlvnum);
 	return mwx_mcu_send_mbuf_wait(sc, MCU_UNI_CMD_STA_REC_UPDATE, m);
 }
+
+#ifdef __HAIKU__
+/*
+ * HT20 for MT7921-family chips. Rate selection runs in the firmware,
+ * which learns the peer's HT capabilities from the station record.
+ */
+void
+mwx_setup_ht(struct mwx_softc *sc)
+{
+	struct ieee80211com *ic = &sc->sc_ic;
+	int i;
+
+	ic->ic_caps |= IEEE80211_C_QOS;
+	ic->ic_htcaps = IEEE80211_HTCAP_SGI20 |
+	    (IEEE80211_HTCAP_SMPS_DIS << IEEE80211_HTCAP_SMPS_SHIFT);
+
+	memset(ic->ic_sup_mcs, 0, sizeof(ic->ic_sup_mcs));
+	ic->ic_sup_mcs[0] = 0xff;		/* MCS 0-7 */
+	if (sc->sc_capa.num_streams > 1)
+		ic->ic_sup_mcs[1] = 0xff;	/* MCS 8-15 */
+
+	for (i = 0; i <= IEEE80211_CHAN_MAX; i++) {
+		if (ic->ic_channels[i].ic_flags != 0)
+			ic->ic_channels[i].ic_flags |= IEEE80211_CHAN_HT;
+	}
+}
+
+/*
+ * The AP asked for a receive Block Ack agreement. Telling the firmware
+ * needs MCU commands, which sleep, so finish in a task.
+ */
+int
+mwx_ampdu_rx_start(struct ieee80211com *ic, struct ieee80211_node *ni,
+    uint8_t tid)
+{
+	struct mwx_softc *sc = ic->ic_softc;
+
+	if (sc->sc_hwtype == MWX_HW_MT7925 || tid >= IEEE80211_NUM_TID)
+		return ENOTSUP;
+
+	sc->sc_ba_start |= 1 << tid;
+	task_add(sc->sc_nswq, &sc->sc_ba_task);
+	return EBUSY;
+}
+
+void
+mwx_ampdu_rx_stop(struct ieee80211com *ic, struct ieee80211_node *ni,
+    uint8_t tid)
+{
+	struct mwx_softc *sc = ic->ic_softc;
+
+	if (sc->sc_hwtype == MWX_HW_MT7925 || tid >= IEEE80211_NUM_TID)
+		return;
+
+	sc->sc_ba_stop |= 1 << tid;
+	task_add(sc->sc_nswq, &sc->sc_ba_task);
+}
+
+void
+mwx_ba_task(void *arg)
+{
+	struct mwx_softc *sc = arg;
+	struct ieee80211com *ic = &sc->sc_ic;
+	struct ieee80211_node *ni = ic->ic_bss;
+	struct ieee80211_rx_ba *ba;
+	int s = splnet();
+	int tid;
+
+	for (tid = 0; tid < IEEE80211_NUM_TID; tid++) {
+		/*
+		 * A DELBA followed by a new ADDBA for the same TID sets both
+		 * bits. Tear down first, so a stale stop cannot later end
+		 * the new agreement.
+		 */
+		if (sc->sc_ba_stop & (1 << tid)) {
+			sc->sc_ba_stop &= ~(1 << tid);
+			if (ic->ic_state == IEEE80211_S_RUN)
+				mt7921_mcu_rx_ba(sc, ni, tid, 0, 0, 0);
+		}
+		if (sc->sc_ba_start & (1 << tid)) {
+			sc->sc_ba_start &= ~(1 << tid);
+			if (ic->ic_state != IEEE80211_S_RUN)
+				continue;
+			ba = &ni->ni_rx_ba[tid];
+			if (mt7921_mcu_rx_ba(sc, ni, tid, ba->ba_winstart,
+			    ba->ba_winsize, 1) == 0)
+				ieee80211_addba_req_accept(ic, ni, tid);
+			else
+				ieee80211_addba_req_refuse(ic, ni, tid);
+		}
+	}
+	splx(s);
+}
+
+/*
+ * Set up or tear down a receive Block Ack agreement in the firmware, so
+ * the hardware answers the peer's A-MPDUs with Block Acks. Like Linux,
+ * this updates the WTBL first and then the station record.
+ */
+int
+mt7921_mcu_rx_ba(struct mwx_softc *sc, struct ieee80211_node *ni,
+    uint8_t tid, uint16_t ssn, uint16_t winsize, int enable)
+{
+	struct mwx_node *mn = (struct mwx_node *)ni;
+	struct mwx_vif *mvif = &sc->sc_vif;
+	struct sta_rec_wtbl *wtbl;
+	struct wtbl_ba *wba;
+	struct sta_rec_ba *ba;
+	struct mbuf *m;
+	uint16_t tlvnum = 0, wnum = 0;
+	int rv;
+
+	m = mwx_alloc_sta_req_tlv(sizeof(struct sta_req_hdr));
+	if (m == NULL)
+		return ENOBUFS;
+
+	wtbl = mwx_append_tlv(m, &tlvnum, STA_REC_WTBL, sizeof(*wtbl));
+	wtbl->wlan_idx_lo = mn->wcid & 0xff;
+	wtbl->wlan_idx_hi = mn->wcid >> 8;
+	wtbl->operation = WTBL_SET;
+
+	wba = mwx_append_tlv(m, &wnum, WTBL_BA, sizeof(*wba));
+	wba->tid = tid;
+	wba->ba_type = MT_BA_TYPE_RECIPIENT;
+	memcpy(wba->peer_addr, ni->ni_macaddr, IEEE80211_ADDR_LEN);
+	wba->rst_ba_tid = tid;
+	wba->rst_ba_sel = RST_BA_MAC_TID_MATCH;
+	wba->rst_ba_sb = 1;
+	wba->ba_winsize = htole16(enable ? winsize : 0);
+
+	wtbl->tlv_num = htole16(wnum);
+	wtbl->len = htole16(le16toh(wtbl->len) + sizeof(*wba));
+
+	mwx_fill_sta_req_hdr(m, mvif, mvif->omac_idx, mn->wcid, tlvnum);
+	rv = mwx_mcu_send_mbuf_wait(sc, MCU_UNI_CMD_STA_REC_UPDATE, m);
+	if (rv != 0)
+		return rv;
+
+	m = mwx_alloc_sta_req_tlv(sizeof(struct sta_req_hdr));
+	if (m == NULL)
+		return ENOBUFS;
+	tlvnum = 0;
+
+	ba = mwx_append_tlv(m, &tlvnum, STA_REC_BA, sizeof(*ba));
+	ba->tid = tid;
+	ba->ba_type = MT_BA_TYPE_RECIPIENT;
+	/* net80211 always accepts A-MSDUs in A-MPDUs */
+	ba->amsdu = enable;
+	ba->ba_en = enable << tid;
+	ba->ssn = htole16(ssn);
+	ba->winsize = htole16(winsize);
+
+	mwx_fill_sta_req_hdr(m, mvif, mvif->omac_idx, mn->wcid, tlvnum);
+	return mwx_mcu_send_mbuf_wait(sc, MCU_UNI_CMD_STA_REC_UPDATE, m);
+}
+#endif
 
 int
 mt7925_mac_sta_update(struct mwx_softc *sc, struct ieee80211_node *ni, int add)
