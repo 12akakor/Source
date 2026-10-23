@@ -13,3 +13,7 @@ KernelAddon sdhci :
 	sdhci_acpi.cpp
 	sdhci_pci.cpp
 ;
+
+KernelAddon bcm2711_emmc2 :
+	bcm2711_emmc2.cpp
+;
