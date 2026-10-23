@@ -22,6 +22,24 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+#ifdef __HAIKU__
+/* The compat headers need this order; it is the one iaxwifi200 uses. */
+#include <sys/param.h>
+#include <sys/malloc.h>
+#include <sys/mbuf.h>
+#include <sys/rwlock.h>
+#include <sys/socket.h>
+#include <sys/sockio.h>
+#include <sys/systm.h>
+#include <sys/endian.h>
+
+#include <sys/refcnt.h>
+#include <sys/task.h>
+#include <machine/bus.h>
+
+#include <dev/pci/pcireg.h>
+#include <dev/pci/pcivar.h>
+#else
 #include "bpfilter.h"
 
 #include <sys/param.h>
@@ -35,6 +53,7 @@
 #include <dev/pci/pcireg.h>
 #include <dev/pci/pcivar.h>
 #include <dev/pci/pcidevs.h>
+#endif
 
 #if NBPFILTER > 0
 #include <net/bpf.h>
@@ -42,6 +61,9 @@
 #include <net/if.h>
 #include <net/if_dl.h>
 #include <net/if_media.h>
+#ifdef __HAIKU__
+#include <net/if_types.h>
+#endif
 
 #include <netinet/in.h>
 #include <netinet/if_ether.h>
@@ -51,14 +73,47 @@
 
 #include <dev/pci/if_mwxreg.h>
 
+#ifdef __FreeBSD_version
+#include <sys/device.h>
+#include <net/ifq.h>
+#define DEVNAME(_s) gDriverName
+#define SC_DEV_FOR_PCI sc->sc_dev
+#define mallocarray(nmemb, size, type, flags) malloc((size) * (nmemb), (type), (flags))
+#define m_clget(m, how, size) MCLGETL((m), (how), (size))
+/*
+ * OpenBSD's m_defrag() compacts the chain in place. m_collapse() does too:
+ * it keeps the head mbuf and leaves a valid chain on failure. Both callers
+ * load into maps of MT_MAX_SCATTER segments.
+ */
+#define m_prepend(m, len, how) m_prepend_openbsd((m), (len), (how))
+#undef m_defrag
+#define m_defrag(m, how) \
+	(m_collapse((m), (how), MT_MAX_SCATTER) == NULL ? ENOBUFS : 0)
+
+#define	PCI_VENDOR_MEDIATEK		0x14c3
+#define	PCI_PRODUCT_MEDIATEK_MT7921K	0x0608
+#define	PCI_PRODUCT_MEDIATEK_RZ616	0x0616
+#define	PCI_PRODUCT_MEDIATEK_RZ717	0x0717
+#define	PCI_PRODUCT_MEDIATEK_MT7920	0x7920
+#define	PCI_PRODUCT_MEDIATEK_MT7922	0x7922
+#define	PCI_PRODUCT_MEDIATEK_MT7925	0x7925
+#define	PCI_PRODUCT_MEDIATEK_MT7921	0x7961
+#endif
+
 static const struct pci_matchid mwx_devices[] = {
 	{ PCI_VENDOR_MEDIATEK, PCI_PRODUCT_MEDIATEK_MT7920 },
 	{ PCI_VENDOR_MEDIATEK, PCI_PRODUCT_MEDIATEK_MT7921 },
+#ifndef __HAIKU__
+	/*
+	 * RenkuOS claims only the IDs that have attached on real hardware.
+	 * Move an ID above this block once it has.
+	 */
 	{ PCI_VENDOR_MEDIATEK, PCI_PRODUCT_MEDIATEK_MT7921K },
 	{ PCI_VENDOR_MEDIATEK, PCI_PRODUCT_MEDIATEK_MT7922 },
 	{ PCI_VENDOR_MEDIATEK, PCI_PRODUCT_MEDIATEK_RZ616 },
 	{ PCI_VENDOR_MEDIATEK, PCI_PRODUCT_MEDIATEK_MT7925 },
 	{ PCI_VENDOR_MEDIATEK, PCI_PRODUCT_MEDIATEK_RZ717 },
+#endif
 };
 
 #define MWX_DEBUG	1
@@ -295,7 +350,11 @@ struct mwx_setkey_task_arg {
 };
 
 struct mwx_softc {
+#ifdef __FreeBSD_version
+	device_t		sc_dev;
+#else
 	struct device		sc_dev;
+#endif
 	struct ieee80211com	sc_ic;
 
 	enum mwx_hw_type	sc_hwtype;
@@ -314,8 +373,10 @@ struct mwx_softc {
 	bus_space_handle_t	sc_memh;
 	bus_size_t		sc_mems;
 	bus_dma_tag_t		sc_dmat;
+#ifndef __FreeBSD_version
 	pcitag_t		sc_tag;
 	pci_chipset_tag_t	sc_pc;
+#endif
 	void			*sc_ih;
 
 	int			(*sc_newstate)(struct ieee80211com *,
@@ -432,7 +493,9 @@ const struct mwx_rate {
 
 #define MWX_NUM_6GHZ_CHANNELS   nitems(mwx_channels_6ghz)
 
+#ifndef __FreeBSD_version
 #define	DEVNAME(s)	((s)->sc_dev.dv_xname)
+#endif
 #define	DEVDEBUG(x)	((x)->sc_ic.ic_if.if_flags & IFF_DEBUG)
 
 #ifdef MWX_DEBUG
@@ -505,10 +568,12 @@ int		mwx_tx(struct mwx_softc *, struct mbuf *,
 void		mwx_rx(struct mwx_softc *, struct mbuf *, struct mbuf_list *);
 int		mwx_intr(void *);
 int		mwx_preinit(struct mwx_softc *);
+#ifndef __FreeBSD_version
 void		mwx_attach_hook(struct device *);
 int		mwx_match(struct device *, void *, void *);
 void		mwx_attach(struct device *, struct device *, void *);
 int		mwx_activate(struct device *, int);
+#endif
 
 void		mwx_reset(struct mwx_softc *);
 void		mwx_reset_timeo(void *);
@@ -1005,6 +1070,10 @@ mwx_start(struct ifnet *ifp)
 			bpf_mtap(ic->ic_rawbpf, m, BPF_DIRECTION_OUT);
 #endif
 		if (mwx_tx(sc, m, ni) != 0) {
+#ifdef __HAIKU__
+			/* mwx_tx() does not take the mbuf when it fails. */
+			m_freem(m);
+#endif
 			ieee80211_release_node(ic, ni);
 			ifp->if_oerrors++;
 			continue;
@@ -1488,8 +1557,16 @@ mwx_tx(struct mwx_softc *sc, struct mbuf *m, struct ieee80211_node *ni)
 		return ENOBUFS;
 
 	/* check if there is enough space */
+#ifdef __HAIKU__
+	/* Upstream leaks the txwi here and on the enqueue error below. */
+	if (mwx_dma_available_slots(&sc->sc_txq) < 1) {
+		mwx_txwi_put(sc, mt);
+		return EBUSY;
+	}
+#else
 	if (mwx_dma_available_slots(&sc->sc_txq) < 1)
 		return EBUSY;
+#endif
 
 	/* XXX DMA memory access without BUS_DMASYNC_PREWRITE */
 	txp = mt->mt_desc;
@@ -1500,8 +1577,15 @@ mwx_tx(struct mwx_softc *sc, struct mbuf *m, struct ieee80211_node *ni)
 		mt7921_mac_write_txwi(sc, m, ni, txp);
 
 	rv = mwx_txwi_enqueue(sc, mt, m, ni);
+#ifdef __HAIKU__
+	if (rv != 0) {
+		mwx_txwi_put(sc, mt);
+		return rv;
+	}
+#else
 	if (rv != 0)
 		return rv;
+#endif
 
 #if 0
 printf("%s: TX WCID %08x id %d pid %d\n", DEVNAME(sc), mn->wcid, 0, mt->mt_idx);
@@ -1692,11 +1776,15 @@ mwx_preinit(struct mwx_softc *sc)
 	if (IEEE80211_ADDR_EQ(etheranyaddr, sc->sc_ic.ic_myaddr))
 		IEEE80211_ADDR_COPY(ic->ic_myaddr, sc->sc_lladdr);
 
+#ifdef __HAIKU__
+	IEEE80211_ADDR_COPY(IF_LLADDR(ifp), ic->ic_myaddr);
+#else
 	/* Configure MAC address. */
 	rv = if_setlladdr(ifp, ic->ic_myaddr);
 	if (rv)
 		printf("%s: could not set MAC address (error %d)\n",
 		    DEVNAME(sc), rv);
+#endif
 
 	ieee80211_media_init(ifp, mwx_media_change, ieee80211_media_status);
 
@@ -1704,6 +1792,23 @@ mwx_preinit(struct mwx_softc *sc)
 	return 0;
 }
 
+#ifdef __FreeBSD_version
+static int
+mwx_probe(device_t dev)
+{
+	int i;
+
+	for (i = 0; i < nitems(mwx_devices); i++) {
+		if (pci_get_vendor(dev) == mwx_devices[i].pm_vid &&
+		    pci_get_device(dev) == mwx_devices[i].pm_pid)
+			return (BUS_PROBE_DEFAULT);
+	}
+
+	return (ENXIO);
+}
+
+#define	MWX_ATTACH_RETURN(error)	return (error)
+#else
 void
 mwx_attach_hook(struct device *self)
 {
@@ -1720,21 +1825,49 @@ mwx_match(struct device *parent, void *match __unused, void *aux)
 	return pci_matchbyid(pa, mwx_devices, nitems(mwx_devices));
 }
 
+#define	MWX_ATTACH_RETURN(error)	return
+#endif
+
+#ifdef __FreeBSD_version
+static int
+mwx_attach(device_t dev)
+#else
 void
 mwx_attach(struct device *parent, struct device *self, void *aux)
+#endif
 {
+#ifdef __FreeBSD_version
+#define pa dev
+	struct mwx_softc *sc = device_get_softc(dev);
+#else
 	struct mwx_softc *sc = (struct mwx_softc *)self;
+	struct pci_attach_args *pa = aux;
+#endif
 	struct ieee80211com *ic = &sc->sc_ic;
 	struct ifnet *ifp = &ic->ic_if;
-	struct pci_attach_args *pa = aux;
 	pci_intr_handle_t ih;
 	pcireg_t memtype;
 	uint32_t hwid, hwrev;
 	int error;
 
+#ifdef __FreeBSD_version
+	sc->sc_dev = dev;
+	/* 32-bit DMA, as on OpenBSD and in Linux (mt7921/pci.c). */
+	bus_dma_tag_create(bus_get_dma_tag(sc->sc_dev), 1, 0,
+	    BUS_SPACE_MAXADDR_32BIT, BUS_SPACE_MAXADDR, NULL, NULL,
+	    BUS_SPACE_MAXSIZE_32BIT, BUS_SPACE_UNRESTRICTED,
+	    BUS_SPACE_MAXSIZE_32BIT, 0, NULL, NULL, &sc->sc_dmat);
+	pci_enable_busmaster(sc->sc_dev);
+
+	if_alloc_inplace(ifp, IFT_ETHER);
+
+#undef PCI_PRODUCT
+#define PCI_PRODUCT(id) pci_get_device(dev)
+#else
 	sc->sc_pc = pa->pa_pc;
 	sc->sc_tag = pa->pa_tag;
 	sc->sc_dmat = pa->pa_dmat;
+#endif
 
 	sc->sc_intr_mask = MT_INT_RX_DONE_ALL | MT_INT_TX_DONE_ALL |
 	    MT_INT_MCU_CMD;
@@ -1758,22 +1891,31 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
 		break;
 	default:
 		printf(": unknown chip id 0x%04x\n", PCI_PRODUCT(pa->pa_id));
-		return;
+		MWX_ATTACH_RETURN(ENXIO);
 	}
 
 	memtype = pci_mapreg_type(pa->pa_pc, pa->pa_tag, PCI_MAPREG_START);
 	if (pci_mapreg_map(pa, PCI_MAPREG_START, memtype, 0,
 	    &sc->sc_st, &sc->sc_memh, NULL, &sc->sc_mems, 0)) {
 		printf("%s: can't map mem space\n", DEVNAME(sc));
-		return;
+		MWX_ATTACH_RETURN(ENXIO);
 	}
 
+#ifdef __HAIKU__
+	/*
+	 * MSI or MSI-X only for now: glue.c claims every interrupt on our
+	 * vector, which is wrong on a shared INTx line. Phase 3 decides.
+	 */
+	if (pci_intr_map_msix(pa, 0, &ih) &&
+	    pci_intr_map_msi(pa, &ih)) {
+#else
 	if (pci_intr_map_msix(pa, 0, &ih) &&
 	    pci_intr_map_msi(pa, &ih) &&
 	    pci_intr_map(pa, &ih)) {
+#endif
 		printf("%s: can't map interrupt\n", DEVNAME(sc));
 		bus_space_unmap(sc->sc_st, sc->sc_memh, sc->sc_mems);
-		return;
+		MWX_ATTACH_RETURN(ENXIO);
 	}
 
 	if (mwx_mcu_fw_pmctrl(sc) != 0 || mwx_mcu_drv_pmctrl(sc) != 0)
@@ -1894,7 +2036,16 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
 	/* Override 802.11 state transition machine. */
 	sc->sc_newstate = ic->ic_newstate;
 	ic->ic_newstate = mwx_newstate;
+#ifdef __HAIKU__
+	/*
+	 * Every read of scan results starts a background scan here, and
+	 * the firmware scan keeps the radio off channel, so unicast traffic
+	 * dies while associated. No roaming until that is solved.
+	 */
+	ic->ic_bgscan_start = NULL;
+#else
 	ic->ic_bgscan_start = mwx_bgscan;
+#endif
 	ic->ic_bgscan_done = mwx_bgscan_done;
 	ic->ic_set_key = mwx_set_key;
 	ic->ic_delete_key = mwx_delete_key;
@@ -1912,13 +2063,25 @@ mwx_attach(struct device *parent, struct device *self, void *aux)
 	task_set(&sc->sc_reset_task, mwx_reset_task, sc);
 	timeout_set(&sc->sc_reset_to, mwx_reset_timeo, sc);
 
+#ifdef __HAIKU__
+	/*
+	 * The boot volume is mounted before network drivers load. As with
+	 * config_mountroot() upstream, a failure does not fail the attach:
+	 * mwx_init() runs preinit again while the firmware is not loaded, and
+	 * by now if_attach() has run and tasks may be queued on the softc.
+	 */
+	if ((error = mwx_preinit(sc)) != 0)
+		printf("%s: preinit failed (%d), retrying at init\n",
+		    DEVNAME(sc), error);
+#else
 	/*
 	 * We cannot read the MAC address without loading the
 	 * firmware from disk. Postpone until mountroot is done.
 	 */
 	config_mountroot(self, mwx_attach_hook);
+#endif
 
-	return;
+	MWX_ATTACH_RETURN(0);
 
 fail:
 	mwx_txwi_free(sc);
@@ -1926,9 +2089,33 @@ fail:
 	if (sc->sc_ih != NULL)
 		pci_intr_disestablish(pa->pa_pc, sc->sc_ih);
 	bus_space_unmap(sc->sc_st, sc->sc_memh, sc->sc_mems);
-	return;
+#ifdef __FreeBSD_version
+	if_free_inplace(ifp);
+#endif
+	MWX_ATTACH_RETURN(ENXIO);
 }
+#ifdef __FreeBSD_version
+#undef pa
+#undef PCI_PRODUCT
+#endif
 
+#ifdef __FreeBSD_version
+static device_method_t mwx_pci_methods[] = {
+	/* Device interface */
+	DEVMETHOD(device_probe,		mwx_probe),
+	DEVMETHOD(device_attach,	mwx_attach),
+
+	DEVMETHOD_END
+};
+
+static driver_t mwx_pci_driver = {
+	"mwx",
+	mwx_pci_methods,
+	sizeof (struct mwx_softc)
+};
+
+DRIVER_MODULE(mwx, pci, mwx_pci_driver, NULL, NULL);
+#else
 int
 mwx_activate(struct device *self, int act)
 {
@@ -1985,6 +2172,7 @@ struct cfattach mwx_ca = {
 	sizeof(struct mwx_softc), mwx_match, mwx_attach,
 	NULL, mwx_activate
 };
+#endif
 
 void
 mwx_reset(struct mwx_softc *sc)
@@ -3138,10 +3326,20 @@ printf("%s: mcu rx event, seq %x eid %x ext_eid %x opt %x len %u\n", DEVNAME(sc)
 
 		if (cmd == MCU_CMD_PATCH_SEM_CONTROL ||
 		    cmd == MCU_CMD_PATCH_FINISH_REQ) {
+#ifdef __HAIKU__
+			/*
+			 * The status is the first byte of the last word of the
+			 * event header, as Linux reads it. rxd still points at
+			 * the header, so read it there instead of prepending.
+			 */
+			mcu_int = *((uint8_t *)rxd + sizeof(*rxd) -
+			    sizeof(uint32_t));
+#else
 			/* XXX this is a terrible abuse */
 			KASSERT(m_leadingspace(m) >= sizeof(uint32_t));
 			m = m_prepend(m, sizeof(uint32_t), M_DONTWAIT);
 			mcu_int = *mtod(m, uint8_t *);
+#endif
 		} else if (cmd == MCU_EXT_CMD_THERMAL_CTRL) {
 			if (m->m_len < sizeof(uint32_t) * 2)
 				break;
@@ -3604,6 +3802,10 @@ mwx_load_firmware(struct mwx_softc *sc)
 	case MWX_HW_MT7920:
 		rompatch = MT7920_ROM_PATCH;
 		fw = MT7920_FIRMWARE_WM;
+#ifdef __HAIKU__
+		/* Missing upstream, so the MT7920 loaded the MT7921 firmware. */
+		break;
+#endif
 	case MWX_HW_MT7921:
 		rompatch = MT7921_ROM_PATCH;
 		fw = MT7921_FIRMWARE_WM;
@@ -5463,7 +5665,11 @@ mt7925_mcu_config_sniffer(struct mwx_softc *sc)
 	if (chan == IEEE80211_CHAN_ANYC)
 		chan = ic->ic_ibss_chan;
 	if (chan == IEEE80211_CHAN_ANYC) {
+#ifdef __HAIKU__
+		printf("%s: monitor: no channel set\n", DEVNAME(sc));
+#else
 		printf("%s: monitor: no channel set\n", sc->sc_dev.dv_xname);
+#endif
 		return EINVAL;
 	}
 
