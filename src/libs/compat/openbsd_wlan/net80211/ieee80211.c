@@ -160,6 +160,33 @@ ieee80211_channel_init(struct ifnet *ifp)
 	ic->ic_des_chan = IEEE80211_CHAN_ANYC;	/* any channel is ok */
 }
 
+#ifdef __HAIKU__
+/*
+ * OpenBSD's if_slowtimo(): count if_timer down once a second and call the
+ * driver's watchdog when it reaches zero. Nothing else does this on Haiku,
+ * so without it the authentication and association timeouts in
+ * ieee80211_watchdog() never fire and a refused association is not retried.
+ *
+ * It runs only while the interface is up and out of INIT: ieee80211_newstate()
+ * arms it, and it stops re-arming itself afterwards. None of the drivers calls
+ * ieee80211_ifdetach(), so a timer left armed would outlive the softc when the
+ * driver is unloaded.
+ */
+static void
+ieee80211_slowtimo(void *arg)
+{
+	struct ifnet *ifp = arg;
+	struct ieee80211com *ic = (void *)ifp;
+
+	if (ifp->if_timer > 0 && --ifp->if_timer == 0
+	    && ifp->if_watchdog != NULL)
+		(*ifp->if_watchdog)(ifp);
+	if ((ifp->if_flags & IFF_RUNNING) != 0
+	    && ic->ic_state != IEEE80211_S_INIT)
+		timeout_add_sec(&ic->ic_slowtimo, 1);
+}
+#endif
+
 void
 ieee80211_ifattach(struct ifnet *ifp)
 {
@@ -206,6 +233,9 @@ ieee80211_ifattach(struct ifnet *ifp)
 	ieee80211_set_link_state(ic, LINK_STATE_DOWN);
 
 	timeout_set(&ic->ic_bgscan_timeout, ieee80211_bgscan_timeout, ifp);
+#ifdef __HAIKU__
+	timeout_set(&ic->ic_slowtimo, ieee80211_slowtimo, ifp);
+#endif
 }
 
 void
@@ -215,6 +245,9 @@ ieee80211_ifdetach(struct ifnet *ifp)
 
 	task_del(systq, &ic->ic_rtm_80211info_task);
 	timeout_del(&ic->ic_bgscan_timeout);
+#ifdef __HAIKU__
+	timeout_del(&ic->ic_slowtimo);
+#endif
 
 #ifndef __HAIKU__
 	/*
