@@ -431,7 +431,18 @@ enum mt76_rxq_id {
 #define	MWX_WTBL_RESERVED	(MWX_WTBL_SIZE - 1)
 #define	MWX_WTBL_STA		(MWX_WTBL_RESERVED - MWX_MAX_INTERFACES)
 
+#ifdef __HAIKU__
+/*
+ * Hardware A-MSDU de-aggregation is off on MT7921 (see mwx_mac_init), so
+ * a whole A-MSDU plus the RX descriptor must fit. We advertise the
+ * 3839-octet maximum, which a peer must not exceed (IEEE 802.11-2020
+ * 10.11, p. 1717).
+ */
+#define	MT_RX_BUF_SIZE		4096
+#define	MT_RX_MAX_LEN		3904
+#else
 #define	MT_RX_BUF_SIZE		2048
+#endif
 #define	MT_MAX_SCATTER		4	/* limit of MT_HW_TXP_MAX_BUF_NUM */
 #define	MT_MAX_SIZE		MT_DMA_CTL_SD_LEN_MASK
 
@@ -1671,6 +1682,70 @@ struct wtbl_smps {
 	uint8_t		smps;
 	uint8_t		rsv[3];
 } __packed;
+
+#ifdef __HAIKU__
+/* HT and Block Ack records, from Linux v6.18 mt76_connac_mcu.h (ISC) */
+#define	STA_REC_BA			0x06
+struct sta_rec_ba {
+	uint16_t	tag;
+	uint16_t	len;
+	uint8_t		tid;
+	uint8_t		ba_type;
+	uint8_t		amsdu;
+	uint8_t		ba_en;
+	uint16_t	ssn;
+	uint16_t	winsize;
+} __packed;
+
+#define	STA_REC_HT			0x09
+struct sta_rec_ht {
+	uint16_t	tag;
+	uint16_t	len;
+	uint16_t	ht_cap;
+	uint16_t	rsv;
+} __packed;
+
+#define	WTBL_HT				0x02
+struct wtbl_ht {
+	uint16_t	tag;
+	uint16_t	len;
+	uint8_t		ht;
+	uint8_t		ldpc;
+	uint8_t		af;
+	uint8_t		mm;
+	uint8_t		rsv[4];
+} __packed;
+
+#define	WTBL_BA				0x08
+struct wtbl_ba {
+	uint16_t	tag;
+	uint16_t	len;
+	/* common */
+	uint8_t		tid;
+	uint8_t		ba_type;
+	uint8_t		rsv0[2];
+	/* originator only */
+	uint16_t	sn;
+	uint8_t		ba_en;
+	uint8_t		ba_winsize_idx;
+	/* originator & recipient */
+	uint16_t	ba_winsize;
+	/* recipient only */
+	uint8_t		peer_addr[IEEE80211_ADDR_LEN];
+	uint8_t		rst_ba_tid;
+	uint8_t		rst_ba_sel;
+	uint8_t		rst_ba_sb;
+	uint8_t		band_idx;
+	uint8_t		rsv1[4];
+} __packed;
+
+#define	MT_BA_TYPE_ORIGINATOR		1
+#define	MT_BA_TYPE_RECIPIENT		2
+#define	RST_BA_MAC_TID_MATCH		0
+
+#define	MT76_STA_INFO_STATE_NONE	0
+#define	MT76_STA_INFO_STATE_ASSOC	2
+#endif
 
 
 
