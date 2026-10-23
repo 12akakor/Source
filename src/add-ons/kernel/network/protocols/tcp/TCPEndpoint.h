@@ -85,6 +85,7 @@ private:
 			status_t	_SendAcknowledge(bool force = false);
 			status_t	_SendReset(bool force = false);
 			status_t	_SendQueued(bool force = false);
+			status_t	_RetransmitSynchronizeAcknowledge();
 
 			status_t	_Disconnect(bool closing);
 			ssize_t		_AvailableData() const;
@@ -114,7 +115,7 @@ private:
 			void		_PrepareReceivePath(tcp_segment_header& segment);
 			status_t	_PrepareSendPath(const sockaddr* peer);
 			void		_Acknowledged(tcp_segment_header& segment);
-			void		_Retransmit();
+			bool		_Retransmit();
 			void		_UpdateRoundTripTime(int32 roundTripTime, int32 expectedSamples);
 			void		_ResetSlowStart();
 			void		_DuplicateAcknowledge(tcp_segment_header& segment);
