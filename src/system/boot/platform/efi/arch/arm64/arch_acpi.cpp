@@ -126,6 +126,16 @@ arch_handle_acpi()
 		}
 
 		intc_info& intc = gKernelArgs.arch_args.interrupt_controller;
+		if (version == 0) {
+			// ACPI allows firmware to report 0 ("discover from hardware"),
+			// as the Raspberry Pi 4 UEFI firmware may. Infer the version from
+			// which MADT structures were provided.
+			if (gicr_base != 0)
+				version = GICV3;
+			else if (gicc_base != 0)
+				version = GICV2;
+			dprintf("gic version not reported in acpi, assuming %d\n", version);
+		}
 		if (version == GICV2 && gicc_base != 0 && gicd_base != 0) {
 			strcpy(intc.kind, INTC_KIND_GICV2);
 		} else if ((version == GICV3 || version == GICV4) && gicd_base != 0 && gicr_base != 0) {
