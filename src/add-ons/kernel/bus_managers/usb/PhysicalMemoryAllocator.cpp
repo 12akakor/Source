@@ -14,6 +14,7 @@
 #include <util/kernel_cpp.h>
 
 #include "PhysicalMemoryAllocator.h"
+#include "usb_dma.h"
 
 
 //#define TRACE_PHYSICAL_MEMORY_ALLOCATOR
@@ -70,7 +71,13 @@ PhysicalMemoryAllocator::PhysicalMemoryAllocator(const char *name,
 
 	size_t roundedSize = biggestSize * minCountPerBlock;
 	fDebugBase = roundedSize;
+#ifdef __aarch64__
+	// xHCI controllers with the TRB prefetch workaround (see xhci.h) need
+	// bigger TRB arrays than fit into 128 bytes, also in the kernel debugger.
+	fDebugChunkSize = 1024;
+#else
 	fDebugChunkSize = 128;
+#endif
 	fDebugUseMap = 0;
 	roundedSize += sizeof(fDebugUseMap) * 8 * fDebugChunkSize;
 	roundedSize = (roundedSize + B_PAGE_SIZE - 1) & ~(B_PAGE_SIZE - 1);
@@ -82,6 +89,8 @@ PhysicalMemoryAllocator::PhysicalMemoryAllocator(const char *name,
 		TRACE_ERROR(("PMA: failed to create memory area\n"));
 		return;
 	}
+
+	usb_prepare_dma_area(fArea, fLogicalBase, roundedSize);
 
 	physical_entry physicalEntry;
 	if (get_memory_map(fLogicalBase, roundedSize, &physicalEntry, 1) < B_OK) {

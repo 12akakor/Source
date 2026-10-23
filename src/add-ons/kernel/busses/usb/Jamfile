@@ -3,6 +3,8 @@ SubDir HAIKU_TOP src add-ons kernel busses usb ;
 SubDirC++Flags -fno-rtti ;
 
 UsePrivateKernelHeaders ;
+SubDirHdrs $(HAIKU_TOP) src add-ons kernel bus_managers acpi acpica include ;
+SubDirHdrs $(HAIKU_TOP) src add-ons kernel bus_managers acpi acpica include platform ;
 UseHeaders [ FDirName $(HAIKU_TOP) src add-ons kernel bus_managers usb ] ;
 
 KernelAddon <usb>uhci :
