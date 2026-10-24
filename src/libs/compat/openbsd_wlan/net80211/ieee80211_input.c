@@ -2813,6 +2813,19 @@ ieee80211_recv_disassoc(struct ieee80211com *ic, struct mbuf *m,
 	case IEEE80211_M_STA: {
 		int bgscan = ((ic->ic_flags & IEEE80211_F_BGSCAN) &&
 		    ic->ic_state == IEEE80211_S_RUN);
+#ifdef __HAIKU__
+		/*
+		 * An AP that still holds our previous association ends it when
+		 * we authenticate again, and drops that request. Ask again: it
+		 * holds nothing now. An association request sent unauthenticated,
+		 * as below, only gets us deauthenticated.
+		 */
+		if (ic->ic_state == IEEE80211_S_AUTH) {
+			ieee80211_new_state(ic, IEEE80211_S_AUTH,
+			    IEEE80211_FC0_SUBTYPE_AUTH);
+			break;
+		}
+#endif
 		if (!bgscan) /* ignore disassoc during bgscan */
 			ieee80211_new_state(ic, IEEE80211_S_ASSOC,
 			    IEEE80211_FC0_SUBTYPE_DISASSOC);

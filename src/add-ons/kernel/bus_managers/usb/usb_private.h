@@ -22,6 +22,8 @@
 #include <vm/vm.h>
 #include <util/iovec_support.h>
 
+#include "usb_dma.h"
+
 
 #define TRACE_OUTPUT(x, y, z...) \
 	{ \

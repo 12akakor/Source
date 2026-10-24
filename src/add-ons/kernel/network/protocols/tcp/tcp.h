@@ -193,6 +193,17 @@ operator==(tcp_sequence a, tcp_sequence b)
 #define TCP_MAX_RETRANSMIT_TIMEOUT		60000000	// 60 secs
 // New value for timeout in case of lost SYN (RFC 6298)
 #define TCP_SYN_RETRANSMIT_TIMEOUT 		1000000		// 1 sec
+// How many times a SYN-ACK is retransmitted before the half-open connection
+// is given up on. A bound is needed where one is not for the SYN: nothing is
+// waiting on a passive connection that has not been accepted yet, so there is
+// no userland timeout to end it and the endpoint would retransmit for as long
+// as the listener lived. _Retransmit() holds the timeout at
+// TCP_SYN_RETRANSMIT_TIMEOUT for the first four attempts and doubles it after
+// that, so eight of them go out at 1, 2, 3, 4, 5, 7, 11 and 19 seconds and the
+// connection is given up at 35. For comparison, Linux's tcp_synack_retries
+// default of 5 backs off from the first attempt: its last retransmission is
+// at 31 seconds and it gives up at 63.
+#define TCP_MAX_SYN_ACKNOWLEDGE_RETRANSMITS	8
 
 struct tcp_sack {
 	uint32 left_edge;

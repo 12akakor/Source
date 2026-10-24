@@ -1072,6 +1072,11 @@ ieee80211_newstate(struct ieee80211com *ic, enum ieee80211_state nstate,
 		printf("%s: %s -> %s\n", ifp->if_xname,
 		    ieee80211_state_name[ostate], ieee80211_state_name[nstate]);
 	ic->ic_state = nstate;			/* state transition */
+#ifdef __HAIKU__
+	/* Run the watchdog while out of INIT (see ieee80211_slowtimo()). */
+	if (nstate != IEEE80211_S_INIT && !timeout_pending(&ic->ic_slowtimo))
+		timeout_add_sec(&ic->ic_slowtimo, 1);
+#endif
 	ni = ic->ic_bss;			/* NB: no reference held */
 	ieee80211_set_link_state(ic, LINK_STATE_DOWN);
 	ic->ic_xflags &= ~IEEE80211_F_TX_MGMT_ONLY;

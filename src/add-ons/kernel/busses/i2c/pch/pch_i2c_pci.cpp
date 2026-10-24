@@ -17,6 +17,10 @@
 #include "pch_i2c.h"
 
 
+// Sunrise Point SDA hold time: 230 ns at the 120 MHz controller clock.
+#define PCH_SPT_SDA_HOLD_TICKS 28
+
+
 struct {
 	uint16 id;
 	pch_version version;
@@ -299,6 +303,74 @@ register_child_devices(void* cookie)
 }
 
 
+// SDA hold time default for a controller class, in controller ticks.
+// Sunrise Point (and Kaby Lake) need 230 ns at the 120 MHz controller
+// clock, that is 28 ticks. Linux (intel-lpss-pci.c) and FreeBSD
+// (ig4_iic.c) use the same value. Other classes keep the value from the
+// firmware.
+static uint32
+sda_hold_time_default(pch_version version)
+{
+	if (version == PCH_SKYLAKE)
+		return PCH_SPT_SDA_HOLD_TICKS;
+	return 0;
+}
+
+
+// Ask the platform for the SDA hold time. The ACPI method FMCN (fast mode)
+// returns a package of three numbers: the SCL high count, the SCL low count
+// and the SDA hold time. This driver programs the controller for fast mode,
+// so FMCN has the correct value. Linux, FreeBSD and OpenBSD read the same
+// method. A system without the method gives no value.
+static uint32
+sda_hold_time_from_acpi(uint16 device, uint16 function)
+{
+	uint32 addr = ((uint32)device << 16) | function;
+	if (addr == 0)
+		return 0;
+
+	device_node* acpiNode = NULL;
+	device_attr acpiAttrs[] = {
+		{ B_DEVICE_BUS, B_STRING_TYPE, { .string = "acpi" }},
+		{ ACPI_DEVICE_ADDR_ITEM, B_UINT32_TYPE, { .ui32 = addr }},
+		{ NULL }
+	};
+	device_node* rootNode = gDeviceManager->get_root_node();
+	status_t status = gDeviceManager->find_child_node(rootNode, acpiAttrs,
+		&acpiNode);
+	gDeviceManager->put_node(rootNode);
+	if (status != B_OK)
+		return 0;
+
+	acpi_device_module_info* acpi;
+	acpi_device acpiDevice;
+	uint32 sdaHold = 0;
+	if (gDeviceManager->get_driver(acpiNode, (driver_module_info**)&acpi,
+			(void**)&acpiDevice) == B_OK) {
+		acpi_data buffer;
+		buffer.pointer = NULL;
+		buffer.length = ACPI_ALLOCATE_BUFFER;
+		if (acpi->evaluate_method(acpiDevice, "FMCN", NULL, &buffer)
+				== B_OK) {
+			acpi_object_type* object =
+				(acpi_object_type*)buffer.pointer;
+			if (object != NULL
+				&& object->object_type == ACPI_TYPE_PACKAGE
+				&& object->package.count == 3
+				&& object->package.objects != NULL
+				&& object->package.objects[2].object_type
+					== ACPI_TYPE_INTEGER)
+				sdaHold = (uint32)object->package.objects[2]
+					.integer.integer;
+		}
+		if (buffer.pointer != NULL)
+			free(buffer.pointer);
+	}
+	gDeviceManager->put_node(acpiNode);
+	return sdaHold;
+}
+
+
 static status_t
 init_device(device_node* node, void** device_cookie)
 {
@@ -335,6 +407,14 @@ init_device(device_node* node, void** device_cookie)
 		}
 		dev++;
 	}
+
+	// The platform can supply the SDA hold time. Ask ACPI first, then use
+	// the value for the controller class, then keep the firmware value.
+	if (bus->info.sda_hold_time == 0)
+		bus->info.sda_hold_time = sda_hold_time_from_acpi(pciInfo->device,
+			pciInfo->function);
+	if (bus->info.sda_hold_time == 0)
+		bus->info.sda_hold_time = sda_hold_time_default(bus->info.version);
 
 	bus->info.base_addr = pciInfo->u.h0.base_registers[0];
 	bus->info.map_size = pciInfo->u.h0.base_register_sizes[0];

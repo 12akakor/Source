@@ -22,6 +22,10 @@ if $(HAIKU_BUILD_TYPE) = test {
 	packages += HaikuUnitTests ;
 }
 
+if $(HAIKU_BUILD_TYPE) = regular {
+	packages += MediatekWifiFirmwares ;
+}
+
 local archDependentPackages =
 	HaikuCrossDevel
 	WebPositive

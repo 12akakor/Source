@@ -13,6 +13,7 @@
 #include "HIDReport.h"
 #include "HIDReportItem.h"
 #include "HIDWriter.h"
+#include "InputReadyLine.h"
 #include "ProtocolHandler.h"
 
 #include <usb/USB_hid.h>
@@ -27,14 +28,18 @@
 // As specified in https://learn.microsoft.com/en-us/windows-hardware/design/component-guidelines/touchscreen-required-hid-top-level-collections
 #define HID_USAGE_MICROSOFT_THQA_CERTIFICATE 0xC5
 
+// Poll interval of the input ready line while no report is ready.
+static const bigtime_t kInputReadyPollInterval = 1000;
+
 
 HIDDevice::HIDDevice(uint16 descriptorAddress, i2c_device_interface* i2c,
-	i2c_device i2cCookie)
+	i2c_device i2cCookie, InputReadyLine* inputReady)
 	:	fStatus(B_NO_INIT),
 		fTransferLastschedule(0),
 		fTransferScheduled(0),
 		fTransferBufferSize(0),
 		fTransferBuffer(NULL),
+		fInputReady(inputReady),
 		fOpenCount(0),
 		fRemoved(false),
 		fParser(this),
@@ -200,6 +205,7 @@ HIDDevice::~HIDDevice()
 	}
 
 	free(fTransferBuffer);
+	delete fInputReady;
 }
 
 
@@ -247,6 +253,25 @@ HIDDevice::MaybeScheduleTransfer(HIDReport *report)
 	if (atomic_get_and_set(&fTransferScheduled, 1) != 0) {
 		// someone else already caused a transfer to be scheduled
 		return B_OK;
+	}
+
+	if (fInputReady != NULL && report->Type() == HID_REPORT_TYPE_INPUT) {
+		// Read the input register only when the device has a report ready.
+		// Some devices return their last report again otherwise, and a
+		// pointer then continues to move after the finger is lifted.
+		while (!fInputReady->IsAsserted()) {
+			if (fRemoved || atomic_get(&fOpenCount) == 0) {
+				atomic_set(&fTransferScheduled, 0);
+				return B_DEV_NOT_READY;
+			}
+
+			status_t status = snooze_etc(kInputReadyPollInterval,
+				B_SYSTEM_TIMEBASE, B_RELATIVE_TIMEOUT | B_CAN_INTERRUPT);
+			if (status == B_INTERRUPTED) {
+				atomic_set(&fTransferScheduled, 0);
+				return status;
+			}
+		}
 	}
 
 	status_t status = _FetchBuffer((uint8*)&fDescriptor.wInputRegister,

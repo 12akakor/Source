@@ -239,6 +239,10 @@ process_ancillary_data(net_socket* socket, ancillary_data_container* container,
 	int dataBufferLen = messageHeader->msg_controllen;
 
 	if (container == NULL || dataBuffer == NULL) {
+		// ancillary data the caller left no room for is discarded, and
+		// reported like any other truncation (POSIX, as on Linux)
+		if (container != NULL)
+			messageHeader->msg_flags |= MSG_CTRUNC;
 		messageHeader->msg_controllen = 0;
 		return B_OK;
 	}
@@ -247,7 +251,8 @@ process_ancillary_data(net_socket* socket, ancillary_data_container* container,
 		return B_NOT_SUPPORTED;
 
 	ssize_t bytesWritten = socket->first_info->process_ancillary_data(
-		socket->first_protocol, container, dataBuffer, dataBufferLen, flags);
+		socket->first_protocol, container, dataBuffer, dataBufferLen, flags,
+		&messageHeader->msg_flags);
 	if (bytesWritten < 0)
 		return bytesWritten;
 
@@ -323,18 +328,18 @@ socket_receive_no_buffer(net_socket* socket, msghdr* header, void* data,
 
 	// process ancillary data
 	if (header != NULL) {
+		// cleared first: process_ancillary_data() may report MSG_CTRUNC
+		header->msg_flags = 0;
 		status_t status = process_ancillary_data(socket, ancillaryData, header,
 			flags & (MSG_CMSG_CLOEXEC | MSG_CMSG_CLOFORK));
 		if (status != B_OK)
 			return status;
-
-		header->msg_flags = 0;
 	}
 
 	size_t totalLength = calculate_total_length(header, data, length);
 	if (totalLength < (size_t)bytesRead) {
 		if (header != NULL)
-			header->msg_flags = MSG_TRUNC;
+			header->msg_flags |= MSG_TRUNC;
 		if ((flags & MSG_TRUNC) == 0)
 			return totalLength;
 	}
@@ -792,6 +797,15 @@ socket_aborted(net_socket* _socket)
 
 	MutexLocker _(parent->lock);
 
+	// Re-check the parentage under the lock: between taking the reference
+	// above and acquiring the lock, the socket may have been removed from this
+	// parent concurrently -- by socket_set_max_backlog() trimming the backlog,
+	// or by socket_dequeue_connected() handing it to accept() -- and it must
+	// then not be taken out of the child lists, nor the parent's reference to
+	// it released, a second time.
+	if (socket->parent.GetReference() != parent)
+		return B_BAD_VALUE;
+
 	if (socket->is_connected)
 		parent->connected_children.Remove(socket);
 	else
@@ -1197,6 +1211,8 @@ socket_receive(net_socket* socket, msghdr* header, void* data, size_t length,
 
 	// process ancillary data
 	if (header != NULL) {
+		// cleared first: process_ancillary_data() may report MSG_CTRUNC
+		header->msg_flags = 0;
 		if (buffer != NULL && header->msg_control != NULL) {
 			ancillary_data_container* container
 				= gNetBufferModule.get_ancillary_data(buffer);
@@ -1220,7 +1236,6 @@ socket_receive(net_socket* socket, msghdr* header, void* data, size_t length,
 		// TODO: - consider the control buffer options
 		nameLen = header->msg_namelen;
 		header->msg_namelen = 0;
-		header->msg_flags = 0;
 	}
 
 	if (buffer == NULL)
@@ -1265,7 +1280,7 @@ socket_receive(net_socket* socket, msghdr* header, void* data, size_t length,
 
 	if (bytesCopied < bytesReceived) {
 		if (header != NULL)
-			header->msg_flags = MSG_TRUNC;
+			header->msg_flags |= MSG_TRUNC;
 
 		if ((originalFlags & MSG_TRUNC) != 0)
 			return bytesReceived;

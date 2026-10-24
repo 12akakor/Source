@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_mwxreg.h,v 1.22 2026/06/22 10:35:25 claudio Exp $	*/
+/*	$OpenBSD: if_mwxreg.h,v 1.26 2026/10/08 14:32:35 claudio Exp $	*/
 /*
  * SPDX-License-Identifier: ISC
  *
@@ -99,8 +99,8 @@
 #define	MT7925_WTBL_UPDATE		0x820d4380
 #define	MT_WTBL_UPDATE_WLAN_IDX_MASK		0x000003ff
 #define	MT7925_WTBL_UPDATE_WLAN_IDX_MASK	0x00000fff
-#define	MT_WTBL_UPDATE_ADM_COUNT_CLEAR  	(1U << 12)
-#define	MT7925_WTBL_UPDATE_ADM_COUNT_CLEAR  	(1U << 14)
+#define	MT_WTBL_UPDATE_ADM_COUNT_CLEAR		(1U << 12)
+#define	MT7925_WTBL_UPDATE_ADM_COUNT_CLEAR	(1U << 14)
 #define	MT_WTBL_UPDATE_BUSY		(1U << 31)
 
 #define	MT_WTBL_ITCR			0x820d43b0
@@ -431,7 +431,18 @@ enum mt76_rxq_id {
 #define	MWX_WTBL_RESERVED	(MWX_WTBL_SIZE - 1)
 #define	MWX_WTBL_STA		(MWX_WTBL_RESERVED - MWX_MAX_INTERFACES)
 
+#ifdef __HAIKU__
+/*
+ * Hardware A-MSDU de-aggregation is off on MT7921 (see mwx_mac_init), so
+ * a whole A-MSDU plus the RX descriptor must fit. We advertise the
+ * 3839-octet maximum, which a peer must not exceed (IEEE 802.11-2020
+ * 10.11, p. 1717).
+ */
+#define	MT_RX_BUF_SIZE		4096
+#define	MT_RX_MAX_LEN		3904
+#else
 #define	MT_RX_BUF_SIZE		2048
+#endif
 #define	MT_MAX_SCATTER		4	/* limit of MT_HW_TXP_MAX_BUF_NUM */
 #define	MT_MAX_SIZE		MT_DMA_CTL_SD_LEN_MASK
 
@@ -564,11 +575,15 @@ struct mt76_txwi {
 #define	MCU_UNI_CMD_DEV_INFO_UPDATE		0x00020001
 #define	MCU_UNI_CMD_BSS_INFO_UPDATE		0x00020002
 #define	MCU_UNI_CMD_STA_REC_UPDATE		0x00020003
+#define	MCU_UNI_CMD_EDCA_UPDATE			0x00020004
 #define	MCU_UNI_CMD_SUSPEND			0x00020005
 #define	MCU_UNI_CMD_OFFLOAD			0x00020006
 #define	MCU_UNI_CMD_HIF_CTRL			0x00020007
+#define	MCU_UNI_CMD_BAND_CONFIG			0x00020008
 #define	MCU_UNI_CMD_WSYS_CONFIG			0x0002000b
 #define	MCU_UNI_CMD_CHIP_CONFIG			0x0002000e
+#define	MCU_UNI_CMD_SET_DOMAIN_INFO		0x00020015
+#define	MCU_UNI_CMD_SCAN_REQ			0x00020016
 #define	MCU_UNI_CMD_SNIFFER			0x00020024
 #define	MCU_UNI_CMD_EFUSE_CTRL			0x0002002d
 
@@ -577,20 +592,44 @@ struct mt76_txwi {
 #define	UNI_BSS_INFO_BSS_COLOR			4
 #define	UNI_BSS_INFO_HE_BASIC			5
 #define	UNI_BSS_INFO_BCN_CONTENT		7
+#define	UNI_BSS_INFO_RATE			11
 #define	UNI_BSS_INFO_QBSS			15
+#define	UNI_BSS_INFO_SEC			16
 #define	UNI_BSS_INFO_UAPSD			19
 #define	UNI_BSS_INFO_PS				21
 #define	UNI_BSS_INFO_BCNFT			22
+#define	UNI_BSS_INFO_IFS_TIME			23
+#define	UNI_BSS_INFO_MLD			26
 
 #define	UNI_CHIP_CONFIG_CHIP_CFG		2
 #define	UNI_CHIP_CONFIG_NIC_CAPA		3
 
+#define	UNI_BAND_CONFIG_RTS_THRESHOLD		8
+
 #define	UNI_EFUSE_ACCESS			1
 #define	UNI_EFUSE_BUFFER_MODE			2
 
-#define	UNI_WSYS_CONFIG_FW_LOG_CTRL		0
+#define	UNI_EVENT_SCAN_DONE_BASIC		0
+#define	UNI_EVENT_SCAN_DONE_CHNLINFO		2
+#define	UNI_EVENT_SCAN_DONE_NLO			3
 
 #define	UNI_HIF_CTRL_BASIC			0
+
+#define	UNI_SCAN_REQ				1
+#define	UNI_SCAN_CANCEL				2
+#define	UNI_SCAN_SCHED_REQ			3
+#define	UNI_SCAN_SCHED_ENABLE			4
+#define	UNI_SCAN_SSID				10
+#define	UNI_SCAN_BSSID				11
+#define	UNI_SCAN_CHANNEL			12
+#define	UNI_SCAN_IE				13
+#define	UNI_SCAN_MISC				14
+#define	UNI_SCAN_SSID_MATCH_SETS		15
+
+#define	UNI_SNIFFER_ENABLE			0
+#define	UNI_SNIFFER_CONFIG			1
+
+#define	UNI_WSYS_CONFIG_FW_LOG_CTRL		0
 
 /* offload mcu commands */
 #define	MCU_CE_CMD_TEST_CTRL			0x00040001
@@ -711,23 +750,36 @@ struct mt76_txwi {
 #define	MT_TX_MCU_PORT_RX_Q3			0x23
 #define	MT_TX_MCU_PORT_RX_FWDL			0x3e
 
-#define MT_TX_FREE0_MSDU_CNT_MASK		0x03ff0000
-#define MT_TX_FREE0_MSDU_CNT_SHIFT		16
-#define MT_TX_FREE0_MSDU_CNT_GET(x)	\
+#define	MT_TX_FREE0_MSDU_CNT_MASK		0x03ff0000
+#define	MT_TX_FREE0_MSDU_CNT_SHIFT		16
+#define	MT_TX_FREE0_MSDU_CNT_GET(x)	\
 	(((x) & MT_TX_FREE0_MSDU_CNT_MASK) >> MT_TX_FREE0_MSDU_CNT_SHIFT)
-#define MT_TX_FREE0_LEN_MASK			0x0000ffff
+#define	MT_TX_FREE0_LEN_MASK			0x0000ffff
+
+#define	MT_TX_FREE1_VER_MASK			0x000f0000
+#define	MT_TX_FREE1_VER_SHIFT			16
+#define	MT_TX_FREE1_VER_GET(x)		\
+	(((x) & MT_TX_FREE1_VER_MASK) >> MT_TX_FREE1_VER_SHIFT)
+
 #define	MT_TX_FREE_PAIR				(1U << 31)
-#define MT_TX_FREE_WLAN_ID_MASK			0x00ffc000
-#define MT_TX_FREE_WLAN_ID_SHIFT		14
-#define MT_TX_FREE_WLAN_ID_GET(x)	\
+#define	MT_TX_FREE_WLAN_ID_MASK			0x00ffc000
+#define	MT_TX_FREE_WLAN_ID_SHIFT		14
+#define	MT_TX_FREE_WLAN_ID_GET(x)	\
 	(((x) & MT_TX_FREE_WLAN_ID_MASK) >> MT_TX_FREE_WLAN_ID_SHIFT)
-#define MT_TX_FREE_MSDU_ID_MASK			0x7fff0000
-#define MT_TX_FREE_MSDU_ID_SHIFT		16
-#define MT_TX_FREE_MSDU_ID_GET(x)	\
+#define	MT_TX_FREE_MSDU_ID_MASK			0x7fff0000
+#define	MT_TX_FREE_MSDU_ID_SHIFT		16
+#define	MT_TX_FREE_MSDU_ID_GET(x)	\
 	(((x) & MT_TX_FREE_MSDU_ID_MASK) >> MT_TX_FREE_MSDU_ID_SHIFT)
-#define MT_TX_FREE_STATUS_MASK			0x00006000	/* 0 = sent */
+#define	MT_TX_FREE_STATUS_MASK			0x00006000	/* 0 = sent */
 #define	MT_TX_FREE_COUNT_MASK			0x00001fff
 #define	MT_TX_FREE_RATE_MASK			0x00003fff
+
+#define	MT7925_TX_FREE_INFO_PAIR		(1U << 31)
+#define	MT7925_TX_FREE_INFO_HEADER		(1U << 30)
+#define	MT7925_TX_FREE_INFO_WLAN_ID		GENMASK(23, 12)
+#define	MT7925_TX_FREE_INFO_MSDU_ID		0x00007fff
+#define	MT7925_TX_FREE_INFO_COUNT		GENMASK(27, 24)
+#define	MT7925_TX_FREE_INFO_STAT		GENMASK(29, 28)
 
 #define	MT_TXD0_Q_IDX_MASK			0xfe000000
 #define	MT_TXD0_Q_IDX(x)		(((x) << 25) & MT_TXD0_Q_IDX_MASK)
@@ -835,6 +887,41 @@ struct mt76_txwi {
 #define	MT_TXD7_HW_AMSDU			(1U << 10)
 #define	MT_TXD7_TX_TIME				0x000003ff
 
+/* TXD values for connac3 (MT7925) */
+#define	MT7925_TXD1_FIXED_RATE			(1U << 31)
+#define	MT7925_TXD1_OWN_MAC_MASK		0x7e000000
+#define	MT7925_TXD1_OWN_MAC(x)		(((x) << 25) & MT7925_TXD1_OWN_MAC_MASK)
+#define	MT7925_TXD1_TID_MASK			0x01e00000
+#define	MT7925_TXD1_TID(x)		(((x) << 21) & MT7925_TXD1_TID_MASK)
+#define	MT7925_TXD1_BIP				(1U << 24)
+#define	MT7925_TXD1_ETH_802_3			(1U << 20)
+#define	MT7925_TXD1_HDR_INFO_MASK		0x001f0000
+#define	MT7925_TXD1_HDR_INFO(x)			\
+				(((x) << 16) & MT7925_TXD1_HDR_INFO_MASK)
+#define	MT7925_TXD1_HDR_FORMAT_MASK		0x0000c000
+#define	MT7925_TXD1_HDR_FORMAT_SHIFT		14
+#define	MT7925_TXD1_TGID_MASK			0x00030000
+#define	MT7925_TXD1_TGID(x)		(((x) << 12) & MT7925_TXD1_TGID_MASK)
+#define	MT7925_TXD1_WLAN_IDX_MASK		0x00000fff
+#define	MT7925_TXD1_WLAN_IDX(x)		((x) & MT7925_TXD1_WLAN_IDX_MASK)
+
+#define	MT7925_TXD2_HDR_PAD_MASK		0x00000c00
+#define	MT7925_TXD2_HDR_PAD_SHIFT		10
+#define	MT7925_TXD2_FRAME_TYPE_MASK		0x00000030
+#define	MT7925_TXD2_SUB_TYPE_MASK		0x0000000f
+#define	MT7925_TXD2_FRAME_TYPE(x)		\
+				(((x) << 4) & MT7925_TXD2_FRAME_TYPE_MASK)
+#define	MT7925_TXD2_SUB_TYPE(x)		((x) & MT7925_TXD2_SUB_TYPE_MASK)
+
+#define	MT7925_TXD3_BCM				(1U << 4)
+
+#define	MT7925_TXD6_TX_RATE_MASK		0x003f0000
+#define	MT7925_TXD6_TX_RATE(x)		(((x) << 16) & MT7925_TXD6_TX_RATE_MASK)
+#define	MT7925_TXD6_MSDU_CNT_MASK		0x000003f0
+#define	MT7925_TXD6_MSDU_CNT(x)		(((x) << 4) & MT7925_TXD6_MSDU_CNT_MASK)
+#define	MT7925_TXD6_DIS_MAT			(1U << 3)
+#define	MT7925_TXD6_DAS				(1U << 2)
+
 #define	MT_TX_RATE_STBC				(1U << 13)
 #define	MT_TX_RATE_NSS_MASK			0x00001c00
 #define	MT_TX_RATE_NSS_SHIFT			10
@@ -850,6 +937,12 @@ struct mt76_txwi {
 #define	MT_RXD0_PKT_FLAG_MASK			0x000f0000
 #define	MT_RXD0_PKT_FLAG_SHIFT			16
 #define	MT_RXD0_NORMAL_ETH_TYPE_OFS		0x007f0000
+#define	MT_RXD0_SW_PKT_TYPE_MASK		0xffff0000
+#define	MT_RXD0_SW_PKT_TYPE_SHIFT		16
+#define	MT_RXD0_SW_PKT_TYPE_GET(x)		\
+	    (((x) & MT_RXD0_SW_PKT_TYPE_MASK) >> MT_RXD0_SW_PKT_TYPE_SHIFT)
+#define	MT_RXD0_SW_PKT_TYPE_MAP			0x380f
+#define	MT_RXD0_SW_PKT_TYPE_FRAME		0x3801
 #define	MT_RXD0_NORMAL_IP_SUM			(1U << 23)
 #define	MT_RXD0_NORMAL_UDP_TCP_SUM		(1U << 24)
 #define	MT_RXD0_PKT_TYPE_MASK			0xf8000000
@@ -932,6 +1025,29 @@ struct mt76_txwi {
 #define	MT_RXD4_NORMAL_CLS_BITMAP		GENMASK(28, 19)
 #define	MT_RXD3_NORMAL_PF_MODE			(1U << 99)
 #define	MT_RXD3_NORMAL_PF_STS			GENMASK(31, 30)
+
+/*
+ * MT7925 uses the connac3 RXD layout rather than the older connac2
+ * bit assignments above.
+ */
+#define	MT7925_RXD1_NORMAL_WLAN_IDX_MASK	0x00000fff
+#define	MT7925_RXD1_NORMAL_GROUP_1		(1U << 16)
+#define	MT7925_RXD1_NORMAL_GROUP_2		(1U << 17)
+#define	MT7925_RXD1_NORMAL_GROUP_3		(1U << 18)
+#define	MT7925_RXD1_NORMAL_GROUP_4		(1U << 19)
+#define	MT7925_RXD1_NORMAL_GROUP_5		(1U << 20)
+#define	MT7925_RXD1_NORMAL_KEY_ID_MASK		0x00600000
+#define	MT7925_RXD1_NORMAL_BAND_IDX_MASK	0x18000000
+
+#define	MT7925_RXD2_NORMAL_HDR_TRANS		(1U << 7)
+#define	MT7925_RXD2_NORMAL_HDR_OFFSET_MASK	0x0000e000
+#define	MT7925_RXD2_NORMAL_HDR_OFFSET_SHIFT	13
+
+#define	MT7925_RXD3_NORMAL_CH_FREQ_MASK		0x0000ff00
+#define	MT7925_RXD3_NORMAL_CH_FREQ_SHIFT	8
+#define	MT7925_RXD3_NORMAL_ADDR_TYPE_MASK	0x00030000
+#define	MT7925_RXD3_NORMAL_U2M			0x1
+#define	MT7925_RXD3_NORMAL_FCS_ERR		(1U << 24)
 
 #define	PKT_TYPE_TXS				0
 #define	PKT_TYPE_TXRXV				1
@@ -1129,7 +1245,7 @@ struct mt76_connac_bss_basic_tlv {
 	uint16_t	sta_idx;
 	uint16_t	nonht_basic_phy;
 	uint8_t		phymode_ext; /* bit(0) AX_6G */
-	uint8_t		pad[1];
+	uint8_t		link_idx;
 } __packed;
 
 struct mt76_connac_mcu_scan_ssid {
@@ -1235,6 +1351,75 @@ struct mt76_connac_hw_scan_done {
 	uint8_t		mdrdy_count[MT76_HW_SCAN_DONE_MAX_CHANNEL_NUM];
 	uint32_t	beacon_2g_num;
 	uint32_t	beacon_5g_num;
+} __packed;
+
+#define	MT7925_RNR_SCAN_MAX_BSSIDS	10
+
+struct mt7925_scan_hdr_tlv {
+	uint8_t		seq_num;
+	uint8_t		bss_idx;
+	uint16_t	tlv_num;
+} __packed;
+
+struct mt7925_scan_req_tlv {
+	uint16_t	tag;
+	uint16_t	len;
+	uint8_t		scan_type;
+	uint8_t		probe_req_num;
+	uint8_t		scan_func;
+	uint8_t		src_mask;
+	uint16_t	channel_min_dwell_time;
+	uint16_t	channel_dwell_time;
+	uint16_t	timeout_value;
+	uint16_t	probe_delay_time;
+	uint32_t	func_mask_ext;
+} __packed;
+
+struct mt7925_scan_ssid_tlv {
+	uint16_t	tag;
+	uint16_t	len;
+	uint8_t		ssid_type;
+	uint8_t		ssids_num;
+	uint8_t		is_short_ssid;
+	uint8_t		pad;
+	struct mt76_connac_mcu_scan_ssid
+			ssids[MT7925_RNR_SCAN_MAX_BSSIDS];
+} __packed;
+
+struct mt7925_scan_bssid_tlv {
+	uint16_t	tag;
+	uint16_t	len;
+	uint8_t		bssid[ETHER_ADDR_LEN];
+	uint8_t		match_ch;
+	uint8_t		match_ssid_ind;
+	uint8_t		rcpi;
+	uint8_t		match_short_ssid_ind;
+	uint8_t		pad[2];
+} __packed;
+
+struct mt7925_scan_chan_info_tlv {
+	uint16_t	tag;
+	uint16_t	len;
+	uint8_t		channel_type;
+	uint8_t		channels_num;
+	uint8_t		pad[2];
+	struct mt76_connac_mcu_scan_channel channels[64];
+} __packed;
+
+struct mt7925_scan_ie_tlv {
+	uint16_t	tag;
+	uint16_t	len;
+	uint16_t	ies_len;
+	uint8_t		band;
+	uint8_t		pad;
+	uint8_t		ies[];
+} __packed;
+
+struct mt7925_scan_misc_tlv {
+	uint16_t	tag;
+	uint16_t	len;
+	uint8_t		random_mac[ETHER_ADDR_LEN];
+	uint8_t		rsv[2];
 } __packed;
 
 struct mwx_patch_hdr {
@@ -1351,7 +1536,7 @@ struct sta_rec_wtbl {
 	uint8_t		rsv[3];
 } __packed;
 
-#define STA_REC_KEY			0x11
+#define	STA_REC_KEY			0x11
 struct sta_rec_sec {
 	uint16_t	tag;
 	uint16_t	len;
@@ -1367,6 +1552,26 @@ struct sta_rec_sec_key {
 	uint8_t		key_len;
 	uint8_t		key[32];
 } __packed;
+
+#define	STA_REC_KEY_V3			0x27
+struct sta_rec_sec_v3 {
+	uint16_t	tag;
+	uint16_t	len;
+	uint8_t		add;
+	uint8_t		tx_key;
+	uint8_t		key_type;
+	uint8_t		is_authenticator;
+	uint8_t		peer_addr[IEEE80211_ADDR_LEN];
+	uint8_t		bss_idx;
+	uint8_t		cipher_id;
+	uint8_t		key_id;
+	uint8_t		key_len;
+	uint8_t		wlan_idx;
+	uint8_t		mgmt_prot;
+	uint8_t		key[32];
+	uint8_t		key_rsc[16];
+} __packed;
+
 
 enum mcu_cipher_type {
 	MCU_CIPHER_NONE = 0,
@@ -1389,6 +1594,20 @@ enum mcu_cipher_type {
 	MCU_CIPHER_BIP_GMAC_256,
 };
 
+enum mt7925_cipher_type {
+	MT7925_CIPHER_NONE = 0,
+	MT7925_CIPHER_WEP40 = 1,
+	MT7925_CIPHER_TKIP = 2,
+	MT7925_CIPHER_AES_CCMP = 4,
+	MT7925_CIPHER_WEP104 = 5,
+	MT7925_CIPHER_BIP_CMAC_128 = 6,
+	MT7925_CIPHER_WEP128 = 7,
+	MT7925_CIPHER_WAPI = 8,
+	MT7925_CIPHER_CCMP_256 = 10,
+	MT7925_CIPHER_GCMP = 11,
+	MT7925_CIPHER_GCMP_256 = 12,
+};
+
 
 #define	STA_REC_PHY			0x15
 struct sta_rec_phy {
@@ -1400,6 +1619,16 @@ struct sta_rec_phy {
 	uint8_t		rts_policy;
 	uint8_t		rcpi;
 	uint8_t		rsv[2];
+} __packed;
+
+#define	STA_REC_HDR_TRANS		0x2b
+struct sta_rec_hdr_trans {
+	uint16_t	tag;
+	uint16_t	len;
+	uint8_t		from_ds;
+	uint8_t		to_ds;
+	uint8_t		dis_rx_hdr_tran;
+	uint8_t		rsv;
 } __packed;
 
 /* WTBL REC */
@@ -1453,6 +1682,70 @@ struct wtbl_smps {
 	uint8_t		smps;
 	uint8_t		rsv[3];
 } __packed;
+
+#ifdef __HAIKU__
+/* HT and Block Ack records, from Linux v6.18 mt76_connac_mcu.h (ISC) */
+#define	STA_REC_BA			0x06
+struct sta_rec_ba {
+	uint16_t	tag;
+	uint16_t	len;
+	uint8_t		tid;
+	uint8_t		ba_type;
+	uint8_t		amsdu;
+	uint8_t		ba_en;
+	uint16_t	ssn;
+	uint16_t	winsize;
+} __packed;
+
+#define	STA_REC_HT			0x09
+struct sta_rec_ht {
+	uint16_t	tag;
+	uint16_t	len;
+	uint16_t	ht_cap;
+	uint16_t	rsv;
+} __packed;
+
+#define	WTBL_HT				0x02
+struct wtbl_ht {
+	uint16_t	tag;
+	uint16_t	len;
+	uint8_t		ht;
+	uint8_t		ldpc;
+	uint8_t		af;
+	uint8_t		mm;
+	uint8_t		rsv[4];
+} __packed;
+
+#define	WTBL_BA				0x08
+struct wtbl_ba {
+	uint16_t	tag;
+	uint16_t	len;
+	/* common */
+	uint8_t		tid;
+	uint8_t		ba_type;
+	uint8_t		rsv0[2];
+	/* originator only */
+	uint16_t	sn;
+	uint8_t		ba_en;
+	uint8_t		ba_winsize_idx;
+	/* originator & recipient */
+	uint16_t	ba_winsize;
+	/* recipient only */
+	uint8_t		peer_addr[IEEE80211_ADDR_LEN];
+	uint8_t		rst_ba_tid;
+	uint8_t		rst_ba_sel;
+	uint8_t		rst_ba_sb;
+	uint8_t		band_idx;
+	uint8_t		rsv1[4];
+} __packed;
+
+#define	MT_BA_TYPE_ORIGINATOR		1
+#define	MT_BA_TYPE_RECIPIENT		2
+#define	RST_BA_MAC_TID_MATCH		0
+
+#define	MT76_STA_INFO_STATE_NONE	0
+#define	MT76_STA_INFO_STATE_ASSOC	2
+#endif
 
 
 

@@ -15,11 +15,15 @@
 #include <stdio.h>
 
 #include <bus/PCI.h>
+#include <ACPI.h>
+#include "acpi.h"
 #include <USB3.h>
 #include <KernelExport.h>
 
 #include <ByteOrder.h>
 #include <util/AutoLock.h>
+#include <debug.h>
+#include <vm/vm.h>
 
 #include "xhci.h"
 
@@ -28,6 +32,83 @@
 
 
 #define USB_MODULE_NAME	"xhci"
+
+
+// The controller may not be cache coherent with the CPU (e.g. the VL805 on
+// the Raspberry Pi 4, whose rings live in uncached memory). Stores to the
+// rings must be visible to the whole system before the controller is told
+// about them, and ring contents written by the controller must not be read
+// before the cycle bit that marks them valid.
+static inline void
+xhci_dma_write_barrier()
+{
+#if defined(__aarch64__)
+	__asm__ __volatile__("dsb st" : : : "memory");
+#else
+	memory_write_barrier();
+#endif
+}
+
+
+static inline void
+xhci_dma_read_barrier()
+{
+#if defined(__aarch64__)
+	__asm__ __volatile__("dsb ld" : : : "memory");
+#else
+	memory_read_barrier();
+#endif
+}
+
+
+/*!	Transfers on physical vectors (usb_disk) DMA straight to and from the
+	caller's memory. If the controller isn't cache coherent, that memory must
+	be written back before the controller reads it (OUT) and must not have
+	stale lines when the CPU reads what the controller wrote (IN). A clean and
+	invalidate before the transfer and an invalidate after an IN transfer
+	cover both.
+*/
+static void
+xhci_sync_physical_vectors(const generic_io_vec* vecs, size_t count)
+{
+#if defined(__aarch64__)
+	if (debug_debugger_running())
+		return;
+
+	uint64 ctr;
+	__asm__ __volatile__("mrs %0, ctr_el0" : "=r"(ctr));
+	const addr_t line = 4 << ((ctr >> 16) & 0xf);
+
+	for (size_t i = 0; i < count; i++) {
+		phys_addr_t address = vecs[i].base;
+		generic_size_t left = vecs[i].length;
+		while (left > 0) {
+			phys_addr_t page = address & ~(phys_addr_t)(B_PAGE_SIZE - 1);
+			size_t offset = address - page;
+			size_t chunk = B_PAGE_SIZE - offset;
+			if (chunk > left)
+				chunk = left;
+
+			addr_t virtualPage;
+			void* handle;
+			if (vm_get_physical_page(page, &virtualPage, &handle) == B_OK) {
+				addr_t start = (virtualPage + offset) & ~(line - 1);
+				addr_t end = virtualPage + offset + chunk;
+				for (addr_t p = start; p < end; p += line)
+					__asm__ __volatile__("dc civac, %0" : : "r"(p) : "memory");
+				vm_put_physical_page(virtualPage, handle);
+			}
+
+			address += chunk;
+			left -= chunk;
+		}
+	}
+	__asm__ __volatile__("dsb sy" : : : "memory");
+#else
+	(void)vecs;
+	(void)count;
+#endif
+}
 
 device_manager_info* gDeviceManager;
 static usb_for_controller_interface* gUSB;
@@ -43,10 +124,118 @@ typedef struct {
 	pci_device* device;
 
 	pci_info pciinfo;
+	bool trb_prefetch_quirk;
 
 	device_node* node;
 	device_node* driver_node;
 } xhci_pci_sim_info;
+
+
+// ACPI attachment ("PNP0D10", generic xHCI), used for example by the
+// Raspberry Pi 4 UEFI firmware. We describe the controller with a synthetic
+// pci_info so that the rest of the driver does not need to care.
+struct xhci_acpi_crs {
+	phys_addr_t	address;
+	uint64		length;
+	uint32		irq;
+};
+
+
+static acpi_status
+xhci_acpi_parse_crs(ACPI_RESOURCE* resource, void* context)
+{
+	xhci_acpi_crs* crs = (xhci_acpi_crs*)context;
+	switch (resource->Type) {
+		case ACPI_RESOURCE_TYPE_FIXED_MEMORY32:
+			if (crs->address == 0) {
+				crs->address = resource->Data.FixedMemory32.Address;
+				crs->length = resource->Data.FixedMemory32.AddressLength;
+			}
+			break;
+		case ACPI_RESOURCE_TYPE_ADDRESS32:
+			if (crs->address == 0
+				&& resource->Data.Address32.ResourceType == ACPI_MEMORY_RANGE) {
+				crs->address = resource->Data.Address32.Address.Minimum;
+				crs->length = resource->Data.Address32.Address.AddressLength;
+			}
+			break;
+		case ACPI_RESOURCE_TYPE_ADDRESS64:
+			if (crs->address == 0
+				&& resource->Data.Address64.ResourceType == ACPI_MEMORY_RANGE) {
+				crs->address = resource->Data.Address64.Address.Minimum;
+				crs->length = resource->Data.Address64.Address.AddressLength;
+			}
+			break;
+		case ACPI_RESOURCE_TYPE_IRQ:
+			if (crs->irq == 0 && resource->Data.Irq.InterruptCount > 0)
+				crs->irq = resource->Data.Irq.Interrupts[0];
+			break;
+		case ACPI_RESOURCE_TYPE_EXTENDED_IRQ:
+			if (crs->irq == 0 && resource->Data.ExtendedIrq.InterruptCount > 0)
+				crs->irq = resource->Data.ExtendedIrq.Interrupts[0];
+			break;
+	}
+	return B_OK;
+}
+
+
+static status_t
+init_device_acpi(device_node* node, xhci_pci_sim_info* bus)
+{
+	acpi_device_module_info* acpi;
+	acpi_device device;
+	device_node* acpiParent = gDeviceManager->get_parent_node(node);
+	gDeviceManager->get_driver(acpiParent, (driver_module_info**)&acpi,
+		(void**)&device);
+	gDeviceManager->put_node(acpiParent);
+
+	xhci_acpi_crs crs = {};
+	if (acpi->walk_resources(device, (ACPI_STRING)"_CRS", xhci_acpi_parse_crs,
+			&crs) != B_OK || crs.address == 0 || crs.irq == 0) {
+		TRACE_MODULE_ERROR("ACPI: missing xHCI resources\n");
+		return B_DEVICE_NOT_FOUND;
+	}
+	if (crs.irq > 0xff) {
+		TRACE_MODULE_ERROR("ACPI: interrupt %" B_PRIu32 " out of range\n",
+			crs.irq);
+		return B_DEVICE_NOT_FOUND;
+	}
+
+	dprintf("xhci: ACPI controller at %#" B_PRIxPHYSADDR ", length %#"
+		B_PRIx64 ", irq %" B_PRIu32 "\n", crs.address, crs.length, crs.irq);
+
+	pci_info* info = &bus->pciinfo;
+	memset(info, 0, sizeof(pci_info));
+	info->vendor_id = 0xffff;
+	info->device_id = 0xffff;
+	info->class_base = PCI_serial_bus;
+	info->class_sub = PCI_usb;
+	info->class_api = PCI_usb_xhci;
+	info->u.h0.base_registers[0] = (uint32)crs.address;
+	info->u.h0.base_registers[1] = (uint32)(crs.address >> 32);
+	info->u.h0.base_register_flags[0] = PCI_address_type_64;
+	info->u.h0.base_register_sizes[0] = crs.length != 0 ? crs.length : 0x10000;
+	info->u.h0.interrupt_line = crs.irq;
+
+	// The Raspberry Pi 4 UEFI firmware describes its VIA VL805 by this ACPI
+	// node only, so its PCI IDs are not visible here; the node does declare
+	// it as not cache coherent (_CCA = 0). Apply the VL805's TRB prefetch
+	// workaround to non-coherent ACPI controllers.
+	acpi_object_type object;
+	acpi_data buffer;
+	buffer.pointer = &object;
+	buffer.length = sizeof(object);
+	bus->trb_prefetch_quirk = false;
+	if (acpi->evaluate_method(device, "_CCA", NULL, &buffer) == B_OK
+		&& object.object_type == ACPI_TYPE_INTEGER
+		&& object.integer.integer == 0) {
+		bus->trb_prefetch_quirk = true;
+	}
+
+	bus->pci = NULL;
+	bus->device = NULL;
+	return B_OK;
+}
 
 
 //	#pragma mark -
@@ -67,7 +256,8 @@ init_bus(device_node* node, void** bus_cookie)
 	if (gUSB->get_stack((void**)&stack) != B_OK)
 		return B_ERROR;
 
-	XHCI *xhci = new(std::nothrow) XHCI(&bus->pciinfo, bus->pci, bus->device, stack, node);
+	XHCI *xhci = new(std::nothrow) XHCI(&bus->pciinfo, bus->pci, bus->device,
+		stack, node, bus->trb_prefetch_quirk);
 	if (xhci == NULL) {
 		return B_NO_MEMORY;
 	}
@@ -133,6 +323,25 @@ init_device(device_node* node, void** device_cookie)
 	if (bus == NULL)
 		return B_NO_MEMORY;
 
+	bus->driver_node = node;
+
+	{
+		const char* busName = NULL;
+		device_node* parent = gDeviceManager->get_parent_node(node);
+		gDeviceManager->get_attr_string(parent, B_DEVICE_BUS, &busName, false);
+		bool isACPI = busName != NULL && strcmp(busName, "acpi") == 0;
+		gDeviceManager->put_node(parent);
+		if (isACPI) {
+			status_t status = init_device_acpi(node, bus);
+			if (status != B_OK) {
+				free(bus);
+				return status;
+			}
+			*device_cookie = bus;
+			return B_OK;
+		}
+	}
+
 	pci_device_module_info* pci;
 	pci_device* device;
 	{
@@ -188,6 +397,29 @@ supports_device(device_node* parent)
 	if (gDeviceManager->get_attr_string(parent, B_DEVICE_BUS, &bus, false)
 		< B_OK) {
 		return -1;
+	}
+
+	if (strcmp(bus, "acpi") == 0) {
+#ifdef __aarch64__
+		// Only xHCI controllers that firmware describes exclusively through
+		// ACPI. A node with an _ADR is the ACPI description of a device on
+		// PCI (or another enumerable bus), which the PCI path below attaches
+		// already; claiming it here as well would attach it twice.
+		const char* hid;
+		uint32 type;
+		uint32 address;
+		if (gDeviceManager->get_attr_uint32(parent, ACPI_DEVICE_TYPE_ITEM,
+				&type, false) == B_OK && type == ACPI_TYPE_DEVICE
+			&& gDeviceManager->get_attr_string(parent, ACPI_DEVICE_HID_ITEM,
+				&hid, false) == B_OK && strcmp(hid, "PNP0D10") == 0
+			&& gDeviceManager->get_attr_uint32(parent, ACPI_DEVICE_ADDR_ITEM,
+				&address, false) != B_OK) {
+			TRACE_MODULE("XHCI ACPI device found!\n");
+			return 0.8f;
+		}
+#endif
+		// Elsewhere xHCI controllers are only attached through PCI.
+		return 0.0f;
 	}
 
 	if (strcmp(bus, "pci") != 0)
@@ -338,7 +570,7 @@ module_info* modules[] = {
 
 
 XHCI::XHCI(pci_info *info, 	pci_device_module_info* pci, pci_device* device, Stack *stack,
-	device_node* node)
+	device_node* node, bool trbPrefetchQuirk)
 	:	BusManager(stack, node),
 		fRegisterArea(-1),
 		fRegisters(NULL),
@@ -350,6 +582,11 @@ XHCI::XHCI(pci_info *info, 	pci_device_module_info* pci, pci_device* device, Sta
 		fUseMSI(false),
 		fBayTrail(info->vendor_id == PCI_VENDOR_INTEL
 			&& info->device_id == PCI_DEVICE_INTEL_BAYTRAIL_XHCI),
+		fTrbPad(trbPrefetchQuirk
+			|| (info->vendor_id == PCI_VENDOR_VIA
+				&& info->device_id == PCI_DEVICE_VIA_VL805_XHCI)
+			? XHCI_TRB_PREFETCH_PAD : 0),
+		fRingStride(XHCI_ENDPOINT_RING_SIZE + fTrbPad),
 		fErstArea(-1),
 		fDcbaArea(-1),
 		fCmdCompSem(-1),
@@ -391,11 +628,13 @@ XHCI::XHCI(pci_info *info, 	pci_device_module_info* pci, pci_device* device, Sta
 	fInitOK = false;
 
 	// enable busmaster and memory mapped access
-	uint16 command = fPci->read_pci_config(fDevice, PCI_command, 2);
-	command &= ~(PCI_command_io | PCI_command_int_disable);
-	command |= PCI_command_master | PCI_command_memory;
+	if (fPci != NULL) {
+		uint16 command = fPci->read_pci_config(fDevice, PCI_command, 2);
+		command &= ~(PCI_command_io | PCI_command_int_disable);
+		command |= PCI_command_master | PCI_command_memory;
 
-	fPci->write_pci_config(fDevice, PCI_command, 2, command);
+		fPci->write_pci_config(fDevice, PCI_command, 2, command);
+	}
 
 	// map the registers (low + high for 64-bit when requested)
 	phys_addr_t physicalAddress = fPCIInfo->u.h0.base_registers[0];
@@ -568,7 +807,7 @@ XHCI::XHCI(pci_info *info, 	pci_device_module_info* pci, pci_device* device, Sta
 	if (fBayTrail) {
 		// Bay Trail xHCI stays on its firmware-assigned legacy PCI IRQ.
 		TRACE_ALWAYS("Bay Trail xHCI: using legacy PCI IRQ %" B_PRIu32 "\n", fIRQ);
-	} else if (fPci->get_msi_count(fDevice) >= 1) {
+	} else if (fPci != NULL && fPci->get_msi_count(fDevice) >= 1) {
 		uint32 msiVector = 0;
 		if (fPci->configure_msi(fDevice, 1, &msiVector) == B_OK
 			&& fPci->enable_msi(fDevice) == B_OK) {
@@ -626,7 +865,7 @@ XHCI::~XHCI()
 		delete_area(fScratchpadArea[i]);
 	delete_area(fDcbaArea);
 
-	if (fUseMSI) {
+	if (fUseMSI && fPci != NULL) {
 		fPci->disable_msi(fDevice);
 		fPci->unconfigure_msi(fDevice);
 	}
@@ -1221,6 +1460,9 @@ XHCI::SubmitNormalRequest(Transfer *transfer)
 			transfer->VectorCount(), transfer->IsPhysical());
 	}
 
+	if (transfer->IsPhysical())
+		xhci_sync_physical_vectors(transfer->Vector(), transfer->VectorCount());
+
 	td->transfer = transfer;
 	status = _LinkDescriptorForPipe(td, endpoint);
 	if (status != B_OK) {
@@ -1463,11 +1705,13 @@ XHCI::CreateDescriptor(uint32 trbCount, uint32 bufferCount, size_t bufferSize)
 	// _LinkDescriptorForPipe() has room to insert a link TRB.
 	trbCount++;
 	if (fStack->AllocateChunk((void **)&result->trbs, &result->trb_addr,
-			(trbCount * sizeof(xhci_trb))) < B_OK) {
+			((trbCount + fTrbPad) * sizeof(xhci_trb))) < B_OK) {
 		TRACE_ERROR("failed to allocate TRBs\n");
 		FreeDescriptor(result);
 		return NULL;
 	}
+	memset(result->trbs, 0,
+		(trbCount + fTrbPad) * sizeof(xhci_trb));
 	result->trb_count = trbCount;
 	result->trb_used = 0;
 
@@ -1552,7 +1796,8 @@ XHCI::FreeDescriptor(xhci_td *descriptor)
 
 	if (descriptor->trbs != NULL) {
 		fStack->FreeChunk(descriptor->trbs, descriptor->trb_addr,
-			(descriptor->trb_count * sizeof(xhci_trb)));
+			((descriptor->trb_count + fTrbPad)
+				* sizeof(xhci_trb)));
 	}
 	if (descriptor->buffers != NULL) {
 		size_t totalSize = descriptor->buffer_size * descriptor->buffer_count;
@@ -1799,7 +2044,7 @@ XHCI::AllocateDevice(Hub *parent, int8 hubAddress, uint8 hubPort,
 
 	device->trb_area = fStack->AllocateArea((void **)&device->trbs,
 		&device->trb_addr, sizeof(xhci_trb) * (XHCI_MAX_ENDPOINTS - 1)
-			* XHCI_ENDPOINT_RING_SIZE, "XHCI endpoint trbs");
+			* fRingStride, "XHCI endpoint trbs");
 	if (device->trb_area < B_OK) {
 		TRACE_ERROR("unable to create a device trbs area\n");
 		CleanupDevice(device);
@@ -2090,9 +2335,9 @@ XHCI::_InsertEndpointForPipe(Pipe *pipe)
 		endpoint->failureCount = 0;
 		endpoint->validationCount = 0;
 
-		endpoint->trbs = device->trbs + id * XHCI_ENDPOINT_RING_SIZE;
+		endpoint->trbs = device->trbs + id * fRingStride;
 		endpoint->trb_addr = device->trb_addr
-			+ id * XHCI_ENDPOINT_RING_SIZE * sizeof(xhci_trb);
+			+ id * fRingStride * sizeof(xhci_trb);
 		memset(endpoint->trbs, 0,
 			sizeof(xhci_trb) * XHCI_ENDPOINT_RING_SIZE);
 
@@ -2279,7 +2524,7 @@ XHCI::_LinkDescriptorForPipe(xhci_td *descriptor, xhci_endpoint *endpoint)
 	endpoint->trbs[next].status = 0;
 	endpoint->trbs[next].flags = 0;
 
-	memory_write_barrier();
+	xhci_dma_write_barrier();
 
 	// Everything is ready, so write the cycle bit.
 	endpoint->trbs[link].flags |= B_HOST_TO_LENDIAN_INT32(TRB_3_CYCLE_BIT);
@@ -2732,6 +2977,9 @@ XHCI::Ring(uint8 slot, uint8 endpoint)
 	if (slot > fSlotCount || endpoint >= XHCI_MAX_ENDPOINTS)
 		panic("Ring() invalid slot or endpoint\n");
 
+	// Make sure the controller sees the TRBs before the doorbell.
+	xhci_dma_write_barrier();
+
 	WriteDoorReg32(XHCI_DOORBELL(slot), XHCI_DOORBELL_TARGET(endpoint)
 		| XHCI_DOORBELL_STREAMID(0));
 	ReadDoorReg32(XHCI_DOORBELL(slot));
@@ -2761,6 +3009,7 @@ XHCI::QueueCommand(xhci_trb* trb)
 	else
 		temp &= ~TRB_3_CYCLE_BIT;
 	temp &= ~TRB_3_TC_BIT;
+	xhci_dma_write_barrier();
 	fCmdRing[i].flags = B_HOST_TO_LENDIAN_INT32(temp);
 
 	fCmdAddr = fErst->rs_addr + (XHCI_MAX_EVENTS + i) * sizeof(xhci_trb);
@@ -2771,6 +3020,7 @@ XHCI::QueueCommand(xhci_trb* trb)
 		temp = TRB_3_TYPE(TRB_TYPE_LINK) | TRB_3_TC_BIT;
 		if (j)
 			temp |= TRB_3_CYCLE_BIT;
+		xhci_dma_write_barrier();
 		fCmdRing[i].flags = B_HOST_TO_LENDIAN_INT32(temp);
 
 		i = 0;
@@ -3686,6 +3936,10 @@ XHCI::ProcessEvents()
 		if (j != k)
 			break;
 
+		// The event is valid; only now read the rest of it (and the data
+		// the controller wrote before posting it).
+		xhci_dma_read_barrier();
+
 		switch (event) {
 		case TRB_TYPE_COMMAND_COMPLETION:
 			HandleCmdComplete(&fEventRing[i]);
@@ -3788,6 +4042,12 @@ XHCI::FinishTransfers()
 					actualLength = transfer->FragmentLength() - td->trb_left;
 				TRACE("transfer not successful, actualLength=%" B_PRIuSIZE "\n",
 					actualLength);
+			}
+
+			if (directionIn && actualLength > 0 && transfer->IsPhysical()) {
+				// drop lines the CPU may have speculatively fetched meanwhile
+				xhci_sync_physical_vectors(transfer->Vector(),
+					transfer->VectorCount());
 			}
 
 			if (directionIn && actualLength > 0 && !transfer->IsPhysical()) {

@@ -246,8 +246,16 @@ exec_command(i2c_bus_cookie cookie, i2c_op op, i2c_addr slaveAddress,
 
 			// sleep until wake up by intr handler
 			err = waiter.Wait(B_RELATIVE_TIMEOUT, 500000L);
-			if (err != B_OK)
-				ERROR("exec_command timed out waiting for busy\n");
+			if (err != B_OK) {
+				// STOP_DET never came, and waiting longer will not change
+				// that. Mask it before the flag is released below, so that
+				// a late one cannot clear the flag of the next transfer.
+				write32(bus->registers + PCH_IC_INTR_MASK, 0);
+				ERROR("exec_command timed out waiting for busy. Raw intr stat %08x TX ABORT SOURCE %08x\n",
+					read32(bus->registers + PCH_IC_RAW_INTR_STAT),
+					read32(bus->registers + PCH_IC_TX_ABRT_SOURCE));
+				break;
+			}
 		}
 	}
 	TRACE("exec_command: processing done\n");
