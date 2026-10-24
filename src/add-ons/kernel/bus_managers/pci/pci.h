@@ -224,6 +224,8 @@ private:
 			status_t		_UnconfigureMSIX(PCIDev *device);
 			status_t		_DisableMSIX(PCIDev *device);
 
+			void			_EnableBusMasterOnBridges(PCIDev *device);
+
 private:
 	enum { MAX_PCI_DOMAINS = 8 };
 

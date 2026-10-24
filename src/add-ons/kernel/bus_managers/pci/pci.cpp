@@ -1859,8 +1859,26 @@ PCI::WriteConfig(uint8 domain, uint8 bus, uint8 device, uint8 function,
 		return B_ERROR;
 	}
 
-	return (*info->controller->write_pci_config)(info->controller_cookie, bus,
-		device, function, offset, size, value);
+	status_t status = (*info->controller->write_pci_config)(
+		info->controller_cookie, bus, device, function, offset, size, value);
+
+	// When a driver turns on bus mastering on an endpoint, propagate it
+	// upstream: the DMA/MSI path only works if every PCI-to-PCI bridge
+	// between the endpoint and the host also has bus master enabled.
+	// Restrict to generic (type 0) devices so the bridge writes issued by
+	// _EnableBusMasterOnBridges() itself and by _EnumerateBus() do not
+	// re-enter this path.
+	if (status == B_OK && offset == PCI_command && size == 2
+			&& (value & PCI_command_master) != 0) {
+		PCIDev *dev = FindDevice(domain, bus, device, function);
+		if (dev != NULL
+			&& (dev->info.header_type & PCI_header_type_mask)
+				== PCI_header_type_generic) {
+			_EnableBusMasterOnBridges(dev);
+		}
+	}
+
+	return status;
 }
 
 
@@ -2262,6 +2280,10 @@ PCI::EnableMSI(PCIDev *device)
 	if (info->configured_count == 0)
 		return B_NO_INIT;
 
+	// MSI delivery is a posted memory write from the endpoint; make sure
+	// every upstream bridge has bus master enabled before we arm it.
+	_EnableBusMasterOnBridges(device);
+
 	// ensure the pinned interrupt is disabled
 	WriteConfig(device, PCI_command, 2,
 		ReadConfig(device, PCI_command, 2) | PCI_command_int_disable);
@@ -2428,6 +2450,10 @@ PCI::EnableMSIX(PCIDev *device)
 	if (info->configured_count == 0)
 		return B_NO_INIT;
 
+	// MSI-X delivery is a posted memory write from the endpoint; make sure
+	// every upstream bridge has bus master enabled before we arm it.
+	_EnableBusMasterOnBridges(device);
+
 	// ensure the pinned interrupt is disabled
 	WriteConfig(device, PCI_command, 2,
 		ReadConfig(device, PCI_command, 2) | PCI_command_int_disable);
@@ -2443,6 +2469,44 @@ PCI::EnableMSIX(PCIDev *device)
 	dprintf("msi-x enabled: 0x%04" B_PRIx32 "\n",
 		ReadConfig(device, info->capability_offset + PCI_msix_control, 2));
 	return B_OK;
+}
+
+
+void
+PCI::_EnableBusMasterOnBridges(PCIDev *device)
+{
+	// Walk from the device's parent bus up to the host bridge, setting bus
+	// master enable on every PCI-to-PCI bridge that still has it clear.
+	// Some firmwares (e.g. Lenovo T460s root ports 8086:9d12) leave BME
+	// clear on bridges whose downstream slots were empty or powered off at
+	// POST, which silently drops all DMA and MSI writes from any endpoint
+	// later brought up behind them (Haiku ticket #19154). Linux does the
+	// same from pci_enable_device() via pci_enable_bridge().
+	if (device == NULL || device->parent == NULL)
+		return;
+
+	for (PCIBus *bus = device->parent; bus != NULL;
+			bus = bus->parent != NULL ? bus->parent->parent : NULL) {
+		PCIDev *bridge = bus->parent;
+		if (bridge == NULL)
+			break;
+		if (bridge->info.class_base != PCI_bridge
+			|| bridge->info.class_sub != PCI_pci
+			|| (bridge->info.header_type & PCI_header_type_mask)
+				!= PCI_header_type_PCI_to_PCI_bridge)
+			continue;
+
+		uint16 cmd = ReadConfig(bridge, PCI_command, 2);
+		if ((cmd & PCI_command_master) != 0)
+			continue;
+
+		WriteConfig(bridge, PCI_command, 2, cmd | PCI_command_master);
+		dprintf("PCI: dom %u, bus %u, dev %2u, func %u: set bus master on "
+			"upstream bridge for %u:%2u.%u (cmd 0x%04x -> 0x%04x)\n",
+			bridge->domain, bridge->bus, bridge->device, bridge->function,
+			device->bus, device->device, device->function, cmd,
+			static_cast<uint16>(cmd | PCI_command_master));
+	}
 }
 
 
