@@ -201,7 +201,7 @@ jobs:
       - name: Install QEMU and 32-bit OVMF
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq qemu-system-x86 ovmf-ia32
+          sudo apt-get install -y -qq qemu-system-x86 ovmf-ia32 mtools
           qemu-system-x86_64 --version | head -1
           dpkg -L ovmf-ia32 | tee ovmf-files.txt
 
@@ -295,6 +295,22 @@ jobs:
           dd if="${ESP}" of=usb/hybrid-usb.img bs=512 seek=${START1} conv=notrunc status=none
           dd if="${SYS}" of=usb/hybrid-usb.img bs=512 seek=${START2} conv=notrunc status=none
           sfdisk -l usb/hybrid-usb.img
+
+          # Show what the firmware will find: the files of the EFI system
+          # partition inside the final image. A 32-bit firmware boots
+          # EFI/BOOT/BOOTIA32.EFI.
+          {
+            echo "### contents of the EFI partition in hybrid-usb.img"
+            echo '```'
+            sfdisk -l usb/hybrid-usb.img
+            echo
+            mdir -/ -i "usb/hybrid-usb.img@@$(( START1 * 512 ))" :: 2>&1
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          if ! mdir -i "usb/hybrid-usb.img@@$(( START1 * 512 ))" ::EFI/BOOT/BOOTIA32.EFI >/dev/null 2>&1; then
+            echo "::error::EFI/BOOT/BOOTIA32.EFI is missing from the EFI partition"
+            exit 1
+          fi
 
           cp "${VARS}" vars2.fd
           : > serial-combined.log
