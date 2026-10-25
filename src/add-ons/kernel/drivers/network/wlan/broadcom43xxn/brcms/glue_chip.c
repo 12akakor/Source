@@ -39,9 +39,9 @@
 
 #define VENDOR_BROADCOM			0x14e4
 
-// The chips this is meant for. Both are BCM43224 silicon; Apple ships the
-// second one in the MacBook7,1.
-static const uint16 kDeviceIds[] = { 0x0576, 0x4353, 0x4357, 0x4727 };
+// The chips this is meant for: the N-PHY BCM43224 and BCM43225. Apple ships
+// the second ID in the MacBook7,1.
+static const uint16 kDeviceIds[] = { 0x0576, 0x4353, 0x4357 };
 
 // A core's registers are paged into the first 4 KiB of BAR0, and its wrapper
 // into the second. Which core that is comes from a backplane address written

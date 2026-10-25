@@ -70,7 +70,6 @@ static const struct {
 	{ 0x0576, "Broadcom BCM43224" },
 	{ 0x4353, "Broadcom BCM43224" },
 	{ 0x4357, "Broadcom BCM43225" },
-	{ 0x4727, "Broadcom BCM4313" },
 };
 
 // Only 2.4 GHz: that is the band the radio has been brought up and tested
