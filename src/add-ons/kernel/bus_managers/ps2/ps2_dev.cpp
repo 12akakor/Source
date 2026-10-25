@@ -44,6 +44,14 @@ ps2_reset_mouse(ps2_dev* dev)
 
 	TRACE("ps2: ps2_reset_mouse\n");
 
+	if (dev == &ps2_device[PS2_DEVICE_SYN_PASSTHROUGH]) {
+		// A TrackPoint behind the touchpad already ran its self-test when
+		// the touchpad was reset, and a reset of its own makes it bounce
+		// the next commands. Like Linux, only set defaults and disable it.
+		return ps2_dev_command(dev, PS2_CMD_MOUSE_RESET_DIS, NULL, 0,
+			NULL, 0);
+	}
+	data[0] = data[1] = 0;
 	status = ps2_dev_command(dev, PS2_CMD_RESET, NULL, 0, data, 2);
 
 	if (status == B_OK && data[0] == 0xFE && data[1] == 0xAA) {
@@ -71,9 +79,12 @@ ps2_reset_mouse(ps2_dev* dev)
 status_t
 ps2_dev_detect_pointing(ps2_dev* dev, device_hooks** hooks)
 {
+	bool standardFallback = false;
 	status_t status = ps2_reset_mouse(dev);
 	if (status != B_OK) {
 		INFO("ps2_dev: reset failed: %s\n", strerror(status));
+		if (dev == &(ps2_device[PS2_DEVICE_SYN_PASSTHROUGH]))
+			synaptics_guest_detect_failed(dev);
 		return B_ERROR;
 	}
 
@@ -115,14 +126,20 @@ ps2_dev_detect_pointing(ps2_dev* dev, device_hooks** hooks)
 	status = probe_standard_mouse(dev);
 	if (status == B_OK) {
 		*hooks = &gStandardMouseDeviceHooks;
+		standardFallback = true;
 		goto dev_found;
 	}
 
+	if (dev == &(ps2_device[PS2_DEVICE_SYN_PASSTHROUGH]))
+		synaptics_guest_detect_failed(dev);
 	return B_ERROR;
 
 dev_found:
-	if (dev == &(ps2_device[PS2_DEVICE_SYN_PASSTHROUGH]))
+	if (dev == &(ps2_device[PS2_DEVICE_SYN_PASSTHROUGH])) {
 		synaptics_pass_through_set_packet_size(dev, dev->packet_size);
+		if (standardFallback)
+			synaptics_guest_standard_fallback(dev);
+	}
 
 	return B_OK;
 }
@@ -340,7 +357,8 @@ pass_to_handler:
 			return B_INVOKE_SCHEDULER;
 		}
 		if (data == 0x00 && dev->history[1].data == 0xaa
-			&& (dev->history[0].time - dev->history[1].time) < 50000) {
+			&& (dev->history[0].time - dev->history[1].time) < 50000
+			&& !synaptics_hot_plug_is_pt_payload(dev)) {
 			INFO("ps2: hot plugin of %s\n", dev->name);
 			if (dev->active) {
 				INFO("ps2: device %s still active, republishing...\n",

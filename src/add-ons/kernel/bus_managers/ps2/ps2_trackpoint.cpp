@@ -34,7 +34,7 @@ const char* kTrackpointPath[4] = {
 status_t
 probe_trackpoint(ps2_dev* dev)
 {
-	uint8 val[2];
+	uint8 val[2] = { 0, 0 };
 
 	TRACE("TRACKPOINT: probe\n");
 	ps2_dev_command(dev, 0xE1, NULL, 0, val, 2);

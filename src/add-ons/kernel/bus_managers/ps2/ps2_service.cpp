@@ -12,6 +12,7 @@
 #include "ps2_service.h"
 
 #include "packet_buffer.h"
+#include "ps2_synaptics.h"
 
 
 #define DEBUG_PUBLISHING
@@ -38,6 +39,7 @@ enum {
 	PS2_SERVICE_NOTIFY_DEVICE_ADDED = 1,
 	PS2_SERVICE_NOTIFY_DEVICE_REPUBLISH,
 	PS2_SERVICE_NOTIFY_DEVICE_REMOVED,
+	PS2_SERVICE_STALL_PROBE,
 };
 
 
@@ -98,6 +100,20 @@ ps2_service_notify_device_removed(ps2_dev *dev)
 }
 
 
+// called from the interrupt handler when the touchpad stalls
+void
+ps2_service_notify_stall_probe(ps2_dev *dev)
+{
+	ps2_service_cmd cmd;
+
+	cmd.id = PS2_SERVICE_STALL_PROBE;
+	cmd.dev = dev;
+
+	packet_buffer_write(sServiceCmdBuffer, (const uint8 *)&cmd, sizeof(cmd));
+	release_sem_etc(sServiceSem, 1, B_DO_NOT_RESCHEDULE);
+}
+
+
 static int32
 ps2_service_thread(void *arg)
 {
@@ -129,6 +145,10 @@ ps2_service_thread(void *arg)
 				case PS2_SERVICE_NOTIFY_DEVICE_REMOVED:
 					TRACE("ps2: PS2_SERVICE_NOTIFY_DEVICE_REMOVED %s\n", cmd.dev->name);
 					ps2_dev_unpublish(cmd.dev);
+					break;
+
+				case PS2_SERVICE_STALL_PROBE:
+					synaptics_stall_probe(cmd.dev);
 					break;
 
 				default:
