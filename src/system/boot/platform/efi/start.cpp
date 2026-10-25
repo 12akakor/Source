@@ -179,6 +179,12 @@ get_kernel_regions(addr_range& text, addr_range& data)
 extern "C" void
 platform_start_kernel(void)
 {
+#ifdef KERNEL_FIXUP_FOR_LONG_MODE
+	// This is a 32-bit loader, if it is to start a 64-bit kernel it has to
+	// switch to long mode itself.
+	gIsHybridPlatform = gKernelArgs.kernel_image->elf_class == ELFCLASS64;
+#endif
+
 	smp_init_other_cpus();
 #ifdef _BOOT_FDT_SUPPORT
 	dtb_set_kernel_args();
