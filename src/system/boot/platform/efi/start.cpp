@@ -47,6 +47,8 @@ const efi_boot_services		*kBootServices;
 const efi_runtime_services	*kRuntimeServices;
 efi_handle kImage;
 
+bool gIsHybridPlatform = false;
+
 
 static uint32 sBootOptions;
 
