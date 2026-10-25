@@ -130,7 +130,7 @@ struct ELF64Class {
 	AllocateRegion(AddrType* _address, AddrType size, uint8 protection,
 		void **_mappedAddress)
 	{
-#if defined(_BOOT_PLATFORM_BIOS)
+#if B_HAIKU_BITS == 32
 		// Assume the real 64-bit base address is KERNEL_LOAD_BASE_64_BIT and
 		// the mappings in the loader address space are at KERNEL_LOAD_BASE.
 
@@ -144,10 +144,15 @@ struct ELF64Class {
 			return status;
 
 		*_mappedAddress = address;
-#if defined(_BOOT_PLATFORM_BIOS)
+#ifdef _BOOT_PLATFORM_BIOS
 		*_address = (AddrType)(addr_t)address + KERNEL_FIXUP_FOR_LONG_MODE;
 #else
-		platform_bootloader_address_to_kernel_address(address, _address);
+		addr_t kernelAddress;
+		platform_bootloader_address_to_kernel_address(address, &kernelAddress);
+		*_address = kernelAddress;
+#	if B_HAIKU_BITS == 32
+		*_address += KERNEL_FIXUP_FOR_LONG_MODE;
+#	endif
 #endif
 		return B_OK;
 	}
@@ -158,8 +163,14 @@ struct ELF64Class {
 #ifdef _BOOT_PLATFORM_BIOS
 		return (void*)(addr_t)(address - KERNEL_FIXUP_FOR_LONG_MODE);
 #else
+#	if B_HAIKU_BITS == 32
+		addr_t kernelAddress = (addr_t)(address - KERNEL_FIXUP_FOR_LONG_MODE);
+#	else
+		addr_t kernelAddress = address;
+#	endif
 		void *result;
-		if (platform_kernel_address_to_bootloader_address(address, &result) != B_OK) {
+		if (platform_kernel_address_to_bootloader_address(kernelAddress, &result)
+				!= B_OK) {
 			panic("Couldn't convert address %#" PRIx64, address);
 		}
 		return result;
