@@ -12,6 +12,7 @@
 
 #include "efi_platform.h"
 
+#include <arch_kernel.h>
 #include <util/FixedWidthPointer.h>
 
 
@@ -60,15 +61,23 @@ extern status_t platform_add_allocated_region(void *address, size_t size);
 
 
 /*! Convert a 32-bit address to a 64-bit address. */
-inline addr_t
+inline uint64
 fix_address(addr_t address)
 {
 	addr_t result;
 	if (platform_bootloader_address_to_kernel_address((void *)address, &result)
 		!= B_OK) {
 		return address;
-	} else
-		return result;
+	}
+
+#ifdef KERNEL_FIXUP_FOR_LONG_MODE
+	// A 32-bit loader starting a 64-bit kernel: the kernel sees the 32-bit
+	// kernel addresses at the top of its address space.
+	if (gIsHybridPlatform)
+		return (uint64)result + KERNEL_FIXUP_FOR_LONG_MODE;
+#endif
+
+	return result;
 }
 
 
