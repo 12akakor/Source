@@ -371,6 +371,17 @@ MouseDevice::_ControlThread()
 	float historyDeltaX = 0.0;
 	float historyDeltaY = 0.0;
 
+	// Middle-button scrolling for trackpoints: while the middle button is
+	// held, moving the stick scrolls instead of moving the pointer. A press
+	// and release without scrolling is still delivered as a middle click.
+	const bool trackpointScroll = fPath.FindFirst("trackpoint") >= 0;
+	static const int32 kScrollInertia = 10;
+		// stick motion counts per wheel step
+	bool middleHeld = false;
+	bool middleScrolled = false;
+	int32 scrollRestX = 0;
+	int32 scrollRestY = 0;
+
 	static const bigtime_t kTransferDelay = 1000000 / 125;
 		// 125 transfers per second should be more than enough
 #define USE_REGULAR_INTERVAL 1
@@ -445,6 +456,48 @@ MouseDevice::_ControlThread()
 			_UpdateSettings();
 		}
 
+		bool suppressMotion = false;
+		if (trackpointScroll) {
+			if ((movements.buttons & B_TERTIARY_MOUSE_BUTTON) != 0) {
+				movements.buttons &= ~B_TERTIARY_MOUSE_BUTTON;
+				if (!middleHeld) {
+					middleHeld = true;
+					middleScrolled = false;
+					scrollRestX = 0;
+					scrollRestY = 0;
+				}
+				if (movements.xdelta != 0 || movements.ydelta != 0) {
+					suppressMotion = true;
+					scrollRestX += movements.xdelta;
+					scrollRestY += movements.ydelta;
+					// Pushing the stick up scrolls up (negative wheel delta)
+					movements.wheel_xdelta += scrollRestX / kScrollInertia;
+					movements.wheel_ydelta += -(scrollRestY / kScrollInertia);
+					scrollRestX %= kScrollInertia;
+					scrollRestY %= kScrollInertia;
+					if (movements.wheel_xdelta != 0
+						|| movements.wheel_ydelta != 0) {
+						middleScrolled = true;
+					}
+				}
+			} else if (middleHeld) {
+				middleHeld = false;
+				if (!middleScrolled) {
+					BMessage* message = _BuildMouseMessage(B_MOUSE_DOWN,
+						movements.timestamp,
+						_RemapButtons(B_TERTIARY_MOUSE_BUTTON), 0, 0);
+					if (message != NULL) {
+						message->AddInt32("clicks", 1);
+						fTarget.EnqueueMessage(message);
+					}
+					message = _BuildMouseMessage(B_MOUSE_UP,
+						movements.timestamp, 0, 0, 0);
+					if (message != NULL)
+						fTarget.EnqueueMessage(message);
+				}
+			}
+		}
+
 		uint32 buttons = lastButtons ^ movements.buttons;
 
 		uint32 remappedButtons = _RemapButtons(movements.buttons);
@@ -479,7 +532,7 @@ MouseDevice::_ControlThread()
 			}
 		}
 
-		if (movements.xdelta != 0 || movements.ydelta != 0) {
+		if (!suppressMotion && (movements.xdelta != 0 || movements.ydelta != 0)) {
 			BMessage* message = _BuildMouseMessage(B_MOUSE_MOVED,
 				movements.timestamp, remappedButtons, deltaX, deltaY);
 			if (message != NULL)
