@@ -122,6 +122,56 @@ static int32 sGuestCommandInFlight;
 static int32 sGuestReinits;
 
 
+static bool
+ext_buttons_use_guest()
+{
+	// ThinkPad quirk (firstExtendedButton == 0): the buttons above the pad
+	// physically belong to the trackpoint. Report them through the
+	// pass-through device when one is published, as Linux does, so that
+	// holding a button and moving the stick looks like a drag coming from
+	// a single device.
+	return sTouchpadInfo.firstExtendedButton == 0
+		&& sPassthroughDevice->active
+		&& sPassthroughDevice->handle_int != NULL;
+}
+
+
+// interrupt context
+static void
+synaptics_ext_buttons_changed(const uint8 packet[])
+{
+	uint8 state = 0;
+	for (int button = 0; button < sTouchpadInfo.nExtendedButtons; button++) {
+		// Even buttons are in the X byte, odd buttons in the Y byte. For the
+		// ThinkPad buttons this yields PS/2 button order: left, right,
+		// middle.
+		if ((packet[4 + button % 2] >> (button / 2) & 0x1) != 0)
+			state |= 1 << button;
+	}
+
+	if (state == sTouchpadInfo.extendedButtonsState)
+		return;
+	sTouchpadInfo.extendedButtonsState = state;
+
+	if (!ext_buttons_use_guest())
+		return;
+
+	TRACE("SYNAPTICS: stick buttons 0x%02x -> pass-through device\n", state);
+
+	// The state is OR-ed into the buttons of every guest packet; a synthetic
+	// motionless packet makes the change take effect while the stick is not
+	// moving. The guest's packet index is 0 here: regular and wrapped guest
+	// packets only complete whole.
+	ps2_dev *guest = sPassthroughDevice;
+	int32 (*handleInt)(ps2_dev*) = guest->handle_int;
+	guest->extra_buttons = state & 7;
+	for (size_t i = 0; i < guest->packet_size; i++) {
+		guest->history[0].data = i == 0 ? 0x08 : 0;
+		handleInt(guest);
+	}
+}
+
+
 // interrupt context
 static void
 guest_reply_push(uint8 data)
@@ -280,9 +330,11 @@ get_synaptics_movment(synaptics_cookie *cookie, touchpad_movement *_event, bigti
 			event_buffer[0], event_buffer[1], event_buffer[2], event_buffer[3], event_buffer[4],
 			event_buffer[5], wValue);
 
-		if (wValue <= 1) {
+		if (event.zPressure < MIN_PRESSURE)
+			event.fingers = 0;
+		else if (wValue <= 1) {
 			// Multiple fingers detected, report the finger count.
-			event.fingers = 2 + wValue;
+			event.fingers = (1 << (2 + wValue)) - 1;
 
 			// There is a separate "v" value indicating the finger width
 			wValue0 = event_buffer[3] >> 1 & 1;
@@ -351,7 +403,7 @@ get_synaptics_movment(synaptics_cookie *cookie, touchpad_movement *_event, bigti
 
 			// Extended W = 2 - Finger state info
 			if (extendedWValue == 2) {
-				event.fingers = event_buffer[1] & 0x0F;
+				event.fingers = (1 << (event_buffer[1] & 0x0F)) - 1;
 				// TODO this event also provides primary and secondary finger indexes, what do
 				// these mean?
 			}
@@ -372,28 +424,10 @@ get_synaptics_movment(synaptics_cookie *cookie, touchpad_movement *_event, bigti
 		if (sTouchpadInfo.capMiddleButton || sTouchpadInfo.capFourButtons)
 			event.buttons |= ((event_buffer[0] ^ event_buffer[3]) & 0x01) << 2;
 
-		if (sTouchpadInfo.nExtendedButtons > 0) {
-			if (((event_buffer[0] ^ event_buffer[3]) & 0x02) != 0) {
-				// This packet includes extended buttons state. The state is
-				// only reported once when one of the buttons is pressed or
-				// released, so we must keep track of the buttons state.
-
-				// The values replace the lowest bits of the X and Y coordinates
-				// in the packet, we need to extract them from there.
-
-				bool pressed;
-				for (int button = 0; button < sTouchpadInfo.nExtendedButtons;
-						button++) {
-					// Even buttons are in the X byte
-					pressed = event_buffer[4 + button % 2] >> button / 2 & 0x1;
-					if (pressed) {
-						sTouchpadInfo.extendedButtonsState |= 1 << button;
-					} else {
-						sTouchpadInfo.extendedButtonsState &= ~(1 << button);
-					}
-				}
-			}
-
+		if (sTouchpadInfo.nExtendedButtons > 0 && !ext_buttons_use_guest()) {
+			// The state is tracked in synaptics_ext_buttons_changed(); when
+			// the buttons belong to a published trackpoint, they are
+			// reported through it instead of here.
 			event.buttons |= sTouchpadInfo.extendedButtonsState
 				<< sTouchpadInfo.firstExtendedButton;
 		}
@@ -1110,6 +1144,14 @@ synaptics_handle_int(ps2_dev *dev)
 			// packets turn into touchpad events.
 			TRACE("SYNAPTICS: dropping packet for inactive passthrough\n");
 			return B_HANDLED_INTERRUPT;
+		}
+
+		if (sTouchpadInfo.nExtendedButtons > 0
+			&& ((cookie->buffer[0] ^ cookie->buffer[3]) & 0x02) != 0) {
+			// This packet carries the extended buttons state. The pad only
+			// sends it when the state changes (packets without this flag
+			// mean "unchanged", not "released"), so track it here.
+			synaptics_ext_buttons_changed(cookie->buffer);
 		}
 
 		if (packet_buffer_write(cookie->synaptics_ring_buffer,

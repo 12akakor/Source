@@ -35,6 +35,10 @@ struct ps2_dev {
 	data_history	history[2];
 	ps2_dev*		parent_dev;
 	size_t			packet_size;
+	uint8			extra_buttons;
+		// buttons physically wired to another device but belonging to this
+		// one (ThinkPad trackpoint buttons reported by the touchpad); OR-ed
+		// into the button bits of every packet this device reports
 
 // functions
 	void			(*disconnect)(ps2_dev *);
