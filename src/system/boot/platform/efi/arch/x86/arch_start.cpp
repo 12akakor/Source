@@ -41,6 +41,17 @@ extern uint32_t arch_mmu_generate_post_efi_page_tables(size_t memoryMapSize,
 	efi_memory_descriptor *memoryMap, size_t descriptorSize,
 	uint32_t descriptorVersion);
 
+// From entry_long.S
+extern "C" void arch_enter_kernel_long(uint32_t pageDirectory, addr_t kernelArgs,
+	addr_t kernelEntry, addr_t kernelStackTop, struct gdt_idt_descr *gdtDescriptor);
+
+// From arch_long_mmu.cpp
+extern void arch_mmu_init_long_gdt(gdt_idt_descr &longBootGDTDescriptor);
+
+extern uint32_t arch_long_mmu_generate_post_efi_page_tables(size_t memoryMapSize,
+	efi_memory_descriptor *memoryMap, size_t descriptorSize,
+	uint32_t descriptorVersion);
+
 
 void
 arch_convert_kernel_args(void)
@@ -55,11 +66,19 @@ void
 arch_start_kernel(addr_t kernelEntry)
 {
 	gdt_idt_descr bootGDTDescriptor;
-	arch_mmu_init_gdt(bootGDTDescriptor);
+	void *enterKernelCode;
+	if (gIsHybridPlatform) {
+		// The loader is 32-bit, but the kernel is not: switch to long mode.
+		arch_mmu_init_long_gdt(bootGDTDescriptor);
+		enterKernelCode = (void *)arch_enter_kernel_long;
+	} else {
+		arch_mmu_init_gdt(bootGDTDescriptor);
+		enterKernelCode = (void *)arch_enter_kernel;
+	}
 
 	// Copy entry.S trampoline to lower 1M
 	enter_kernel_t enter_kernel = (enter_kernel_t)0xa000;
-	memcpy((void *)enter_kernel, (void *)arch_enter_kernel, B_PAGE_SIZE);
+	memcpy((void *)enter_kernel, enterKernelCode, B_PAGE_SIZE);
 
 	// Allocate virtual memory for kernel args
 	struct kernel_args *kernelArgs = NULL;
@@ -117,8 +136,14 @@ arch_start_kernel(addr_t kernelEntry)
 	}
 
 	// Generate page tables for use after ExitBootServices.
-	uint32_t pageDirectory = arch_mmu_generate_post_efi_page_tables(
-		memoryMapSize, memoryMap, descriptorSize, descriptorVersion);
+	uint32_t pageDirectory;
+	if (gIsHybridPlatform) {
+		pageDirectory = arch_long_mmu_generate_post_efi_page_tables(
+			memoryMapSize, memoryMap, descriptorSize, descriptorVersion);
+	} else {
+		pageDirectory = arch_mmu_generate_post_efi_page_tables(
+			memoryMapSize, memoryMap, descriptorSize, descriptorVersion);
+	}
 
 	// Attempt to fetch the memory map and exit boot services.
 	// This needs to be done in a loop, as ExitBootServices can change the
@@ -157,12 +182,27 @@ arch_start_kernel(addr_t kernelEntry)
 	serial_init();
 	serial_enable();
 
+#ifdef KERNEL_FIXUP_FOR_LONG_MODE
+	if (gIsHybridPlatform) {
+		// kernel_args_malloc() recorded the 32-bit kernel addresses of its
+		// chunks. All of them have been allocated by now.
+		for (uint32 i = 0; i < gKernelArgs.num_kernel_args_ranges; i++)
+			gKernelArgs.kernel_args_range[i].start += KERNEL_FIXUP_FOR_LONG_MODE;
+
+		// The 32-bit AP startup code can not enter a 64-bit kernel.
+		dprintf("Starting a 64-bit kernel from a 32-bit loader: SMP is not "
+			"supported yet, using one CPU.\n");
+		gKernelArgs.num_cpus = 1;
+	}
+#endif
+
 	// Copy final kernel args
 	// This should be the last step before jumping to the kernel
 	// as there are some fixups happening to kernel_args even in the last minute
 	memcpy((void *)kernelArgs, &gKernelArgs, sizeof(struct kernel_args));
 
-	smp_boot_other_cpus(pageDirectory, kernelEntry, virtKernelArgs);
+	if (!gIsHybridPlatform)
+		smp_boot_other_cpus(pageDirectory, kernelEntry, virtKernelArgs);
 
 	// Enter the kernel!
 	dprintf("enter_kernel(pageDirectory: 0x%08x, kernelArgs: 0x%08x, "
