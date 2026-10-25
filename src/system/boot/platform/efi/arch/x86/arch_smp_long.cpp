@@ -30,7 +30,7 @@ extern "C" void hybrid_smp_trampoline_args(void);
 extern "C" void hybrid_smp_trampoline_end(void);
 
 // From arch_long_mmu.cpp
-extern void arch_mmu_get_long_gdt(uint64 &base, uint16 &limit);
+extern void arch_mmu_get_long_gdt(uint64 *base, uint16 *limit);
 
 
 // Temporary GDT, used until the processor is in long mode.
@@ -98,7 +98,11 @@ prepare_hybrid_trampoline_args(uint64 trampolineCode, uint64 trampolineStack,
 	#undef COPY_ARRAY
 
 	// The boot GDT of the loader is in memory that is identity mapped.
-	arch_mmu_get_long_gdt(args->bootGDTR.base, args->bootGDTR.limit);
+	uint64 gdtBase;
+	uint16 gdtLimit;
+	arch_mmu_get_long_gdt(&gdtBase, &gdtLimit);
+	args->bootGDTR.base = gdtBase;
+	args->bootGDTR.limit = gdtLimit;
 	args->gdt64 = (uint64)(addr_t)&args->bootGDTR;
 
 	args->pml4 = pagedir;

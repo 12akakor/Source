@@ -113,10 +113,10 @@ arch_mmu_init_long_gdt(gdt_idt_descr &longBootGDTDescriptor)
 	It is in memory that is identity mapped.
 */
 void
-arch_mmu_get_long_gdt(uint64 &base, uint16 &limit)
+arch_mmu_get_long_gdt(uint64 *base, uint16 *limit)
 {
-	base = (uint64)(addr_t)sLongBootGDT;
-	limit = kLongBootGDTSegmentCount * sizeof(uint64) - 1;
+	*base = (uint64)(addr_t)sLongBootGDT;
+	*limit = kLongBootGDTSegmentCount * sizeof(uint64) - 1;
 }
 
 
