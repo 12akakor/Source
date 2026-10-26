@@ -1090,6 +1090,12 @@ thread_create_thread(const ThreadCreationAttributes& attributes, bool kernel)
 
 	bool debugNewThread = false;
 	if (!kernel) {
+		// A team that has given up syscalls has every thread filtered.
+		// restrict_syscalls() holds the team lock while it flags the threads
+		// it knows, so a thread created now cannot be missed.
+		if (atomic_get(&team->syscall_groups) != B_SYSCALL_GROUP_ALL)
+			atomic_or(&thread->flags, THREAD_FLAGS_SYSCALL_FILTERED);
+
 		// ensure there's a user_mutex_context, if this isn't the main thread
 		if (team->main_thread != NULL && team->user_mutex_context == NULL) {
 			status_t status = allocate_team_user_mutex_context(team);

@@ -257,6 +257,10 @@ FUNCTION(x86_64_sysenter32_entry):
 	movq	$0, THREAD_fault_handler(%r12)
 
 .Lperform_syscall:
+	testl	$THREAD_FLAGS_SYSCALL_FILTERED, THREAD_flags(%r12)
+	jnz		.Lsyscall_filter
+
+.Lsyscall_filter_done:
 	testl	$THREAD_FLAGS_DEBUGGER_INSTALLED, THREAD_flags(%r12)
 	jnz		.Lpre_syscall_debug
 
@@ -315,6 +319,26 @@ FUNCTION(x86_64_sysenter32_entry):
 	sti
 	sysexit
 
+
+.Lsyscall_filter:
+	// The team has restricted its syscalls (restrict_syscalls()). A 64 bit
+	// team can reach this entry by switching to the 32 bit code segment, so
+	// it is checked here as in the native entry. The arguments are on the
+	// stack, one 64 bit slot each.
+	movq	%r14, %rdi				// syscall number
+	movq	%rsp, %rsi
+	push	%rax					// syscall table entry
+	subq	$8, %rsp
+	call	syscall_filter_check
+	addq	$8, %rsp
+	movslq	%eax, %rdx
+	pop		%rax
+	testq	%rdx, %rdx
+	jz		.Lsyscall_filter_done
+	movq	%rdx, IFRAME_ax(%rbp)
+	shrq	$32, %rdx
+	movq	%rdx, IFRAME_dx(%rbp)
+	jmp		.Lsyscall_return
 
 .Lpre_syscall_debug:
 	// preserve registers

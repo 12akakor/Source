@@ -645,6 +645,12 @@ private:
 
 			ConditionVariable*	fCoreDumpCondition;
 									// protected by fLock
+
+public:
+	// B_SYSCALL_GROUP_* the team may still use (see restrict_syscalls());
+	// only ever shrinks. Last, so that adding it moves no other member for
+	// modules built against the previous layout.
+	int32			syscall_groups;
 };
 
 
@@ -864,5 +870,8 @@ using BKernel::ProcessGroupList;
 #endif
 #define	THREAD_FLAGS_OLD_SIGMASK			0x4000
 	// the thread has an old sigmask to be restored
+#define	THREAD_FLAGS_SYSCALL_FILTERED		0x8000
+	// the team has given up syscalls (restrict_syscalls()); every syscall
+	// goes through syscall_filter_check() first
 
 #endif	/* _KERNEL_THREAD_TYPES_H */

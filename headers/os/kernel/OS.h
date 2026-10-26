@@ -413,6 +413,35 @@ extern bigtime_t	set_alarm(bigtime_t when, uint32 flags);
 extern void			debugger(const char *message);
 extern int			disable_debugger(int state);
 
+/* Syscall restriction */
+
+enum {
+	B_SYSCALL_GROUP_BASIC		= 0x0001,
+		/* memory, the team's own threads, semaphores and areas, signals to
+		   itself, time, and descriptors the team already has */
+	B_SYSCALL_GROUP_FILE_READ	= 0x0002,
+		/* opening, reading and stat()ing by path, read-only */
+	B_SYSCALL_GROUP_FILE_WRITE	= 0x0004,
+		/* creating, writing, renaming and removing by path */
+	B_SYSCALL_GROUP_SOCKET		= 0x0008,
+		/* socket(), bind(), listen(), accept(), connect() */
+	B_SYSCALL_GROUP_PROCESS		= 0x0010,
+		/* fork(), exec(), load_image(), waiting for children */
+	B_SYSCALL_GROUP_PORT		= 0x0020,
+		/* every port syscall, and node and system monitoring */
+	B_SYSCALL_GROUP_AREA_SHARE	= 0x0040,
+		/* cloning and transferring areas */
+	B_SYSCALL_GROUP_DEBUG		= 0x0080,
+		/* debuggers and debugging other threads */
+	B_SYSCALL_GROUP_SYSTEM		= 0x0100,
+		/* everything else, including every syscall added later */
+
+	B_SYSCALL_GROUP_ALL			= 0x01ff
+};
+
+extern status_t		restrict_syscalls(uint32 allowedGroups);
+						/* irreversible; inherited by new teams */
+
 /* TODO: Remove. Temporary debug helper. */
 extern int			debug_printf(const char *format, ...)
 						__attribute__ ((format (__printf__, 1, 2)));
