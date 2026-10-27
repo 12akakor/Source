@@ -1440,6 +1440,29 @@ athp_key_change_default_tx_cb(struct ath10k *ar, struct athp_taskq_entry *e,
 	    "%s: def tx key=%d\n", __func__, ku->keyidx);
 }
 
+/*
+ * Wait (briefly) for queued transmit frames to complete. The firmware
+ * applies a new key as soon as it is installed, so a 4-way handshake
+ * message 4 still queued behind the key install gets sent encrypted, and
+ * the AP rejects it. mac80211 drains its queues before installing keys too.
+ */
+static void
+athp_key_update_drain_tx(struct ath10k *ar)
+{
+	int i, pending;
+
+	for (i = 0; i < 20; i++) {
+		ATHP_HTT_TX_LOCK(&ar->htt);
+		pending = ar->htt.num_pending_tx;
+		ATHP_HTT_TX_UNLOCK(&ar->htt);
+		if (pending == 0)
+			return;
+		pause("athpkey", MAX(1, hz / 100));
+	}
+	ath10k_warn(ar, "%s: %d frames still pending; installing key anyway\n",
+	    __func__, pending);
+}
+
 static void
 athp_key_update_cb(struct ath10k *ar, struct athp_taskq_entry *e, int flush)
 {
@@ -1454,6 +1477,9 @@ athp_key_update_cb(struct ath10k *ar, struct athp_taskq_entry *e, int flush)
 		return;
 
 	arvif = ath10k_vif_to_arvif(ku->vap);
+
+	if (ku->wmi_add)
+		athp_key_update_drain_tx(ar);
 
 	ATHP_CONF_LOCK(ar);
 	ret = ath10k_set_key(ar, ku->wmi_add, &arvif->av_vap,
