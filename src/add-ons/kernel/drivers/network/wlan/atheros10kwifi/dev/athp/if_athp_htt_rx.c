@@ -2727,7 +2727,8 @@ void ath10k_htt_t2h_msg_handler(struct ath10k *ar, struct athp_buf *skb)
 		TAILQ_INSERT_TAIL(&htt->rx_in_ord_compl_q, skb, next);
 		ATHP_HTT_RX_COMP_UNLOCK(htt);
 		taskqueue_enqueue(ar->workqueue, &htt->txrx_compl_task);
-		break;
+		/* The completion task owns and frees the buffer now. */
+		return;
 	}
 	case HTT_T2H_MSG_TYPE_TX_CREDIT_UPDATE_IND:
 		break;
