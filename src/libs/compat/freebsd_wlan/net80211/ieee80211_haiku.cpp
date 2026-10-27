@@ -151,11 +151,14 @@ start_wlan(device_t device)
 	if (ic == NULL)
 		return B_BAD_VALUE;
 
+	// Like FreeBSD's ieee80211_clone(), pass a zeroed BSSID rather than
+	// NULL: drivers may copy it unconditionally.
+	static const uint8_t zeroBssid[IEEE80211_ADDR_LEN] = {};
 	struct ieee80211vap* vap = ic->ic_vap_create(ic, "wlan",
 		device_get_unit(device),
 		IEEE80211_M_STA,		// mode
 		0,						// flags
-		NULL,					// BSSID
+		zeroBssid,				// BSSID
 		ic->ic_macaddr);		// MAC address
 
 	if (vap == NULL)
