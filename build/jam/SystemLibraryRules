@@ -75,6 +75,14 @@ rule TargetStaticLibsupc++ asPath
 	# Invoking with <asPath> = true will return the full library path.
 
 	if $(TARGET_PLATFORM) = haiku {
+		if $(TARGET_PACKAGING_ARCH) = arm && $(TARGET_BOOT_LIBSUPC++) {
+			# the one built by the cross-compiler: the prebuilt libsupc++.a
+			# requires a VFP with 32 double registers, and its unwinder
+			# decodes the type info references (TARGET2) differently than
+			# the linker writes them
+			return $(TARGET_BOOT_LIBSUPC++) ;
+		}
+
 		# return libsupc++.a from the gcc_syslibs_devel build feature.
 		local flags ;
 		if $(asPath) = true {
@@ -174,6 +182,12 @@ rule TargetLibgcc asPath
 			return [
 				BuildFeatureAttribute gcc_syslibs_devel : libgcc.a : $(flags)
 			] ;
+		} else if $(TARGET_PACKAGING_ARCH) = arm && $(TARGET_BOOT_LIBGCC) {
+			# the static libgcc.a built by the cross-compiler, see
+			# TargetKernelLibgcc
+			return [
+				BuildFeatureAttribute gcc_syslibs : libgcc_s.so.1 : $(flags)
+			] $(TARGET_BOOT_LIBGCC) ;
 		} else {
 			# return libgcc_s.so from the gcc_syslibs build feature and libgcc.a
 			# from the gcc_syslibs_devel build feature.
@@ -197,6 +211,11 @@ rule TargetStaticLibgcc asPath
 	# Invoking with <asPath> = true will return the full library path.
 
 	if $(TARGET_PLATFORM) = haiku {
+		if $(TARGET_PACKAGING_ARCH) = arm && $(TARGET_BOOT_LIBGCC) {
+			# see TargetKernelLibgcc
+			return $(TARGET_BOOT_LIBGCC) ;
+		}
+
 		# return libgcc.a from the gcc_syslibs_devel build feature.
 		local flags ;
 		if $(asPath) = true {
@@ -219,6 +238,12 @@ rule TargetKernelLibgcc asPath
 	# Invoking with <asPath> = true will return the full library path.
 
 	if $(TARGET_PLATFORM) = haiku {
+		if $(TARGET_KERNEL_ARCH) = arm && $(TARGET_BOOT_LIBGCC) {
+			# use the libgcc.a built by the cross-compiler, the prebuilt
+			# libgcc-kernel.a requires a VFP with 32 double registers
+			return $(TARGET_BOOT_LIBGCC) ;
+		}
+
 		# return libgcc-kernel.a from the gcc_syslibs_devel build feature.
 		local flags ;
 		if $(asPath) = true {
@@ -259,6 +284,10 @@ rule TargetBootLibgcc architecture : asPath
 		local flags ;
 		if $(asPath) = true {
 			flags += path ;
+		}
+		if $(architecture) = arm && $(TARGET_BOOT_LIBGCC) {
+			# see TargetKernelLibgcc
+			return $(TARGET_BOOT_LIBGCC) ;
 		}
 		if $(architecture) = arm {
 			return [
