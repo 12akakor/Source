@@ -534,8 +534,12 @@ AddOnMonitorHandler::_HandlePendingEntries()
 			continue;
 		}
 
-		// stat units are seconds, real_time_clock units are seconds
-		if (real_time_clock() - st.st_mtime < ADD_ON_STABLE_SECONDS) {
+		// stat units are seconds, real_time_clock units are seconds; an entry
+		// from the future means the clock is not set (e.g. a machine without
+		// a battery backed clock), not an entry that is still being written,
+		// which would otherwise never be taken
+		time_t age = real_time_clock() - st.st_mtime;
+		if (age >= 0 && age < ADD_ON_STABLE_SECONDS) {
 			// entry not stable, skip the entry for this pulse
 			iter++;
 			continue;
