@@ -19,7 +19,11 @@
 	This version of SoftSynth is a wrapper libfluidsynth.so.
  */
 
+#ifdef FLUIDLITE_ENABLED
 #include <fluidlite.h>
+#else
+#include "FluidliteStub.h"
+#endif
 #include <Midi.h>
 #include <SoundPlayer.h>
 #include <Synth.h>

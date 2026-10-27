@@ -42,7 +42,7 @@ rule HaikuImageGetSystemLibs
 			libgnu.so
 			libmail.so
 			libmedia.so
-			libmidi.so@fluidlite
+			libmidi.so
 			libmidi2.so
 			libnetwork.so
 			libpackage.so
