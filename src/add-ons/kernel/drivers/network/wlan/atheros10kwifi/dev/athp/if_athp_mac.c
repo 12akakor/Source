@@ -4162,7 +4162,8 @@ void ath10k_mac_handle_tx_pause_vdev(struct ath10k *ar, u32 vdev_id,
 						   &arg);
 	spin_unlock_bh(&ar->htt.tx_lock);
 #else
-	ath10k_warn(ar, "%s: TODO: called!\n", __func__);
+	ath10k_dbg(ar, ATH10K_DBG_MAC, "%s: TODO: vdev %u pause_id %u action %u\n",
+	    __func__, vdev_id, (unsigned)pause_id, (unsigned)action);
 #endif
 }
 
