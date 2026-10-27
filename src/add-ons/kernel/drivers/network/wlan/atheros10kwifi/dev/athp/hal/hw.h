@@ -95,6 +95,23 @@ enum qca6174_chip_id_rev {
 /* HTT id conflict fix for management frames over HTT */
 #define ATH10K_FW_API5_FILE		"firmware-5.bin"
 
+/*
+ * board-2.bin bundles the board data for many cards: after the magic come
+ * BOARD elements, each with a NAME and a DATA sub-element. Elements are
+ * a little-endian id and length followed by the data, padded to 4 bytes.
+ */
+#define ATH10K_BOARD_API2_FILE		"board-2.bin"
+#define ATH10K_BOARD_MAGIC		"QCA-ATH10K-BOARD"
+
+enum ath10k_bd_ie_type {
+	ATH10K_BD_IE_BOARD = 0,
+};
+
+enum ath10k_bd_ie_board_type {
+	ATH10K_BD_IE_BOARD_NAME = 0,
+	ATH10K_BD_IE_BOARD_DATA = 1,
+};
+
 #define ATH10K_FW_UTF_FILE		"utf.bin"
 
 /* includes also the null byte */

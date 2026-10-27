@@ -701,6 +701,144 @@ ath10k_core_fetch_generic_board_file(struct ath10k *ar)
 }
 
 static int
+ath10k_core_board_name(struct ath10k *ar, char *name, size_t name_len)
+{
+	device_t dev = ar->sc_dev;
+
+	if (ar->hif.bus != ATH10K_BUS_PCI)
+		return (-1);
+
+	scnprintf(name, name_len,
+	    "bus=pci,vendor=%04x,device=%04x,subsystem-vendor=%04x,"
+	    "subsystem-device=%04x",
+	    pci_get_vendor(dev), pci_get_device(dev), pci_get_subvendor(dev),
+	    pci_get_subdevice(dev));
+	return (0);
+}
+
+static uint32_t
+ath10k_bd_get32(const uint8_t *p)
+{
+	uint32_t v;
+
+	memcpy(&v, p, sizeof(v));
+	return (le32toh(v));
+}
+
+/*
+ * Look for this card's entry in a BOARD element; on a match point
+ * board_data/board_len at its DATA sub-element.
+ */
+static bool
+ath10k_core_parse_bd_board(struct ath10k *ar, const char *name,
+    const uint8_t *buf, size_t buf_len)
+{
+	const uint8_t *board_data = NULL;
+	size_t board_len = 0;
+	bool name_match = false;
+
+	while (buf_len >= 8) {
+		uint32_t id = ath10k_bd_get32(buf);
+		uint32_t len = ath10k_bd_get32(buf + 4);
+
+		buf += 8;
+		buf_len -= 8;
+		if (len > buf_len)
+			return (false);
+
+		switch (id) {
+		case ATH10K_BD_IE_BOARD_NAME:
+			name_match = (len == strlen(name) &&
+			    memcmp(buf, name, len) == 0);
+			break;
+		case ATH10K_BD_IE_BOARD_DATA:
+			board_data = buf;
+			board_len = len;
+			break;
+		}
+
+		len = roundup(len, 4);
+		if (len > buf_len)
+			break;
+		buf += len;
+		buf_len -= len;
+	}
+
+	if (!name_match || board_data == NULL)
+		return (false);
+
+	ar->board_data = board_data;
+	ar->board_len = board_len;
+	return (true);
+}
+
+static int
+ath10k_core_fetch_board_data_api_2(struct ath10k *ar)
+{
+	char name[100];
+	const uint8_t *buf;
+	size_t buf_len, magic_len;
+
+	if (ath10k_core_board_name(ar, name, sizeof(name)) != 0)
+		return (-1);
+
+	ar->board = ath10k_fetch_fw_file(ar, ar->hw_params.fw.dir,
+	    ATH10K_BOARD_API2_FILE);
+	if (ar->board == NULL)
+		return (-1);
+
+	buf = ar->board->data;
+	buf_len = ar->board->datasize;
+
+	/* The magic includes its terminating NUL and is padded to 4 bytes. */
+	magic_len = strlen(ATH10K_BOARD_MAGIC) + 1;
+	if (buf_len < magic_len ||
+	    memcmp(buf, ATH10K_BOARD_MAGIC, magic_len) != 0) {
+		ath10k_warn(ar, "invalid board-2 magic\n");
+		goto fail;
+	}
+	magic_len = roundup(magic_len, 4);
+	if (magic_len > buf_len)
+		goto fail;
+	buf += magic_len;
+	buf_len -= magic_len;
+
+	while (buf_len >= 8) {
+		uint32_t id = ath10k_bd_get32(buf);
+		uint32_t len = ath10k_bd_get32(buf + 4);
+
+		buf += 8;
+		buf_len -= 8;
+		if (len > buf_len) {
+			ath10k_warn(ar, "truncated board-2 element\n");
+			goto fail;
+		}
+
+		if (id == ATH10K_BD_IE_BOARD &&
+		    ath10k_core_parse_bd_board(ar, name, buf, len)) {
+			ar->spec_board_loaded = false;
+			ath10k_dbg(ar, ATH10K_DBG_BOOT,
+			    "found board-2 entry for %s\n", name);
+			return (0);
+		}
+
+		len = roundup(len, 4);
+		if (len > buf_len)
+			break;
+		buf += len;
+		buf_len -= len;
+	}
+
+	ath10k_info(ar, "no board-2 entry for %s\n", name);
+fail:
+	firmware_put(ar->board, FIRMWARE_UNLOAD);
+	ar->board = NULL;
+	ar->board_data = NULL;
+	ar->board_len = 0;
+	return (-1);
+}
+
+static int
 ath10k_core_fetch_board_file(struct ath10k *ar)
 {
 	int ret;
@@ -719,6 +857,9 @@ ath10k_core_fetch_board_file(struct ath10k *ar)
 	}
 
 generic:
+	if (ath10k_core_fetch_board_data_api_2(ar) == 0)
+		return 0;
+
 	ret = ath10k_core_fetch_generic_board_file(ar);
 	if (ret) {
 		ath10k_err(ar, "failed to fetch generic board data: %d\n", ret);
