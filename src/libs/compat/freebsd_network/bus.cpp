@@ -48,6 +48,7 @@ struct internal_intr {
 };
 
 static int32 intr_wrapper(void *data);
+static int32 filter_wrapper(void *data);
 
 
 static area_id
@@ -332,6 +333,25 @@ intr_wrapper(void *data)
 }
 
 
+// Used when a driver passes both a filter and a handler: as on FreeBSD, the
+// filter runs in interrupt context and defers to the handler thread by
+// returning FILTER_SCHEDULE_THREAD.
+static int32
+filter_wrapper(void *data)
+{
+	struct internal_intr *intr = (struct internal_intr *)data;
+
+	int result = intr->filter(intr->arg);
+	if (result == FILTER_STRAY)
+		return B_UNHANDLED_INTERRUPT;
+	if ((result & FILTER_SCHEDULE_THREAD) == 0)
+		return B_HANDLED_INTERRUPT;
+
+	release_sem_etc(intr->sem, 1, B_DO_NOT_RESCHEDULE);
+	return B_INVOKE_SCHEDULER;
+}
+
+
 // Private to the linked driver: only its active threaded handler may call.
 // free_internal_intr() joins that thread before releasing this cookie.
 extern "C" void
@@ -372,7 +392,8 @@ intr_handler(void *data)
 			release_sem_etc(intr->sem, 1, B_DO_NOT_RESCHEDULE);
 			continue;
 		}
-		HAIKU_REENABLE_INTERRUPTS(intr->dev);
+		if (intr->filter == NULL)
+			HAIKU_REENABLE_INTERRUPTS(intr->dev);
 	}
 
 	return 0;
@@ -415,7 +436,7 @@ bus_setup_intr(device_t dev, struct resource *res, int flags,
 	intr->thread = -1;
 	intr->continuePolling = false;
 
-	if (filter != NULL) {
+	if (filter != NULL && handler == NULL) {
 		status = install_io_interrupt_handler(intr->irq,
 			(interrupt_handler)intr->filter, intr->arg, 0);
 	} else {
@@ -438,7 +459,7 @@ bus_setup_intr(device_t dev, struct resource *res, int flags,
 		}
 
 		status = install_io_interrupt_handler(intr->irq,
-			intr_wrapper, intr, 0);
+			filter != NULL ? filter_wrapper : intr_wrapper, intr, 0);
 	}
 
 	if (status == B_OK && res->r_bustag == BUS_SPACE_TAG_MSI) {
@@ -488,11 +509,12 @@ bus_teardown_intr(device_t dev, struct resource *res, void *arg)
 		gPci->disable_msi(info->bus, info->device, info->function);
 	}
 
-	if (intr->filter != NULL) {
+	if (intr->filter != NULL && intr->handler == NULL) {
 		remove_io_interrupt_handler(intr->irq, (interrupt_handler)intr->filter,
 			intr->arg);
 	} else {
-		remove_io_interrupt_handler(intr->irq, intr_wrapper, intr);
+		remove_io_interrupt_handler(intr->irq,
+			intr->filter != NULL ? filter_wrapper : intr_wrapper, intr);
 	}
 
 	free_internal_intr(intr);
