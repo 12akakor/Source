@@ -812,7 +812,7 @@ athp_pci_attach(device_t dev)
 	callout_init_mtx(&ar->scan.timeout, &ar->sc_data_mtx, 0);
 
 	ar_pci->pipe_taskq = taskqueue_create("athp pipe taskq", M_NOWAIT,
-	    NULL, ar_pci);
+	    taskqueue_thread_enqueue, &ar_pci->pipe_taskq);
 	(void) taskqueue_start_threads(&ar_pci->pipe_taskq, 1, PI_NET, "%s pipe taskq",
 	    device_get_nameunit(dev));
 	if (ar_pci->pipe_taskq == NULL) {
