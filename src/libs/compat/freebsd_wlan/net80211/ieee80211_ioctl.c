@@ -234,7 +234,30 @@ ieee80211_ioctl_getstastats(struct ieee80211vap *vap, struct ieee80211req *ireq)
 struct scanreq {
 	struct ieee80211req_scan_result *sr;
 	size_t space;
+	const struct ieee80211_scan_state *ss;
+	int matchpass;		/* 1: only requested SSIDs, 0: only the rest */
 };
+
+/*
+ * Whether this entry carries one of the SSIDs of the last scan request.
+ * Those are returned first, so that a reader with a buffer too small for
+ * a crowded scan cache (wpa_supplicant uses 24 KB) still sees the networks
+ * it asked for.
+ */
+static int
+scan_entry_requested(const struct ieee80211_scan_state *ss,
+    const struct ieee80211_scan_entry *se)
+{
+	int i;
+
+	for (i = 0; i < ss->ss_nssid; i++) {
+		if (ss->ss_ssid[i].len == se->se_ssid[1] &&
+		    memcmp(ss->ss_ssid[i].ssid, se->se_ssid + 2,
+		    se->se_ssid[1]) == 0)
+			return 1;
+	}
+	return 0;
+}
 
 static size_t
 scan_space(const struct ieee80211_scan_entry *se, int *ielen)
@@ -268,6 +291,9 @@ get_scan_result(void *arg, const struct ieee80211_scan_entry *se)
 	struct ieee80211req_scan_result *sr;
 	int ielen, len, nr, nxr;
 	uint8_t *cp;
+
+	if (scan_entry_requested(req->ss, se) != req->matchpass)
+		return;
 
 	len = scan_space(se, &ielen);
 	if (len > req->space)
@@ -337,6 +363,10 @@ ieee80211_ioctl_getscanresults(struct ieee80211vap *vap,
 		if (p == NULL)
 			return ENOMEM;
 		req.sr = p;
+		req.ss = vap->iv_ic->ic_scan;
+		req.matchpass = 1;
+		ieee80211_scan_iterate(vap, get_scan_result, &req);
+		req.matchpass = 0;
 		ieee80211_scan_iterate(vap, get_scan_result, &req);
 		ireq->i_len = space - req.space;
 		error = copyout(p, ireq->i_data, ireq->i_len);
