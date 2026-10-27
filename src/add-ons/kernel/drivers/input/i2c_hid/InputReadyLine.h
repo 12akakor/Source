@@ -28,6 +28,7 @@ public:
 private:
 			area_id				fArea;
 			volatile uint32*	fPadConfig;
+			uint32				fStateMask;
 			bool				fActiveLow;
 };
 
