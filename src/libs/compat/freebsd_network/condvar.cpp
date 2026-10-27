@@ -75,7 +75,11 @@ cv_timedwait(struct cv* variable, struct mtx* mutex, int timeout)
 {
 	const uint32 flags = timeout ? B_RELATIVE_TIMEOUT : 0;
 	const bigtime_t bigtimeout = TICKS_2_USEC(timeout);
-	return cv_wait_etc(variable, mutex, flags, bigtimeout);
+	int status = cv_wait_etc(variable, mutex, flags, bigtimeout);
+	// FreeBSD reports a timeout as EWOULDBLOCK, and drivers test for it.
+	if (status == B_TIMED_OUT)
+		return EWOULDBLOCK;
+	return status;
 }
 
 
