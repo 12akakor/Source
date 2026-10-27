@@ -1811,7 +1811,7 @@ ath10k_core_unregister(struct ath10k *ar)
 {
 
 	device_printf(ar->sc_dev, "%s: TODO\n", __func__);
-	taskqueue_drain(ar->workqueue, &ar->register_work);
+	taskqueue_drain(ar->attach_workqueue, &ar->register_work);
 
 	if (!test_bit(ATH10K_FLAG_CORE_REGISTERED, &ar->dev_flags))
 		return;
