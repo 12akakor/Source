@@ -623,7 +623,7 @@ ath10k_htt_tx(struct ath10k_htt *htt, struct athp_buf *msdu)
 	struct ieee80211_frame *hdr;
 	struct ath10k_skb_cb *skb_cb = ATH10K_SKB_CB(msdu);
 	struct ath10k_hif_sg_item sg_items[2];
-	struct htt_data_tx_desc_frag *frags;
+	struct htt_data_tx_desc_frag *frags = NULL;
 	u8 vdev_id = skb_cb->vdev_id;
 	u8 tid = skb_cb->htt.tid;
 	int prefetch_len;
@@ -794,9 +794,11 @@ ath10k_htt_tx(struct ath10k_htt *htt, struct athp_buf *msdu)
 		   ether_sprintf(skb_cb->ni->ni_macaddr),
 		   (unsigned) flags0, (unsigned) flags1, mbuf_skb_len(msdu->m), msdu_id, frags_paddr,
 		   (u32)msdu->mb.paddr, vdev_id, tid, skb_cb->htt.freq);
-	ath10k_dbg(ar, ATH10K_DBG_HTT | ATH10K_DBG_HTT_TX,
-		    "htt tx %6D: frags[0] paddr/len 0x%08x/0x%08x frags[1] paddr/len 0x%08x/0x%08x\n",
-		   skb_cb->ni->ni_macaddr, ":",
+	/* frags is only set up for frames sent with fragment descriptors */
+	if (frags != NULL)
+		ath10k_dbg(ar, ATH10K_DBG_HTT | ATH10K_DBG_HTT_TX,
+		    "htt tx %s: frags[0] paddr/len 0x%08x/0x%08x frags[1] paddr/len 0x%08x/0x%08x\n",
+		    ether_sprintf(skb_cb->ni->ni_macaddr),
 		    le32_to_cpu(frags[0].dword_addr.paddr),
 		    le32_to_cpu(frags[0].dword_addr.len),
 		    le32_to_cpu(frags[1].dword_addr.paddr),
