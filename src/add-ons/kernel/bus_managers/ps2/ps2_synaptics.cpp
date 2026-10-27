@@ -13,6 +13,7 @@
 
 #include "ps2_synaptics.h"
 
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -97,6 +98,139 @@ const char* kSynapticsPath[4] = {
 
 static touchpad_info sTouchpadInfo;
 static ps2_dev *sPassthroughDevice = &ps2_device[PS2_DEVICE_SYN_PASSTHROUGH];
+
+// When the guest last ran its self-test (sent AA), and how many self-test
+// announces arrived in place of an ack or a reply (the "bounce": the pad
+// synthesizes AA 00 ~84 ms after delivering a byte it could not handle).
+static bigtime_t sGuestSelfTestTime;
+static int32 sGuestBounces;
+// A real ack is in within ~4 ms, the pad's synthetic AA 00 within ~90 ms.
+static const bigtime_t kPassthroughReplyTimeout = 300000;
+
+// Asynchronous pass-through: the guest's reply bytes arrive wrapped in
+// pass-through packets through the interrupt path, one guest byte per
+// packet (byte 1), while a command is in flight; only an enabled, idle
+// guest streams 3-byte motion data (packet bytes 1, 4 and 5). The pad
+// forwards the guest's bytes only while it is disabled itself, so commands
+// are wrapped in pad disable/enable.
+static mutex sGuestCommandLock = MUTEX_INITIALIZER("ps2 guest command");
+static sem_id sGuestReplySem = -1;
+static uint8 sGuestReplyBuffer[16];
+static int32 sGuestReplyWrite;
+static int32 sGuestReplyRead;
+static int32 sGuestCommandInFlight;
+static int32 sGuestReinits;
+
+
+static bool
+ext_buttons_use_guest()
+{
+	// ThinkPad quirk (firstExtendedButton == 0): the buttons above the pad
+	// physically belong to the trackpoint. Report them through the
+	// pass-through device when one is published, as Linux does, so that
+	// holding a button and moving the stick looks like a drag coming from
+	// a single device.
+	return sTouchpadInfo.firstExtendedButton == 0
+		&& sPassthroughDevice->active
+		&& sPassthroughDevice->handle_int != NULL;
+}
+
+
+// interrupt context
+static void
+synaptics_ext_buttons_changed(const uint8 packet[])
+{
+	uint8 state = 0;
+	for (int button = 0; button < sTouchpadInfo.nExtendedButtons; button++) {
+		// Even buttons are in the X byte, odd buttons in the Y byte. For the
+		// ThinkPad buttons this yields PS/2 button order: left, right,
+		// middle.
+		if ((packet[4 + button % 2] >> (button / 2) & 0x1) != 0)
+			state |= 1 << button;
+	}
+
+	if (state == sTouchpadInfo.extendedButtonsState)
+		return;
+	sTouchpadInfo.extendedButtonsState = state;
+
+	if (!ext_buttons_use_guest())
+		return;
+
+	TRACE("SYNAPTICS: stick buttons 0x%02x -> pass-through device\n", state);
+
+	// The state is OR-ed into the buttons of every guest packet; a synthetic
+	// motionless packet makes the change take effect while the stick is not
+	// moving. The guest's packet index is 0 here: regular and wrapped guest
+	// packets only complete whole.
+	ps2_dev *guest = sPassthroughDevice;
+	int32 (*handleInt)(ps2_dev*) = guest->handle_int;
+	guest->extra_buttons = state & 7;
+	for (size_t i = 0; i < guest->packet_size; i++) {
+		guest->history[0].data = i == 0 ? 0x08 : 0;
+		handleInt(guest);
+	}
+}
+
+
+// interrupt context
+static void
+guest_reply_push(uint8 data)
+{
+	if (sGuestReplySem < 0)
+		return;
+	int32 write = atomic_get(&sGuestReplyWrite);
+	int32 next = (write + 1) % (int32)sizeof(sGuestReplyBuffer);
+	if (next == atomic_get(&sGuestReplyRead))
+		return;
+	sGuestReplyBuffer[write] = data;
+	atomic_set(&sGuestReplyWrite, next);
+	release_sem_etc(sGuestReplySem, 1, B_DO_NOT_RESCHEDULE);
+}
+
+
+static status_t
+guest_reply_pop(uint8 *data, bigtime_t timeout)
+{
+	status_t status = acquire_sem_etc(sGuestReplySem, 1, B_RELATIVE_TIMEOUT,
+		timeout);
+	if (status != B_OK)
+		return status;
+	int32 read = atomic_get(&sGuestReplyRead);
+	*data = sGuestReplyBuffer[read];
+	atomic_set(&sGuestReplyRead,
+		(read + 1) % (int32)sizeof(sGuestReplyBuffer));
+	return B_OK;
+}
+
+
+// A stalled pad delivers its packet bytes ~10 ms apart (one packet every
+// ~550 ms) and the guest goes dead with it; a guest reset-disable + enable
+// recovers it (see synaptics_stall_probe()).
+static bigtime_t sPacketStart;
+static bigtime_t sStallQuietUntil;
+static int32 sSlowPackets;
+static int32 sStallRecoveries;
+static bool sStallPending;
+
+
+// interrupt context, on every completed pad packet
+static void
+check_stall(void)
+{
+	bigtime_t now = system_time();
+	// normal packets take 7-11 ms, stalled ones ~56 ms
+	bigtime_t span = now - sPacketStart;
+	if (sPassthroughDevice->active && span > 30000 && now > sStallQuietUntil) {
+		if (++sSlowPackets >= 3 && !sStallPending && sStallRecoveries < 3) {
+			sStallPending = true;
+			sStallRecoveries++;
+			INFO("SYNAPTICS: pad stall detected (packet span %" B_PRIdBIGTIME
+				" us), recovering\n", span);
+			ps2_service_notify_stall_probe(sPassthroughDevice);
+		}
+	} else
+		sSlowPackets = 0;
+}
 
 
 static status_t
@@ -196,9 +330,11 @@ get_synaptics_movment(synaptics_cookie *cookie, touchpad_movement *_event, bigti
 			event_buffer[0], event_buffer[1], event_buffer[2], event_buffer[3], event_buffer[4],
 			event_buffer[5], wValue);
 
-		if (wValue <= 1) {
+		if (event.zPressure < MIN_PRESSURE)
+			event.fingers = 0;
+		else if (wValue <= 1) {
 			// Multiple fingers detected, report the finger count.
-			event.fingers = 2 + wValue;
+			event.fingers = (1 << (2 + wValue)) - 1;
 
 			// There is a separate "v" value indicating the finger width
 			wValue0 = event_buffer[3] >> 1 & 1;
@@ -267,7 +403,7 @@ get_synaptics_movment(synaptics_cookie *cookie, touchpad_movement *_event, bigti
 
 			// Extended W = 2 - Finger state info
 			if (extendedWValue == 2) {
-				event.fingers = event_buffer[1] & 0x0F;
+				event.fingers = (1 << (event_buffer[1] & 0x0F)) - 1;
 				// TODO this event also provides primary and secondary finger indexes, what do
 				// these mean?
 			}
@@ -288,28 +424,10 @@ get_synaptics_movment(synaptics_cookie *cookie, touchpad_movement *_event, bigti
 		if (sTouchpadInfo.capMiddleButton || sTouchpadInfo.capFourButtons)
 			event.buttons |= ((event_buffer[0] ^ event_buffer[3]) & 0x01) << 2;
 
-		if (sTouchpadInfo.nExtendedButtons > 0) {
-			if (((event_buffer[0] ^ event_buffer[3]) & 0x02) != 0) {
-				// This packet includes extended buttons state. The state is
-				// only reported once when one of the buttons is pressed or
-				// released, so we must keep track of the buttons state.
-
-				// The values replace the lowest bits of the X and Y coordinates
-				// in the packet, we need to extract them from there.
-
-				bool pressed;
-				for (int button = 0; button < sTouchpadInfo.nExtendedButtons;
-						button++) {
-					// Even buttons are in the X byte
-					pressed = event_buffer[4 + button % 2] >> button / 2 & 0x1;
-					if (pressed) {
-						sTouchpadInfo.extendedButtonsState |= 1 << button;
-					} else {
-						sTouchpadInfo.extendedButtonsState &= ~(1 << button);
-					}
-				}
-			}
-
+		if (sTouchpadInfo.nExtendedButtons > 0 && !ext_buttons_use_guest()) {
+			// The state is tracked in synaptics_ext_buttons_changed(); when
+			// the buttons belong to a published trackpoint, they are
+			// reported through it instead of here.
 			event.buttons |= sTouchpadInfo.extendedButtonsState
 				<< sTouchpadInfo.firstExtendedButton;
 		}
@@ -440,6 +558,69 @@ query_capability(ps2_dev *dev)
 //	#pragma mark - exported functions
 
 
+static int32 sGuestDetectRetries;
+
+
+static int32
+guest_reprobe_thread(void *data)
+{
+	// Delayed off the ps2 service thread, so queued hot-plug events keep
+	// being processed during the wait.
+	snooze(5000000);
+	ps2_service_notify_device_republish((ps2_dev*)data);
+	return 0;
+}
+
+
+void
+synaptics_guest_detect_failed(ps2_dev *dev)
+{
+	// In some boots the pad answers every guest command with the synthetic
+	// AA 00 for a while (the "bad window"). Re-probe the guest a few times;
+	// the window often passes.
+	int32 attempt = atomic_add(&sGuestDetectRetries, 1);
+	if (attempt >= 3) {
+		atomic_add(&sGuestDetectRetries, -1);
+		return;
+	}
+	INFO("SYNAPTICS: guest detection failed, re-probe %" B_PRId32 " in 5 s\n",
+		attempt + 1);
+	thread_id thread = spawn_kernel_thread(guest_reprobe_thread,
+		"ps2 guest re-probe", B_LOW_PRIORITY, dev);
+	if (thread >= 0)
+		resume_thread(thread);
+}
+
+
+void
+synaptics_guest_standard_fallback(ps2_dev *dev)
+{
+	// The guest was detected as a plain mouse. With bounces in this boot
+	// that usually means the TrackPoint's identification commands fell
+	// into a bad window; re-probe later as for a failed detection.
+	if (sGuestBounces > 0)
+		synaptics_guest_detect_failed(dev);
+}
+
+
+bool
+synaptics_hot_plug_is_pt_payload(ps2_dev *dev)
+{
+	// An aa, 00 byte pair on the pad can be the payload of a pass-through
+	// packet carrying the guest's self-test announce, not a reset announce
+	// of the pad itself. It is payload only when the aa sits at position 1
+	// of a pass-through packet and the 00 is about to be stored at
+	// position 2; a genuine pad reset announce elsewhere mid-packet still
+	// triggers the hot-plug recovery.
+	if (dev->handle_int != &synaptics_handle_int || dev->cookie == NULL)
+		return false;
+	synaptics_cookie *cookie = (synaptics_cookie*)dev->cookie;
+	return cookie->packet_index == 2
+		&& (cookie->buffer[0] & 0xFC) == 0x84
+		&& cookie->buffer[1] == PS2_CMD_TEST_PASSED;
+}
+
+
 status_t
 synaptics_pass_through_set_packet_size(ps2_dev *dev, uint8 size)
 {
@@ -471,65 +652,170 @@ synaptics_pass_through_set_packet_size(ps2_dev *dev, uint8 size)
 }
 
 
-status_t
-passthrough_command(ps2_dev *dev, uint8 cmd, const uint8 *out, int outCount,
-	uint8 *in, int inCount, bigtime_t timeout)
+static status_t
+passthrough_send_byte(ps2_dev *padDev, uint8 val, bigtime_t timeout)
 {
-	status_t status;
+	// Deliver one byte to the guest: sliced E8 arguments carrying the byte,
+	// then the magic sample rate that makes the pad forward it.
 	uint8 passThroughCmd = SYN_PASSTHROUGH_CMD;
-	uint8 val;
-	uint32 passThroughInCount = (inCount + 1) * 6;
-	uint8 passThroughIn[passThroughInCount];
-	int8 i;
+	status_t status = send_touchpad_arg_timeout(padDev, val, timeout);
+	if (status != B_OK)
+		return status;
+	return ps2_dev_command_timeout(padDev, PS2_CMD_SET_SAMPLE_RATE,
+		&passThroughCmd, 1, NULL, 0, timeout);
+}
 
-	TRACE("SYNAPTICS: passthrough command 0x%x\n", cmd);
 
-	status = ps2_dev_command(dev->parent_dev, PS2_CMD_DISABLE, NULL, 0,
-		NULL, 0);
+static status_t
+guest_wait_ack(uint8 cmd)
+{
+	// The guest acks every byte it receives. Guest motion bytes can be
+	// interleaved while it is streaming; skip them.
+	bigtime_t deadline = system_time() + kPassthroughReplyTimeout;
+	uint8 reply;
+
+	while (true) {
+		bigtime_t remaining = deadline - system_time();
+		if (remaining <= 0)
+			return B_TIMED_OUT;
+		status_t status = guest_reply_pop(&reply, remaining);
+		if (status != B_OK)
+			return status;
+		if (reply == PS2_REPLY_ACK)
+			return B_OK;
+		if (reply == PS2_CMD_TEST_PASSED) {
+			// the pad answered with a self-test announce instead of the
+			// guest's ack (the "bounce"); a 00 follows in its own packet
+			sGuestBounces++;
+			sGuestSelfTestTime = system_time();
+			guest_reply_pop(&reply, 100000);
+			TRACE("SYNAPTICS: guest bounced 0x%02x\n", cmd);
+			return B_IO_ERROR;
+		}
+		if (reply == PS2_REPLY_RESEND || reply == PS2_REPLY_ERROR) {
+			TRACE("SYNAPTICS: guest replied 0x%02x to 0x%02x\n", reply, cmd);
+			return B_IO_ERROR;
+		}
+	}
+}
+
+
+static status_t
+passthrough_command_once(ps2_dev *dev, uint8 cmd, const uint8 *out,
+	int outCount, uint8 *in, int inCount, bigtime_t timeout)
+{
+	ps2_dev *padDev = dev->parent_dev;
+	bigtime_t padTimeout = min_c(timeout, 500000);
+	status_t status = B_OK;
+	status_t enableStatus;
+	uint8 stale;
+	int i;
+
+	// flush stale guest bytes
+	while (guest_reply_pop(&stale, 0) == B_OK)
+		;
+
+	// The pad only forwards the guest's bytes while it is disabled itself
+	// (with the pad enabled the guest's replies never arrive, verified by
+	// a byte-level dump), so wrap the command in disable/enable.
+	status = ps2_dev_command_timeout(padDev, PS2_CMD_DISABLE, NULL, 0, NULL, 0,
+		padTimeout);
 	if (status != B_OK)
 		return status;
 
-	for (i = -1; i < outCount; i++) {
-		if (i == -1)
-			val = cmd;
-		else
-			val = out[i];
-		status = send_touchpad_arg_timeout(dev->parent_dev, val, timeout);
+	atomic_set(&sGuestCommandInFlight, 1);
+
+	for (i = -1; status == B_OK && i < outCount; i++) {
+		status = passthrough_send_byte(padDev, i == -1 ? cmd : out[i],
+			padTimeout);
 		if (status != B_OK)
-			goto finalize;
-		if (i != outCount -1) {
-			status = ps2_dev_command_timeout(dev->parent_dev,
-				PS2_CMD_SET_SAMPLE_RATE, &passThroughCmd, 1, NULL, 0, timeout);
-			if (status != B_OK)
-				goto finalize;
+			break;
+		status = guest_wait_ack(cmd);
+	}
+
+	for (i = 0; status == B_OK && i < inCount; i++) {
+		status = guest_reply_pop(&in[i], cmd == PS2_CMD_RESET
+			? timeout : kPassthroughReplyTimeout);
+		if (status == B_OK && cmd != PS2_CMD_RESET
+			&& in[i] == PS2_CMD_TEST_PASSED) {
+			// The guest reset itself right after acking (seen as
+			// "FA, then AA 00 ~80 ms later"): a self-test announce, not
+			// reply data. None of the guest commands used here have AA in
+			// a real reply. Drop the following 00 and retry the command.
+			sGuestBounces++;
+			sGuestSelfTestTime = system_time();
+			guest_reply_pop(&in[i], 100000);
+			TRACE("SYNAPTICS: self-test announce in 0x%02x reply\n", cmd);
+			status = B_IO_ERROR;
 		}
 	}
-	status = ps2_dev_command_timeout(dev->parent_dev, PS2_CMD_SET_SAMPLE_RATE,
-		&passThroughCmd, 1, passThroughIn, passThroughInCount, timeout);
-	if (status != B_OK)
-		goto finalize;
 
-	for (i = 0; i < inCount + 1; i++) {
-		uint8 *inPointer = &passThroughIn[i * 6];
-		if (!IS_SYN_PT_PACKAGE(inPointer)) {
-			TRACE("SYNAPTICS: not a pass throught package\n");
-			goto finalize;
+	atomic_set(&sGuestCommandInFlight, 0);
+
+	enableStatus = ps2_dev_command_timeout(padDev, PS2_CMD_ENABLE, NULL, 0,
+		NULL, 0, padTimeout);
+	return status != B_OK ? status : enableStatus;
+}
+
+
+status_t
+passthrough_command(ps2_dev *dev, uint8 cmd, const uint8 *out, int outCount,
+	uint8 *in, int in_count, bigtime_t timeout)
+{
+	status_t status = B_ERROR;
+	int tries;
+
+	if (sGuestReplySem < 0)
+		return B_NO_INIT;
+
+	mutex_lock(&sGuestCommandLock);
+
+	for (tries = 0; tries < 3; tries++) {
+		if (tries > 0)
+			snooze(100000);
+		status = passthrough_command_once(dev, cmd, out, outCount, in,
+			in_count, timeout);
+		if (status == B_OK)
+			break;
+	}
+
+	TRACE("SYNAPTICS: passthrough 0x%02x: %s\n", cmd, strerror(status));
+	if (status != B_OK) {
+		INFO("SYNAPTICS: passthrough command 0x%02x failed: %s\n", cmd,
+			strerror(status));
+		if (cmd == PS2_CMD_ENABLE && dev->active) {
+			// The published guest cannot be enabled (bad window); without
+			// it the device stays dead for the session. Re-probe later.
+			synaptics_guest_detect_failed(dev);
 		}
-		if (i == 0)
-			continue;
-
-		in[i - 1] = passThroughIn[i * 6 + 1];
 	}
 
-finalize:	
-	status_t statusOfEnable = ps2_dev_command(dev->parent_dev, PS2_CMD_ENABLE,
-			NULL, 0, NULL, 0);
-	if (statusOfEnable != B_OK) {
-		TRACE("SYNAPTICS: enabling of parent failed: 0x%" B_PRIx32 ".\n",
-			statusOfEnable);
-	}
+	mutex_unlock(&sGuestCommandLock);
+	return status;
+}
 
-	return status != B_OK ? status : statusOfEnable;
+
+void
+synaptics_stall_probe(ps2_dev *guest)
+{
+	// A guest reset-disable + enable reliably brings a stalled pad back,
+	// while a pad status request or a guest get ID does not.
+	ps2_dev *pad = guest->parent_dev;
+	if ((atomic_get(&pad->flags) & PS2_FLAG_OPEN) == 0 || pad->cookie == NULL)
+		return;
+	synaptics_cookie *cookie = (synaptics_cookie*)pad->cookie;
+
+	status_t status = ps2_dev_command(guest, PS2_CMD_MOUSE_RESET_DIS, NULL, 0,
+		NULL, 0);
+	status_t enable = ps2_dev_command(guest, PS2_CMD_ENABLE, NULL, 0, NULL, 0);
+	cookie->packet_index = 0;
+	INFO("SYNAPTICS: pad stall recovery (guest reset-disable): %s, "
+		"enable %s\n", strerror(status), strerror(enable));
+
+	// give the timing a few packets before another stall can be detected
+	sStallQuietUntil = system_time() + 3000000;
+	sSlowPackets = 0;
+	sStallPending = false;
 }
 
 
@@ -644,6 +930,11 @@ synaptics_open(const char *name, uint32 flags, void **_cookie)
 	// create pass through dev
 	if (sTouchpadInfo.capPassThrough) {
 		TRACE("SYNAPTICS: pass through detected\n");
+		if (sGuestReplySem < 0) {
+			sGuestReplySem = create_sem(0, "ps2 guest reply");
+			if (sGuestReplySem < 0)
+				goto err4;
+		}
 		sPassthroughDevice->parent_dev = dev;
 		sPassthroughDevice->idx = dev->idx;
 		ps2_service_notify_device_added(sPassthroughDevice);
@@ -656,7 +947,6 @@ synaptics_open(const char *name, uint32 flags, void **_cookie)
 		cookie->mode = SYN_MODE_ABSOLUTE | SYN_MODE_W;
 	else
 		cookie->mode = SYN_MODE_ABSOLUTE;
-
 	status = set_touchpad_mode(dev, cookie->mode);
 	if (status < B_OK) {
 		INFO("SYNAPTICS: cannot set mode %s\n", name);
@@ -797,32 +1087,71 @@ synaptics_handle_int(ps2_dev *dev)
 		cookie->packet_index = 0;
 		return B_UNHANDLED_INTERRUPT;
 	}
+	if (cookie->packet_index == 0)
+		sPacketStart = system_time();
 	cookie->buffer[cookie->packet_index] = val;
 
 	cookie->packet_index++;
 	if (cookie->packet_index >= 6) {
 		cookie->packet_index = 0;
+		check_stall();
 
-		// check if package is a pass through package if true pass it
-		// too the pass through interrupt handle
-		if (sPassthroughDevice->active
-			&& sPassthroughDevice->handle_int != NULL
-			&& IS_SYN_PT_PACKAGE(cookie->buffer)) {
-			TRACE("SYNAPTICS: forward packet to passthrough device\n");
-			status_t status;
-
-			sPassthroughDevice->history[0].data = cookie->buffer[1];
-			sPassthroughDevice->handle_int(sPassthroughDevice);
-			sPassthroughDevice->history[0].data = cookie->buffer[4];
-			sPassthroughDevice->handle_int(sPassthroughDevice);
-			sPassthroughDevice->history[0].data = cookie->buffer[5];
-			status = sPassthroughDevice->handle_int(sPassthroughDevice);
-
-			if (cookie->dev->packet_size == 4) {
-				sPassthroughDevice->history[0].data = cookie->buffer[2];
-				status = sPassthroughDevice->handle_int(sPassthroughDevice);
+		if (IS_SYN_PT_PACKAGE(cookie->buffer)) {
+			// Pass-through packet, carrying bytes from the guest device.
+			if (atomic_get(&sGuestCommandInFlight) != 0) {
+				// A guest command is waiting for this byte. The pad wraps
+				// one guest byte per packet here (byte 1), as on Linux.
+				guest_reply_push(cookie->buffer[1]);
+				return B_INVOKE_SCHEDULER;
 			}
-			return status;
+
+			if (cookie->buffer[1] == PS2_CMD_TEST_PASSED
+				&& cookie->buffer[4] == 0) {
+				// Unsolicited self-test announce: the guest reset itself
+				// (a motion packet cannot look like this, AA has the
+				// overflow bits set). Re-initialize it instead of letting
+				// the bytes corrupt the guest's packet stream.
+				sGuestSelfTestTime = system_time();
+				INFO("SYNAPTICS: unsolicited guest self-test (guest %s)\n",
+					sPassthroughDevice->active ? "active" : "inactive");
+				if (sPassthroughDevice->active && sGuestReinits < 5) {
+					sGuestReinits++;
+					ps2_service_notify_device_republish(sPassthroughDevice);
+				}
+				return B_INVOKE_SCHEDULER;
+			}
+
+			if (sPassthroughDevice->active
+				&& sPassthroughDevice->handle_int != NULL) {
+				TRACE("SYNAPTICS: forward packet to passthrough device\n");
+				status_t status;
+
+				sPassthroughDevice->history[0].data = cookie->buffer[1];
+				sPassthroughDevice->handle_int(sPassthroughDevice);
+				sPassthroughDevice->history[0].data = cookie->buffer[4];
+				sPassthroughDevice->handle_int(sPassthroughDevice);
+				sPassthroughDevice->history[0].data = cookie->buffer[5];
+				status = sPassthroughDevice->handle_int(sPassthroughDevice);
+
+				if (cookie->dev->packet_size == 4) {
+					sPassthroughDevice->history[0].data = cookie->buffer[2];
+					status = sPassthroughDevice->handle_int(sPassthroughDevice);
+				}
+				return status;
+			}
+
+			// The guest device has not been published (yet), don't let its
+			// packets turn into touchpad events.
+			TRACE("SYNAPTICS: dropping packet for inactive passthrough\n");
+			return B_HANDLED_INTERRUPT;
+		}
+
+		if (sTouchpadInfo.nExtendedButtons > 0
+			&& ((cookie->buffer[0] ^ cookie->buffer[3]) & 0x02) != 0) {
+			// This packet carries the extended buttons state. The pad only
+			// sends it when the state changes (packets without this flag
+			// mean "unchanged", not "released"), so track it here.
+			synaptics_ext_buttons_changed(cookie->buffer);
 		}
 
 		if (packet_buffer_write(cookie->synaptics_ring_buffer,

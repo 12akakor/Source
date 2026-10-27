@@ -100,7 +100,7 @@ static void
 ps2_packet_to_movement(standard_mouse_cookie* cookie, uint8 packet[],
 	mouse_movement* pos)
 {
-	int buttons = packet[0] & 7;
+	int buttons = (packet[0] & 7) | cookie->dev->extra_buttons;
 	int xDelta = ((packet[0] & 0x10) ? ~0xff : 0) | packet[1];
 	int yDelta = ((packet[0] & 0x20) ? ~0xff : 0) | packet[2];
 	int xDeltaWheel = 0;
