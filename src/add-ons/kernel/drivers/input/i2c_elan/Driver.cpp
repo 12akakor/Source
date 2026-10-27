@@ -18,6 +18,7 @@
 #include "DeviceList.h"
 #include "Driver.h"
 #include "ELANDevice.h"
+#include "InputReadyLine.h"
 
 #include <lock.h>
 #include <util/AutoLock.h>
@@ -95,6 +96,7 @@ static const char* elan_iic_devs[] = {
 };
 
 static device_manager_info *sDeviceManager;
+static acpi_module_info *sACPI;
 
 DeviceList *gDeviceList = NULL;
 static mutex sDriverLock;
@@ -295,10 +297,27 @@ i2c_elan_init_driver(device_node *node, void **driverCookie)
 	parent = sDeviceManager->get_parent_node(node);
 	sDeviceManager->get_driver(parent, (driver_module_info **)&i2c,
 		(void **)&i2c_cookie);
+
+	// The input ready line is optional: without it, the driver reads the
+	// touchpad at a fixed rate.
+	InputReadyLine* inputReady = NULL;
+	uint64 handlePointer;
+	if (sDeviceManager->get_attr_uint64(parent, ACPI_DEVICE_HANDLE_ITEM,
+			&handlePointer, false) == B_OK) {
+		inputReady = new(std::nothrow) InputReadyLine;
+		if (inputReady != NULL
+			&& inputReady->Init(sACPI, (acpi_handle)handlePointer) != B_OK) {
+			delete inputReady;
+			inputReady = NULL;
+		}
+	}
 	sDeviceManager->put_node(parent);
 
 	mutex_lock(&sDriverLock);
-	ELANDevice *elanDevice = new(std::nothrow) ELANDevice(node, i2c, i2c_cookie);
+	ELANDevice *elanDevice = new(std::nothrow) ELANDevice(node, i2c, i2c_cookie,
+		inputReady);
+	if (elanDevice == NULL)
+		delete inputReady;
 
 	if (elanDevice != NULL && elanDevice->InitCheck() == B_OK) {
 		device->elanDevice = elanDevice;
@@ -428,6 +447,7 @@ struct device_module_info i2c_elan_device_module = {
 
 module_dependency module_dependencies[] = {
 	{ B_DEVICE_MANAGER_MODULE_NAME, (module_info **)&sDeviceManager },
+	{ B_ACPI_MODULE_NAME, (module_info **)&sACPI },
 	{}
 };
 

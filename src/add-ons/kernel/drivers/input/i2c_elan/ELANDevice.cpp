@@ -7,110 +7,150 @@
  */
 
 
-//!	Driver for I2C Elan Devices.
-// Partially based on FreeBSD ietp driver
+//!	Driver for I2C Elan touchpads.
+// Speaks the native Elan I2C protocol, as the Linux elan_i2c driver does.
+// Chromebook touchpads (ELAN0000) only support this protocol, not HID.
 
 
 #include "Driver.h"
 #include "ELANDevice.h"
-#include "HIDReport.h"
+#include "InputReadyLine.h"
+
 #include <keyboard_mouse_driver.h>
 #include <kernel.h>
+#include <util/AutoLock.h>
 
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
 #include <new>
 
-#define LO_ELAN_REPORT_SIZE 32
-#define HI_ELAN_REPORT_SIZE 37
-#define MIN_ELAN_REPORT  11
 
-#define	IETP_MAX_X_AXIS		0x0106
-#define	IETP_MAX_Y_AXIS		0x0107
+#define ETP_I2C_RESET			0x0100
+#define ETP_I2C_WAKE_UP			0x0800
+#define ETP_I2C_SLEEP			0x0801
 
-#define	IETP_CONTROL		0x0300
-#define	IETP_CTRL_ABSOLUTE	0x0001
-#define	IETP_CTRL_STANDARD	0x0000
+#define ETP_I2C_DESC_CMD		0x0001
+#define ETP_I2C_REPORT_DESC_CMD	0x0002
+#define ETP_I2C_STAND_CMD		0x0005
+#define ETP_I2C_PATTERN_CMD		0x0100
+#define ETP_I2C_FW_VERSION_CMD	0x0102
+#define ETP_I2C_MAX_X_AXIS_CMD	0x0106
+#define ETP_I2C_MAX_Y_AXIS_CMD	0x0107
+#define ETP_I2C_PRESSURE_CMD	0x010A
+#define ETP_I2C_SET_CMD			0x0300
+
+#define ETP_I2C_DESC_LENGTH		30
+#define ETP_I2C_REPORT_DESC_LENGTH	158
+#define ETP_I2C_INF_LENGTH		2
+#define ETP_I2C_REPORT_LEN		34
+#define ETP_I2C_REPORT_LEN_ID2	39
+
+#define ETP_ENABLE_ABS			0x0001
+#define ETP_PRESSURE_OFFSET		25
+
+#define ETP_REPORT_ID			0x5d
+#define ETP_TP_REPORT_ID		0x5e
+#define ETP_TP_REPORT_ID2		0x5f
+#define ETP_REPORT_ID2			0x60	// high precision
+
+#define ETP_REPORT_ID_OFFSET	2
+#define ETP_TOUCH_INFO_OFFSET	3
+#define ETP_FINGER_DATA_OFFSET	4
+#define ETP_MK_DATA_OFFSET		33		// high precision only
+#define ETP_MAX_FINGERS			5
+#define ETP_FINGER_DATA_LEN		5
+
+#define ETP_RETRY_COUNT			3
+
+// How often the input ready line is checked, and how often the touchpad is
+// read when there is no such line.
+static const bigtime_t kInputReadyPollInterval = 1000;
+static const bigtime_t kBlindPollInterval = 8000;
+
+// A touch of two or more fingers that ends within this time, without moving
+// or pressing the pad, is a tap for the right (or middle) button.
+static const bigtime_t kMultiFingerTapTimeout = 250000;
+
+#define BUTTON_LEFT		0x01
+#define BUTTON_RIGHT	0x02
+#define BUTTON_MIDDLE	0x04
+
 
 ELANDevice::ELANDevice(device_node* parent, i2c_device_interface* i2c,
-	i2c_device i2cCookie)
+	i2c_device i2cCookie, InputReadyLine* inputReady)
 	:	fStatus(B_NO_INIT),
-		fTransferLastschedule(0),
-		fTransferScheduled(0),
 		fOpenCount(0),
 		fRemoved(false),
-		fPublishPath(nullptr),
-		fReportID(0x5d),
-		fHighPrecision(false),
+		fPublishPath(NULL),
 		fParent(parent),
 		fI2C(i2c),
 		fI2CCookie(i2cCookie),
-		fLastButtons(0),
- 		fClickCount(0),
-		fLastClickTime(0),
-		fClickSpeed(250000),
-		fReportStatus(B_NO_INIT),
-		fCurrentReportLength(0),
-		fBusyCount(0)
+		fInputReady(inputReady),
+		fPattern(0),
+		fReportLength(ETP_I2C_REPORT_LEN),
+		fMaxX(0),
+		fMaxY(0),
+		fPressureAdjustment(0),
+		fBadReports(0)
 {
-	fConditionVariable.Init(this, "elan report");
+	_ResetContact();
+	mutex_init(&fReadLock, "elan report");
+	memset(fLastReport, 0, sizeof(fLastReport));
+	memset(&fHardwareSpecs, 0, sizeof(fHardwareSpecs));
 
-	uint16 descriptorAddress = 1;
-	// fetch HID descriptor
-	CALLED();
-	fStatus = _FetchBuffer((uint8*)&descriptorAddress,
-		sizeof(descriptorAddress), &fDescriptor, sizeof(fDescriptor));
-	if (fStatus != B_OK) {
-		ERROR("failed to fetch HID descriptor\n");
-		return;
+	status_t status = B_ERROR;
+	for (int i = 0; i < ETP_RETRY_COUNT; i++) {
+		status = _Initialize();
+		if (status == B_OK)
+			break;
+		snooze(30000);
 	}
-
-	if (_SetAbsoluteMode(true) != B_OK) {
-		TRACE_ALWAYS("failed to set absolute mode\n");
+	if (status != B_OK) {
+		ERROR("initialization failed: %s\n", strerror(status));
+		fStatus = status;
 		return;
 	}
 
 	fHardwareSpecs.areaStartX = 0;
+	fHardwareSpecs.areaEndX = fMaxX;
 	fHardwareSpecs.areaStartY = 0;
-
-	uint16_t buf;
-
-	if (_ReadRegister(IETP_MAX_X_AXIS, sizeof(buf), &buf) != B_OK) {
-		TRACE_ALWAYS("failed reading max x\n");
-		return;
-	}
-	fHardwareSpecs.areaEndX = buf;
-
-	if (_ReadRegister(IETP_MAX_Y_AXIS, sizeof(buf), &buf) != B_OK) {
-		TRACE_ALWAYS("failed reading max y\n");
-		return;
-	}
-	fHardwareSpecs.areaEndY = buf;
-
-	fHardwareSpecs.edgeMotionWidth = 55;
-
+	fHardwareSpecs.areaEndY = fMaxY;
+	// The Synaptics driver uses 55 for a pad about 4000 units wide.
+	fHardwareSpecs.edgeMotionWidth = max_c(fMaxX * 55 / 4000, 1);
 	fHardwareSpecs.minPressure = 0;
 	fHardwareSpecs.realMaxPressure = 50;
 	fHardwareSpecs.maxPressure = 255;
 
-	TRACE("Dimensions %dx%d\n", fHardwareSpecs.areaEndX, fHardwareSpecs.areaEndY);
+	TRACE_ALWAYS("touchpad %ux%u, pattern %u, report length %" B_PRIuSIZE
+		", %s\n", fMaxX, fMaxY, fPattern, fReportLength,
+		fInputReady != NULL ? "input ready line" : "polling");
 
+	// Stay quiet until someone opens the device.
+	_Sleep();
 	fStatus = B_OK;
 }
 
 
 ELANDevice::~ELANDevice()
 {
+	delete fInputReady;
+	free(fPublishPath);
+	mutex_destroy(&fReadLock);
 }
 
 
 status_t
 ELANDevice::Open(uint32 flags)
 {
-	atomic_add(&fOpenCount, 1);
-	_Reset();
+	if (atomic_add(&fOpenCount, 1) == 0) {
+		status_t status = _Wake();
+		if (status != B_OK) {
+			ERROR("failed to wake touchpad: %s\n", strerror(status));
+			atomic_add(&fOpenCount, -1);
+			return status;
+		}
+	}
 
 	return B_OK;
 }
@@ -119,8 +159,8 @@ ELANDevice::Open(uint32 flags)
 status_t
 ELANDevice::Close()
 {
-	atomic_add(&fOpenCount, -1);
-	_SetPower(I2C_HID_POWER_OFF);
+	if (atomic_add(&fOpenCount, -1) == 1)
+		_Sleep();
 
 	return B_OK;
 }
@@ -133,25 +173,6 @@ ELANDevice::Removed()
 }
 
 
-status_t
-ELANDevice::_MaybeScheduleTransfer(int type, int id, int reportSize)
-{
-	if (fRemoved)
-		return ENODEV;
-
-	if (atomic_get_and_set(&fTransferScheduled, 1) != 0) {
-		// someone else already caused a transfer to be scheduled
-		return B_OK;
-	}
-
-	snooze_until(fTransferLastschedule, B_SYSTEM_TIMEBASE);
-	fTransferLastschedule = system_time() + 10000;
-
-	TRACE("scheduling interrupt transfer of %u bytes\n",
-		reportSize);
-	return _FetchReport(type, id, reportSize);
-}
-
 void
 ELANDevice::SetPublishPath(char *publishPath)
 {
@@ -159,392 +180,448 @@ ELANDevice::SetPublishPath(char *publishPath)
 	fPublishPath = publishPath;
 }
 
+
 status_t
-ELANDevice::Control(uint32 op, void *buffer,
-	size_t length)
+ELANDevice::Control(uint32 op, void *buffer, size_t length)
 {
 	switch (op) {
-
 		case B_GET_DEVICE_NAME:
 		{
 			if (!IS_USER_ADDRESS(buffer))
 				return B_BAD_ADDRESS;
 
-			if (user_strlcpy((char *)buffer, "Elantech I2C touchpad", length) > 0)
+			if (user_strlcpy((char *)buffer, "Elan I2C touchpad", length) > 0)
 				return B_OK;
 
 			return B_ERROR;
 		}
 
 		case MS_IS_TOUCHPAD:
-			TRACE("ELANTECH: MS_IS_TOUCHPAD\n");
 			if (buffer == NULL)
 				return B_OK;
-			return user_memcpy(buffer, &fHardwareSpecs, sizeof(fHardwareSpecs));
+			if (!IS_USER_ADDRESS(buffer))
+				return B_BAD_ADDRESS;
+			return user_memcpy(buffer, &fHardwareSpecs,
+				sizeof(fHardwareSpecs));
 
 		case MS_READ_TOUCHPAD:
 		{
 			touchpad_read read;
-			int zero_report_count = 0;
 			if (length < sizeof(touchpad_read))
 				return B_BUFFER_OVERFLOW;
-
-			if (user_memcpy(&read.timeout, &(((touchpad_read*)buffer)->timeout),
-					sizeof(bigtime_t)) != B_OK)
+			if (!IS_USER_ADDRESS(buffer)
+				|| user_memcpy(&read.timeout,
+					&((touchpad_read*)buffer)->timeout,
+					sizeof(bigtime_t)) != B_OK) {
 				return B_BAD_ADDRESS;
+			}
 
 			read.event = MS_READ_TOUCHPAD;
 
-			while (true) {
-				status_t result = _ReadAndParseReport(
-					&read.u.touchpad, read.timeout,
-					zero_report_count);
-				if (result == B_INTERRUPTED)
-					return result;
-				if (result == B_BUSY)
-					continue;
+			MutexLocker locker(fReadLock);
+			status_t status = _ReadReport(&read.u.touchpad, read.timeout);
+			locker.Unlock();
+			if (status != B_OK)
+				return status;
 
-				if (!IS_USER_ADDRESS(buffer)
-					|| user_memcpy(buffer, &read, sizeof(read))
-						!= B_OK) {
-					return B_BAD_ADDRESS;
-				}
-
-				TRACE("Returning MS_READ_TOUCHPAD: %x\n", result);
-
-				return result;
-			}
+			if (user_memcpy(buffer, &read, sizeof(read)) != B_OK)
+				return B_BAD_ADDRESS;
+			return B_OK;
 		}
 	}
 
-	return B_ERROR;
+	return B_DEV_INVALID_IOCTL;
 }
 
 
-status_t
-ELANDevice::_SetAbsoluteMode(bool enable)
-{
-	return _WriteRegister(IETP_CONTROL, enable ? IETP_CTRL_ABSOLUTE : IETP_CTRL_STANDARD);
-}
+//	#pragma mark - protocol
 
 
 status_t
-ELANDevice::_WaitForReport(bigtime_t timeout)
+ELANDevice::_Initialize()
 {
-	CALLED();
-	while (atomic_get(&fBusyCount) != 0)
-		snooze(1000);
+	uint8 buffer[ETP_I2C_REPORT_DESC_LENGTH];
 
-	ConditionVariableEntry conditionVariableEntry;
-	fConditionVariable.Add(&conditionVariableEntry);
-	TRACE("Starting report wait\n");
-	status_t result = _MaybeScheduleTransfer(
-		HID_REPORT_TYPE_INPUT, fReportID,
-		fHighPrecision ? HI_ELAN_REPORT_SIZE : LO_ELAN_REPORT_SIZE);
-	if (result != B_OK) {
-		TRACE_ALWAYS("scheduling transfer failed\n");
-		conditionVariableEntry.Wait(B_RELATIVE_TIMEOUT, 0);
-		return result;
+	status_t status = _WriteRegister(ETP_I2C_STAND_CMD, ETP_I2C_RESET);
+	if (status != B_OK) {
+		ERROR("reset failed: %s\n", strerror(status));
+		return status;
 	}
 
-	result = conditionVariableEntry.Wait(B_RELATIVE_TIMEOUT, timeout);
-	if (result != B_OK)
-		return result;
+	snooze(100000);
 
-	if (fReportStatus != B_OK)
-		return fReportStatus;
+	// The touchpad acknowledges the reset with a 0000 report.
+	status = _Receive(buffer, ETP_I2C_INF_LENGTH);
+	if (status != B_OK) {
+		ERROR("no reset acknowledgement: %s\n", strerror(status));
+		return status;
+	}
 
-	atomic_add(&fBusyCount, 1);
+	status = _ReadRegister(ETP_I2C_DESC_CMD, buffer, ETP_I2C_DESC_LENGTH);
+	if (status != B_OK) {
+		ERROR("failed to read device descriptor: %s\n", strerror(status));
+		return status;
+	}
+
+	status = _ReadRegister(ETP_I2C_REPORT_DESC_CMD, buffer,
+		ETP_I2C_REPORT_DESC_LENGTH);
+	if (status != B_OK) {
+		ERROR("failed to read report descriptor: %s\n", strerror(status));
+		return status;
+	}
+
+	return _QueryDevice();
+}
+
+
+status_t
+ELANDevice::_QueryDevice()
+{
+	uint8 value[ETP_I2C_INF_LENGTH];
+
+	status_t status = _ReadRegister(ETP_I2C_PATTERN_CMD, value, sizeof(value));
+	if (status != B_OK)
+		return status;
+	// Firmware without this command answers ffff: pattern 0.
+	fPattern = value[0] == 0xff && value[1] == 0xff ? 0 : value[1];
+	fReportLength = fPattern <= 1 ? ETP_I2C_REPORT_LEN : ETP_I2C_REPORT_LEN_ID2;
+
+	if (_ReadRegister(ETP_I2C_FW_VERSION_CMD, value, sizeof(value)) == B_OK)
+		TRACE_ALWAYS("firmware version 0x%02x\n", value[0]);
+
+	status = _ReadRegister(ETP_I2C_MAX_X_AXIS_CMD, value, sizeof(value));
+	if (status != B_OK)
+		return status;
+	fMaxX = value[0] | (value[1] << 8);
+
+	status = _ReadRegister(ETP_I2C_MAX_Y_AXIS_CMD, value, sizeof(value));
+	if (status != B_OK)
+		return status;
+	fMaxY = value[0] | (value[1] << 8);
+
+	if (fMaxX == 0 || fMaxY == 0 || fMaxX == 0xffff || fMaxY == 0xffff) {
+		ERROR("bad dimensions %ux%u\n", fMaxX, fMaxY);
+		return B_BAD_DATA;
+	}
+
+	status = _ReadRegister(ETP_I2C_PRESSURE_CMD, value, sizeof(value));
+	if (status != B_OK)
+		return status;
+	fPressureAdjustment = (value[0] & 0x10) != 0 ? 0 : ETP_PRESSURE_OFFSET;
+
 	return B_OK;
 }
 
 
 status_t
-ELANDevice::_ReadAndParseReport(touchpad_movement *info, bigtime_t timeout, int &zero_report_count)
+ELANDevice::_Wake()
 {
-	CALLED();
-	status_t result = _WaitForReport(timeout);
-	if (result != B_OK) {
-		if (IsRemoved()) {
-			TRACE("device has been removed\n");
+	status_t status = B_ERROR;
+	for (int i = 0; i < ETP_RETRY_COUNT; i++) {
+		status = _WriteRegister(ETP_I2C_SET_CMD, ETP_ENABLE_ABS);
+		if (status == B_OK)
+			status = _WriteRegister(ETP_I2C_STAND_CMD, ETP_I2C_WAKE_UP);
+		if (status == B_OK)
+			break;
+		snooze(30000);
+	}
+	if (status != B_OK)
+		return status;
+
+	// Drop any report left over from before the touchpad slept.
+	memset(fLastReport, 0, sizeof(fLastReport));
+	_ResetContact();
+	if (fInputReady != NULL && fInputReady->IsAsserted())
+		_Receive(fReport, fReportLength);
+
+	return B_OK;
+}
+
+
+status_t
+ELANDevice::_Sleep()
+{
+	return _WriteRegister(ETP_I2C_STAND_CMD, ETP_I2C_SLEEP);
+}
+
+
+status_t
+ELANDevice::_ReadReport(touchpad_movement* movement, bigtime_t timeout)
+{
+	bigtime_t deadline = timeout < 0
+		? B_INFINITE_TIMEOUT : system_time() + timeout;
+
+	// Without an input ready line the touchpad is read at a fixed rate.
+	bool mustWait = fInputReady == NULL;
+
+	while (true) {
+		if (fRemoved)
 			return B_DEV_NOT_READY;
+
+		if (fPendingRelease) {
+			// Second half of an emulated tap click.
+			fPendingRelease = false;
+			memset(movement, 0, sizeof(*movement));
+			movement->fingerWidth = 4;
+			return B_OK;
 		}
 
-		if (result == B_INTERRUPTED)
-			return result;
+		bool ready = !mustWait
+			&& (fInputReady == NULL || fInputReady->IsAsserted());
+		if (!ready) {
+			bigtime_t now = system_time();
+			if (now >= deadline)
+				return B_TIMED_OUT;
 
-		if (result != B_BUSY) {
-			// "busy" happens when other reports come in on the same input as ours
-			TRACE_ALWAYS("error waiting for report: %s\n", strerror(result));
+			bigtime_t interval = fInputReady != NULL
+				? kInputReadyPollInterval : kBlindPollInterval;
+			if (deadline - now < interval)
+				interval = deadline - now;
+
+			status_t status = snooze_etc(interval, B_SYSTEM_TIMEBASE,
+				B_RELATIVE_TIMEOUT | B_CAN_INTERRUPT);
+			if (status == B_INTERRUPTED)
+				return status;
+
+			mustWait = false;
+			continue;
 		}
 
-		if (result == B_TIMED_OUT)
-			return result;
+		mustWait = fInputReady == NULL;
 
-		// signal that we simply want to try again
-		return B_BUSY;
-	}
+		status_t status = _Receive(fReport, fReportLength);
+		if (status != B_OK) {
+			if (fBadReports++ < 10)
+				ERROR("failed to read report: %s\n", strerror(status));
+			mustWait = true;
+			continue;
+		}
 
-	if (fCurrentReportLength == 0 && ++zero_report_count < 3) {
-		atomic_add(&fBusyCount, -1);
-		return B_BUSY;
-	}
+		// A zero length means no report: the touchpad was reset, or it
+		// had nothing to send.
+		uint16 length = fReport[0] | (fReport[1] << 8);
+		if (length == 0 || length == 0xffff)
+			continue;
 
-	uint8 report_copy[TRANSFER_BUFFER_SIZE];
-	memset(report_copy, 0, TRANSFER_BUFFER_SIZE);
-	memcpy(report_copy, fCurrentReport, MIN(TRANSFER_BUFFER_SIZE, fCurrentReportLength));
-	atomic_add(&fBusyCount, -1);
-
-	memset(info, 0, sizeof(*info));
-
-	if (report_copy[0] == 0 || report_copy[0] == 0xff)
-		return B_OK;
-
-	info->buttons = report_copy[0] & 0x7;
-	uint8 fingers = (report_copy[0] >> 3) & 0x1f;
-	info->fingers = fingers;
-	TRACE("buttons=%x, fingers=%x\n", info->buttons, fingers);
-	const uint8 *fingerData = fCurrentReport + 1;
-	int fingerCount = 0;
-	int sumx = 0, sumy = 0, sumz = 0, sumw = 0;
-	for (int finger = 0; finger < 5; finger++, fingerData += 5)
-		if (fingers & (1 << finger)) {
-			TRACE("finger %d:\n", finger);
-			uint8 wh;
-			int x, y, w;
-			if (fHighPrecision) {
-				x = fingerData[0] << 8 | fingerData[1];
-				y = fingerData[2] << 8 | fingerData[3];
-				wh = report_copy[30 + finger];
-			} else {
-				x = (fingerData[0] & 0xf0) << 4 | fingerData[1];
-				y = (fingerData[0] & 0x0f) << 8 | fingerData[2];
-				wh = fingerData[3];
+		uint8 id = fReport[ETP_REPORT_ID_OFFSET];
+		if (id != ETP_REPORT_ID && id != ETP_REPORT_ID2) {
+			if (id != ETP_TP_REPORT_ID && id != ETP_TP_REPORT_ID2
+				&& fBadReports++ < 10) {
+				ERROR("unknown report id 0x%02x, length %u\n", id, length);
 			}
-
-			int z = fingerData[4];
-
-			w = MAX((wh >> 4) & 0xf, wh & 0xf);
-
-			sumw += w;
-			sumx += x;
-			sumy += y;
-			sumz += z;
-
-			TRACE("x=%d, y=%d, z=%d, w=%d, wh=0x%x\n", x, y, z, w, wh);
-
-			fingerCount++;
+			continue;
 		}
-	if (fingerCount > 0) {
-		info->xPosition = sumx / fingerCount;
-		info->yPosition = sumy / fingerCount;
-		info->zPressure = sumz / fingerCount;
-		info->fingerWidth = MIN(12, sumw / fingerCount);
+
+		// Some touchpads repeat their last report when read without one
+		// pending; only pass on changes then.
+		if (fInputReady == NULL
+			&& memcmp(fReport, fLastReport, fReportLength) == 0) {
+			continue;
+		}
+		memcpy(fLastReport, fReport, fReportLength);
+
+		int count = _ParseReport(fReport, movement);
+		if (!_EmulateButtons(movement, count))
+			continue;
+		return B_OK;
+	}
+}
+
+
+int
+ELANDevice::_ParseReport(const uint8* report, touchpad_movement* movement)
+{
+	bool highPrecision = report[ETP_REPORT_ID_OFFSET] == ETP_REPORT_ID2;
+	uint8 info = report[ETP_TOUCH_INFO_OFFSET];
+
+	memset(movement, 0, sizeof(*movement));
+	movement->buttons = (info & 0x01 ? 0x01 : 0)	// left
+		| (info & 0x02 ? 0x02 : 0)					// right
+		| (info & 0x04 ? 0x04 : 0);					// middle
+
+	// Records are only present for fingers in contact, in order.
+	const uint8* finger = report + ETP_FINGER_DATA_OFFSET;
+	uint32 fingers = 0;
+	int count = 0;
+	uint32 sumX = 0, sumY = 0, sumZ = 0, sumWidth = 0;
+	for (int i = 0; i < ETP_MAX_FINGERS; i++) {
+		if ((info & (1 << (3 + i))) == 0)
+			continue;
+
+		uint32 x, y;
+		uint8 traces;
+		if (highPrecision) {
+			x = (finger[0] << 8) | finger[1];
+			y = (finger[2] << 8) | finger[3];
+			traces = report[ETP_MK_DATA_OFFSET + i];
+		} else {
+			x = ((finger[0] & 0xf0) << 4) | finger[1];
+			y = ((finger[0] & 0x0f) << 8) | finger[2];
+			traces = finger[3];
+		}
+		uint32 pressure = finger[4] + fPressureAdjustment;
+		finger += ETP_FINGER_DATA_LEN;
+
+		if (x > fMaxX || y > fMaxY)
+			continue;
+
+		fingers |= 1 << i;
+		count++;
+		sumX += x;
+		sumY += y;
+		sumZ += pressure;
+		// The width is given in traces covered along x and y.
+		sumWidth += max_c(traces & 0x0f, traces >> 4);
 	}
 
-	TRACE("Resulting position=[%d, %d, %d, %d]\n",
-		info->xPosition, info->yPosition, info->zPressure,
-		info->fingerWidth);
-
-	return B_OK;
-}
-
-
-void
-ELANDevice::_UnstallCallback(void *cookie, status_t status, void *data,
-	size_t actualLength)
-{
-	ELANDevice *device = (ELANDevice *)cookie;
-	if (status != B_OK) {
-		TRACE_ALWAYS("Unable to unstall device: %s\n", strerror(status));
+	movement->fingers = fingers;
+	if (count == 0) {
+		// A width of 0 or 1 would read as two or three fingers.
+		movement->fingerWidth = 4;
+		return 0;
 	}
 
-	// Now report the original failure, since we're ready to retry
-	_TransferCallback(cookie, B_ERROR, device->fTransferBuffer, 0);
-}
-
-
-void
-ELANDevice::_TransferCallback(void *cookie, status_t status, void *data,
-	size_t actualLength)
-{
-	ELANDevice *device = (ELANDevice *)cookie;
-
-	atomic_set(&device->fTransferScheduled, 0);
-	device->_SetReport(status, device->fTransferBuffer, actualLength);
-}
-
-
-status_t
-ELANDevice::_Reset()
-{
-	CALLED();
-	status_t status = _SetPower(I2C_HID_POWER_ON);
-	if (status != B_OK)
-		return status;
-
-	snooze(1000);
-
-	uint8 cmd[] = {
-		(uint8)(fDescriptor.wCommandRegister & 0xff),
-		(uint8)(fDescriptor.wCommandRegister >> 8),
-		0,
-		I2C_HID_CMD_RESET,
-	};
-
-	status = _ExecCommand(I2C_OP_WRITE_STOP, cmd, sizeof(cmd), NULL, 0);
-	if (status != B_OK) {
-		_SetPower(I2C_HID_POWER_OFF);
-		return status;
-	}
-
-	snooze(1000);
-	return B_OK;
-}
-
-
-status_t
-ELANDevice::_SetPower(uint8 power)
-{
-	CALLED();
-	uint8 cmd[] = {
-		(uint8)(fDescriptor.wCommandRegister & 0xff),
-		(uint8)(fDescriptor.wCommandRegister >> 8),
-		power,
-		I2C_HID_CMD_SET_POWER
-	};
-
-	return _ExecCommand(I2C_OP_WRITE_STOP, cmd, sizeof(cmd), NULL, 0);
-}
-
-
-status_t
-ELANDevice::_ReadRegister(uint16_t reg, size_t length, void *value)
-{
-	uint8_t cmd[2] = {
-		(uint8_t) (reg & 0xff), (uint8_t) ((reg >> 8) & 0xff) };
-	status_t status = _FetchBuffer(cmd, sizeof(cmd), fTransferBuffer,
-		length);
-	TRACE("Read register 0x%04x with value 0x%02x 0x%02x status=%d\n",
-		reg, fTransferBuffer[0], fTransferBuffer[1], status);
-	if (status != B_OK)
-		return status;
-	memcpy(value, fTransferBuffer, length);
-	return B_OK;
-}
-
-
-status_t
-ELANDevice::_WriteRegister(uint16_t reg, uint16_t value)
-{
-	uint8_t cmd[4] = { (uint8_t) (reg & 0xff),
-		(uint8_t) ((reg >> 8) & 0xff),
-		(uint8_t) (value & 0xff),
-		(uint8_t) ((value >> 8) & 0xff) };
-	TRACE("Write register 0x%04x with value 0x%04x\n", reg, value);
-	status_t status = _FetchBuffer(cmd, sizeof(cmd), fTransferBuffer, 0);
-	TRACE("status=%d\n", status);
-	return status;
-}
-
-
-status_t
-ELANDevice::_FetchReport(uint8 type, uint8 id, size_t reportSize)
-{
-	uint8 reportId = id > 15 ? 15 : id;
-	size_t cmdLength = 6;
-	uint8 cmd[] = {
-		(uint8)(fDescriptor.wCommandRegister & 0xff),
-		(uint8)(fDescriptor.wCommandRegister >> 8),
-		(uint8)(reportId | (type << 4)),
-		I2C_HID_CMD_GET_REPORT,
-		0, 0, 0,
-	};
-
-	int dataOffset = 4;
-	int reportIdLength = 1;
-	if (reportId == 15) {
-		cmd[dataOffset++] = id;
-		cmdLength++;
-		reportIdLength++;
-	}
-	cmd[dataOffset++] = fDescriptor.wDataRegister & 0xff;
-	cmd[dataOffset++] = fDescriptor.wDataRegister >> 8;
-
-	size_t bufferLength = reportSize + reportIdLength + 2;
-
-	status_t status = _FetchBuffer(cmd, cmdLength, fTransferBuffer,
-		bufferLength);
-	if (status != B_OK) {
-		atomic_set(&fTransferScheduled, 0);
-		return status;
-	}
-
-	uint16 actualLength = fTransferBuffer[0] | (fTransferBuffer[1] << 8);
-	TRACE("_FetchReport %" B_PRIuSIZE " %" B_PRIu16 "\n", reportSize,
-		actualLength);
-
-	if (actualLength <= 2 || actualLength == 0xffff || bufferLength == 0)
-		actualLength = 0;
+	movement->xPosition = sumX / count;
+	movement->yPosition = sumY / count;
+	// movement_maker ignores contacts at maxPressure and up.
+	movement->zPressure = min_c(sumZ / count, 254);
+	// movement_maker follows the Synaptics width scale: 4 to 7 is a
+	// finger, 8 and up a palm, 0 and 1 mean two and three fingers.
+	if (count == 1)
+		movement->fingerWidth = min_c(4 + sumWidth / 3, 15);
 	else
-		actualLength -= 2;
+		movement->fingerWidth = count == 2 ? 0 : 1;
 
-	atomic_set(&fTransferScheduled, 0);
-	_SetReport(status,
-		(uint8*)((addr_t)fTransferBuffer + 2), actualLength);
-	return B_OK;
+	return count;
+}
+
+
+//!	Turns the single button under the pad into right and middle buttons too.
+bool
+ELANDevice::_EmulateButtons(touchpad_movement* movement, int count)
+{
+	bigtime_t now = system_time();
+
+	if (fIgnoreContact) {
+		// The rest of a touch that was already reported as a tap.
+		if (count == 0)
+			_ResetContact();
+		return false;
+	}
+
+	if (count > 0 && fLastCount == 0) {
+		fContactStart = now;
+		fContactMaxFingers = 0;
+		fContactMoved = false;
+		fContactClicked = false;
+	}
+	fLastCount = count;
+
+	if (count >= 2) {
+		uint32 slop = max_c(fMaxX / 30, 1);
+		if (fContactMaxFingers < 2) {
+			fTapX = movement->xPosition;
+			fTapY = movement->yPosition;
+		} else if (abs((int32)movement->xPosition - (int32)fTapX) > (int32)slop
+			|| abs((int32)movement->yPosition - (int32)fTapY) > (int32)slop) {
+			fContactMoved = true;
+		}
+	}
+	fContactMaxFingers = max_c(fContactMaxFingers, count);
+
+	// The pad clicks as one button. Like Chrome OS, a click with two
+	// fingers, or with one finger in the bottom right corner, is a right
+	// click, and one with three fingers a middle click. The button is
+	// chosen when the pad goes down and kept until it comes up again.
+	if ((movement->buttons & BUTTON_LEFT) != 0) {
+		fContactClicked = true;
+		if (fClickButton == 0) {
+			// Elan Y grows upwards, as movement_maker expects.
+			if (count >= 3)
+				fClickButton = BUTTON_MIDDLE;
+			else if (count == 2)
+				fClickButton = BUTTON_RIGHT;
+			else if (count == 1 && movement->yPosition < fMaxY / 5
+				&& movement->xPosition > fMaxX / 2)
+				fClickButton = BUTTON_RIGHT;
+			else
+				fClickButton = BUTTON_LEFT;
+		}
+		movement->buttons = (movement->buttons & ~BUTTON_LEFT) | fClickButton;
+	} else
+		fClickButton = 0;
+
+	// Tapping with two fingers is a right click, with three a middle click.
+	// It is reported as soon as the fingers start to lift; the rest of the
+	// touch is dropped so movement_maker does not see a one finger tap.
+	if (fContactMaxFingers >= 2 && count < 2 && !fContactMoved
+		&& !fContactClicked && now - fContactStart < kMultiFingerTapTimeout) {
+		uint32 button = fContactMaxFingers == 2 ? BUTTON_RIGHT : BUTTON_MIDDLE;
+		_ResetContact();
+		fIgnoreContact = count > 0;
+		fLastCount = count;
+		memset(movement, 0, sizeof(*movement));
+		movement->buttons = button;
+		movement->fingerWidth = 4;
+		fPendingRelease = true;
+	}
+
+	return true;
 }
 
 
 void
-ELANDevice::_SetReport(status_t status, uint8 *report, size_t length)
+ELANDevice::_ResetContact()
 {
-	if (status != B_OK) {
-		report = NULL;
-		length = 0;
-	}
+	fClickButton = 0;
+	fLastCount = 0;
+	fContactMaxFingers = 0;
+	fContactStart = 0;
+	fTapX = fTapY = 0;
+	fContactMoved = false;
+	fContactClicked = false;
+	fIgnoreContact = false;
+	fPendingRelease = false;
+}
 
-	if (length < MIN_ELAN_REPORT && length != 0 && status == B_OK)
-		status = B_ERROR;
 
-	if (status == B_OK && length != 0 && report[0] != fReportID) {
-		report = NULL;
-		length = 0;
-		status = B_BUSY;
-	}
+//	#pragma mark - I2C
 
-	if (report && length) {
-		report++;
-		length--;
-	}
 
-	fReportStatus = status;
-	fCurrentReportLength = length;
-	memset(fCurrentReport, 0, sizeof(fCurrentReport));
-	if (report && status == B_OK)
-		memcpy(fCurrentReport, report, MIN(sizeof(fCurrentReport), length));
-	fConditionVariable.NotifyAll();
+status_t
+ELANDevice::_ReadRegister(uint16 reg, void* value, size_t length)
+{
+	uint8 cmd[2] = { (uint8)(reg & 0xff), (uint8)(reg >> 8) };
+	return _Exec(cmd, sizeof(cmd), value, length);
 }
 
 
 status_t
-ELANDevice::_FetchBuffer(uint8* cmd, size_t cmdLength, void* buffer,
-	size_t bufferLength)
+ELANDevice::_WriteRegister(uint16 reg, uint16 value)
 {
-	return _ExecCommand(I2C_OP_READ_STOP, cmd, cmdLength,
-		buffer, bufferLength);
+	uint8 cmd[4] = { (uint8)(reg & 0xff), (uint8)(reg >> 8),
+		(uint8)(value & 0xff), (uint8)(value >> 8) };
+	return _Exec(cmd, sizeof(cmd), NULL, 0);
 }
 
 
 status_t
-ELANDevice::_ExecCommand(i2c_op op, uint8* cmd, size_t cmdLength, void* buffer,
-	size_t bufferLength)
+ELANDevice::_Receive(void* buffer, size_t length)
+{
+	return _Exec(NULL, 0, buffer, length);
+}
+
+
+status_t
+ELANDevice::_Exec(const uint8* cmd, size_t cmdLength, void* buffer,
+	size_t length)
 {
 	status_t status = fI2C->acquire_bus(fI2CCookie);
 	if (status != B_OK)
 		return status;
-	status = fI2C->exec_command(fI2CCookie, I2C_OP_READ_STOP, cmd, cmdLength,
-		buffer, bufferLength);
+	status = fI2C->exec_command(fI2CCookie,
+		length > 0 ? I2C_OP_READ_STOP : I2C_OP_WRITE_STOP, cmd, cmdLength,
+		buffer, length);
 	fI2C->release_bus(fI2CCookie);
 	return status;
 }

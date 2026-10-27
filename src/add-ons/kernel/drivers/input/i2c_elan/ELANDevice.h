@@ -8,17 +8,21 @@
 #define I2C_ELAN_DEVICE_H
 
 
-#include <condition_variable.h>
 #include <i2c.h>
 #include <keyboard_mouse_driver.h>
-#include "I2CHIDProtocol.h"
+#include <lock.h>
 
-#define TRANSFER_BUFFER_SIZE 48
+#define ELAN_MAX_REPORT_LENGTH	39
+
+
+class InputReadyLine;
 
 class ELANDevice {
 public:
-								ELANDevice(device_node* parent, i2c_device_interface* i2c,
-									i2c_device i2cCookie);
+								ELANDevice(device_node* parent,
+									i2c_device_interface* i2c,
+									i2c_device i2cCookie,
+									InputReadyLine* inputReady);
 								~ELANDevice();
 
 			status_t			InitCheck() const { return fStatus; }
@@ -32,69 +36,70 @@ public:
 			bool				IsRemoved() const { return fRemoved; }
 
 			void				SetPublishPath(char *publishPath);
-			const char *			PublishPath() { return fPublishPath; }
+			const char *		PublishPath() { return fPublishPath; }
 			status_t			Control(uint32 op, void *buffer, size_t length);
-			device_node*			Parent() { return fParent; }
-private:
-	static	void				_TransferCallback(void *cookie,
-									status_t status, void *data,
-									size_t actualLength);
-	static	void				_UnstallCallback(void *cookie,
-									status_t status, void *data,
-									size_t actualLength);
+			device_node*		Parent() { return fParent; }
 
-			status_t			_MaybeScheduleTransfer(int type, int id, int reportSize);
-			status_t			_Reset();
-			status_t			_SetPower(uint8 power);
-			status_t			_FetchBuffer(uint8* cmd, size_t cmdLength,
-									void* buffer, size_t bufferLength);
-			status_t			_FetchReport(uint8 type, uint8 id,
-									size_t reportSize);
-			status_t			_ExecCommand(i2c_op op, uint8* cmd,
-									size_t cmdLength, void* buffer,
-									size_t bufferLength);
-			void				_SetReport(status_t status, uint8 *report, size_t length);
-			status_t			_ReadAndParseReport(touchpad_movement *buffer,
-									bigtime_t timeout, int& zero_report_count);
-			status_t			_WaitForReport(bigtime_t timeout);
-			status_t			_ReadRegister(uint16_t reg, size_t len, void *val);
-			status_t			_WriteRegister(uint16_t reg, uint16_t val);
-			status_t			_SetAbsoluteMode(bool enable);
+private:
+			status_t			_Initialize();
+			status_t			_QueryDevice();
+			status_t			_Wake();
+			status_t			_Sleep();
+
+			status_t			_ReadReport(touchpad_movement* movement,
+									bigtime_t timeout);
+			int					_ParseReport(const uint8* report,
+									touchpad_movement* movement);
+			bool				_EmulateButtons(touchpad_movement* movement,
+									int count);
+			void				_ResetContact();
+
+			status_t			_ReadRegister(uint16 reg, void* value,
+									size_t length);
+			status_t			_WriteRegister(uint16 reg, uint16 value);
+			status_t			_Receive(void* buffer, size_t length);
+			status_t			_Exec(const uint8* cmd, size_t cmdLength,
+									void* buffer, size_t length);
+
 private:
 			status_t			fStatus;
-
-			bigtime_t			fTransferLastschedule;
-			int32				fTransferScheduled;
-			uint8				fTransferBuffer[TRANSFER_BUFFER_SIZE];
 
 			int32				fOpenCount;
 			bool				fRemoved;
 
 			char *				fPublishPath;
 
-			uint8				fReportID;
-			bool				fHighPrecision;
+			device_node*		fParent;
 
-			i2c_hid_descriptor		fDescriptor;
-
-			device_node*			fParent;
-
-			i2c_device_interface*		fI2C;
+			i2c_device_interface* fI2C;
 			i2c_device			fI2CCookie;
+			InputReadyLine*		fInputReady;
 
-			uint32				fLastButtons;
-			uint32				fClickCount;
-			bigtime_t			fLastClickTime;
-			bigtime_t			fClickSpeed;
+			mutex				fReadLock;
 
-			status_t			fReportStatus;
-			uint8				fCurrentReport[TRANSFER_BUFFER_SIZE];
-			int				fCurrentReportLength;
-			int32				fBusyCount;
+			uint8				fPattern;
+			size_t				fReportLength;
+			uint16				fMaxX;
+			uint16				fMaxY;
+			uint8				fPressureAdjustment;
 
-			ConditionVariable		fConditionVariable;
+			uint8				fReport[ELAN_MAX_REPORT_LENGTH];
+			uint8				fLastReport[ELAN_MAX_REPORT_LENGTH];
+			uint32				fBadReports;
 
-			touchpad_specs			fHardwareSpecs;
+			// clickpad button emulation
+			uint32				fClickButton;
+			int					fLastCount;
+			int					fContactMaxFingers;
+			bigtime_t			fContactStart;
+			uint32				fTapX;
+			uint32				fTapY;
+			bool				fContactMoved;
+			bool				fContactClicked;
+			bool				fIgnoreContact;
+			bool				fPendingRelease;
+
+			touchpad_specs		fHardwareSpecs;
 };
 
 

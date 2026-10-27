@@ -5,8 +5,9 @@
  */
 
 
-#include "Driver.h"
 #include "InputReadyLine.h"
+
+#include <KernelExport.h>
 
 #include <stdlib.h>
 #include <string.h>
@@ -16,11 +17,19 @@ extern "C" {
 }
 
 
+// Shared by i2c_hid and i2c_elan.
+#define TRACE_ALWAYS(x...)	dprintf("input ready: " x)
+
+
 // Intel PCH GPIO pad configuration: PADCFG0 is the first of two 32-bit
 // registers per pad (see Linux pinctrl-intel.c).
 #define PADCFG0_GPIORXSTATE		(1U << 1)
 #define PADCFG0_GPIORXDIS		(1U << 9)
 #define PADCFG0_PMODE_MASK		(0xfU << 10)
+
+// AMD FCH GPIO: one 32-bit register per pin (see Linux pinctrl-amd.h).
+#define AMD_PIN_STS				(1U << 16)
+#define AMD_OUTPUT_ENABLE		(1U << 23)
 
 #define MAX_COMMUNITIES			4
 
@@ -38,15 +47,30 @@ static const pad_community kSunrisePointLPCommunities[] = {
 	{ 120, 151 },
 };
 
+// AMD controllers have a single bank of pins, numbered from 0.
+static const pad_community kAMDCommunities[] = {
+	{ 0, 255 },
+};
+
+enum gpio_controller_type {
+	GPIO_INTEL,
+	GPIO_AMD,
+};
+
 static const struct {
 	const char*				hid;
+	gpio_controller_type	type;
 	const pad_community*	communities;
 	uint32					communityCount;
 	uint32					padConfigOffset;
 	uint32					padConfigStride;
 } kGPIOControllers[] = {
-	{ "INT344B", kSunrisePointLPCommunities,
+	{ "INT344B", GPIO_INTEL, kSunrisePointLPCommunities,
 		B_COUNT_OF(kSunrisePointLPCommunities), 0x400, 8 },
+	{ "AMD0030", GPIO_AMD, kAMDCommunities,
+		B_COUNT_OF(kAMDCommunities), 0, 4 },
+	{ "AMDI0030", GPIO_AMD, kAMDCommunities,
+		B_COUNT_OF(kAMDCommunities), 0, 4 },
 };
 
 
@@ -91,12 +115,18 @@ static acpi_status
 find_controller_memory(ACPI_RESOURCE* resource, void* context)
 {
 	controller_memory* memory = (controller_memory*)context;
-	if (resource->Type != ACPI_RESOURCE_TYPE_FIXED_MEMORY32
-		|| memory->count >= MAX_COMMUNITIES)
+	if (memory->count >= MAX_COMMUNITIES)
 		return AE_OK;
 
-	memory->base[memory->count] = resource->Data.FixedMemory32.Address;
-	memory->length[memory->count] = resource->Data.FixedMemory32.AddressLength;
+	if (resource->Type == ACPI_RESOURCE_TYPE_FIXED_MEMORY32) {
+		memory->base[memory->count] = resource->Data.FixedMemory32.Address;
+		memory->length[memory->count]
+			= resource->Data.FixedMemory32.AddressLength;
+	} else if (resource->Type == ACPI_RESOURCE_TYPE_MEMORY32) {
+		memory->base[memory->count] = resource->Data.Memory32.Minimum;
+		memory->length[memory->count] = resource->Data.Memory32.AddressLength;
+	} else
+		return AE_OK;
 	memory->count++;
 	return AE_OK;
 }
@@ -106,6 +136,7 @@ InputReadyLine::InputReadyLine()
 	:
 	fArea(-1),
 	fPadConfig(NULL),
+	fStateMask(PADCFG0_GPIORXSTATE),
 	fActiveLow(true)
 {
 }
@@ -131,6 +162,8 @@ InputReadyLine::Init(acpi_module_info* acpi, acpi_handle device)
 	if (interrupt.triggering != ACPI_LEVEL_SENSITIVE
 		|| (interrupt.polarity != ACPI_ACTIVE_LOW
 			&& interrupt.polarity != ACPI_ACTIVE_HIGH)) {
+		TRACE_ALWAYS("%s pin %u is not level triggered\n",
+			interrupt.controller, interrupt.pin);
 		return B_NOT_SUPPORTED;
 	}
 
@@ -147,12 +180,13 @@ InputReadyLine::Init(acpi_module_info* acpi, acpi_handle device)
 			break;
 		}
 	}
-	free(hid);
 	if (type < 0) {
-		TRACE("input ready: GPIO controller %s not supported\n",
-			interrupt.controller);
+		TRACE_ALWAYS("GPIO controller %s (%s) not supported\n",
+			interrupt.controller, hid);
+		free(hid);
 		return B_NOT_SUPPORTED;
 	}
+	free(hid);
 
 	acpi_handle controller;
 	if (acpi->get_handle(NULL, interrupt.controller, &controller) != B_OK)
@@ -197,9 +231,17 @@ InputReadyLine::Init(acpi_module_info* acpi, acpi_handle device)
 
 	// Use the pad only if it is a GPIO with its input enabled.
 	uint32 padConfig = *fPadConfig;
-	if ((padConfig & PADCFG0_PMODE_MASK) != 0
-		|| (padConfig & PADCFG0_GPIORXDIS) != 0) {
-		TRACE("input ready: pad %u is not a GPIO input (0x%08" B_PRIx32 ")\n",
+	bool usable;
+	if (kGPIOControllers[type].type == GPIO_AMD) {
+		usable = (padConfig & AMD_OUTPUT_ENABLE) == 0;
+		fStateMask = AMD_PIN_STS;
+	} else {
+		usable = (padConfig & PADCFG0_PMODE_MASK) == 0
+			&& (padConfig & PADCFG0_GPIORXDIS) == 0;
+		fStateMask = PADCFG0_GPIORXSTATE;
+	}
+	if (!usable) {
+		TRACE_ALWAYS("pad %u is not a GPIO input (0x%08" B_PRIx32 ")\n",
 			interrupt.pin, padConfig);
 		delete_area(fArea);
 		fArea = -1;
@@ -208,7 +250,7 @@ InputReadyLine::Init(acpi_module_info* acpi, acpi_handle device)
 	}
 
 	fActiveLow = interrupt.polarity == ACPI_ACTIVE_LOW;
-	TRACE_ALWAYS("input ready line: %s pin %u\n", interrupt.controller,
+	TRACE_ALWAYS("using %s pin %u\n", interrupt.controller,
 		interrupt.pin);
 	return B_OK;
 }
@@ -217,6 +259,6 @@ InputReadyLine::Init(acpi_module_info* acpi, acpi_handle device)
 bool
 InputReadyLine::IsAsserted() const
 {
-	bool high = (*fPadConfig & PADCFG0_GPIORXSTATE) != 0;
+	bool high = (*fPadConfig & fStateMask) != 0;
 	return high != fActiveLow;
 }
