@@ -1,5 +1,5 @@
 /*
- * Copyright 2018-2022, Haiku, Inc. All rights reserved.
+ * Copyright 2018-2026, Haiku, Inc. All rights reserved.
  * Distributed under the terms of the MIT license.
  */
 #ifndef _FBSD_COMPAT_MACHINE_BUS_H_
@@ -10,10 +10,8 @@
 
 #if defined(__i386__) || defined(__amd64__)
 #  include <machine/x86/bus.h>
-#elif (defined(__riscv) && __riscv_xlen == 64)
-#  include <machine/generic/bus.h>
 #else
-#  error Need a bus.h for this arch!
+#  include <machine/generic/bus.h>
 #endif
 
 #endif /* _FBSD_COMPAT_MACHINE_BUS_H_ */
