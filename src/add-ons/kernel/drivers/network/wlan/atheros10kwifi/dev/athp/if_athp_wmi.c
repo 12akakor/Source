@@ -24,6 +24,7 @@
 
 #include <sys/param.h>
 #include <sys/endian.h>
+#include <sys/epoch.h>
 #include <sys/sockio.h>
 #include <sys/mbuf.h>
 #include <sys/kernel.h>
@@ -40,7 +41,9 @@
 
 #include <vm/vm.h>
 #include <vm/pmap.h>
+#ifndef __HAIKU__
 #include <machine/pmap.h>	/* for vtophys() */
+#endif
 
 #include <machine/bus.h>
 #include <machine/resource.h>

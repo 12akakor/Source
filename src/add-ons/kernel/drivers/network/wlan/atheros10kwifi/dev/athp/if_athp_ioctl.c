@@ -94,6 +94,21 @@
 #include "if_athp_ioctl.h"
 #include "if_athp_ioctl_api.h"
 
+#ifdef __HAIKU__
+/* No character devices in the compat layer: the debug ioctls are absent. */
+int
+athp_ioctl_setup(struct ath10k *ar)
+{
+
+	return (0);
+}
+
+void
+athp_ioctl_teardown(struct ath10k *ar)
+{
+}
+#else
+
 MALLOC_DEFINE(M_ATHPDEV_IOCTL, "athpioctl", "athp ioctl memory");
 
 static d_ioctl_t athp_ioctl_ioctl;
@@ -163,3 +178,4 @@ athp_ioctl_teardown(struct ath10k *ar)
 	destroy_dev(ar->sc_cdev);
 	ar->sc_cdev = NULL;
 }
+#endif /* !__HAIKU__ */

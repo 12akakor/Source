@@ -37,7 +37,9 @@
 #include <sys/module.h>
 #include <sys/taskqueue.h>
 #include <sys/condvar.h>
+#ifndef __HAIKU__
 #include <sys/alq.h>
+#endif
 
 #include <machine/bus.h>
 #include <machine/resource.h>
@@ -102,6 +104,10 @@ athp_trace_open(struct ath10k *ar, const char *path)
 	if (ar->sc_trace.active)
 		return (0);
 
+#ifdef __HAIKU__
+	(void)error;
+	return (EOPNOTSUPP);
+#else
 	error = alq_open(&ar->sc_trace.alq, path,
 	    curthread->td_ucred,
 	    ALQ_DEFAULT_CMODE,
@@ -118,6 +124,7 @@ athp_trace_open(struct ath10k *ar, const char *path)
 	ar->sc_trace.active = 1;
 
 	return (0);
+#endif
 }
 
 void
@@ -129,7 +136,9 @@ athp_trace_close(struct ath10k *ar)
 	ath10k_warn(ar, "%s: tracing stopped\n", __func__);
 
 	ar->sc_trace.active = 0;
+#ifndef __HAIKU__
 	alq_close(ar->sc_trace.alq);
+#endif
 	ar->sc_trace.alq = 0;
 }
 
@@ -144,6 +153,9 @@ ath10k_trace_queue(struct ath10k *ar, int id, const void *buf, int len,
 	if (ar->sc_trace.active == 0)
 		return (0);
 
+#ifdef __HAIKU__
+	return (0);
+#else
 	if (! (ar->sc_trace.trace_mask & (1ULL << id)))
 		return (0);
 
@@ -178,6 +190,7 @@ ath10k_trace_queue(struct ath10k *ar, int id, const void *buf, int len,
 	ar->sc_trace.num_sent++;
 
 	return (0);
+#endif
 }
 
 /*

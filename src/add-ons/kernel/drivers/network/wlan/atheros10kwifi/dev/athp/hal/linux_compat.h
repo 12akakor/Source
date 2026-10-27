@@ -25,6 +25,9 @@
 #include <sys/kernel.h>
 #include <sys/types.h>
 #include <sys/libkern.h>
+#ifdef __HAIKU__
+#include "if_athp_haiku.h"
+#endif
 
 #define	unlikely(x)	(x)
 #define	likely(x)	(x)
