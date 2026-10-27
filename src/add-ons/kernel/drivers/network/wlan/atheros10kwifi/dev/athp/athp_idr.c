@@ -45,6 +45,8 @@
 #define	likely(x)		(x)
 #define	unlikely(x)		(x)
 
+#include "hal/athp_err.h"
+
 /*
  * IDR Implementation.
  *
@@ -539,7 +541,7 @@ idr_alloc_locked(struct idr *idr, void *ptr, int start, int end)
 	else
 		error = idr_get_new_above_locked(idr, ptr, start, &id);
 
-	if (unlikely(error < 0))
+	if (unlikely(ATHP_IS_ERR_RET(error)))
 		return (error);
 	if (unlikely(id > max)) {
 		idr_remove_locked(idr, id);

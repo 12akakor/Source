@@ -456,19 +456,19 @@ static int ath10k_install_peer_wep_keys(struct ath10k_vif *arvif,
 
 			ret = ath10k_install_key(arvif, arvif->wep_keys[i],
 						 SET_KEY, addr, flags);
-			if (ret < 0)
+			if (ATHP_IS_ERR_RET(ret))
 				return ret;
 			break;
 		case NL80211_IFTYPE_ADHOC:
 			ret = ath10k_install_key(arvif, arvif->wep_keys[i],
 						 SET_KEY, addr,
 						 WMI_KEY_PAIRWISE);
-			if (ret < 0)
+			if (ATHP_IS_ERR_RET(ret))
 				return ret;
 
 			ret = ath10k_install_key(arvif, arvif->wep_keys[i],
 						 SET_KEY, addr, WMI_KEY_GROUP);
-			if (ret < 0)
+			if (ATHP_IS_ERR_RET(ret))
 				return ret;
 			break;
 		default:
@@ -549,10 +549,10 @@ static int ath10k_clear_peer_keys(struct ath10k_vif *arvif,
 		/* key flags are not required to delete the key */
 		ret = ath10k_install_key(arvif, &peer->keys[i], DISABLE_KEY,
 		    addr, flags);
-		if (ret < 0 && first_errno == 0)
+		if (ATHP_IS_ERR_RET(ret) && first_errno == 0)
 			first_errno = ret;
 
-		if (ret < 0)
+		if (ATHP_IS_ERR_RET(ret))
 			ath10k_warn(ar, "failed to remove peer wep key %d: %d\n",
 				    i, ret);
 
@@ -640,7 +640,7 @@ static int ath10k_clear_vdev_key(struct ath10k_vif *arvif,
 			break;
 		/* key flags are not required to delete the key */
 		ret = ath10k_install_key(arvif, key, DISABLE_KEY, addr, flags);
-		if (ret < 0 && first_errno == 0)
+		if (ATHP_IS_ERR_RET(ret) && first_errno == 0)
 			first_errno = ret;
 
 		if (ret)

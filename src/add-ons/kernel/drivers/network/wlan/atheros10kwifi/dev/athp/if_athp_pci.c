@@ -751,7 +751,7 @@ athp_pci_attach(device_t dev)
 	/*
 	 * Initialise ath10k core bits.
 	 */
-	if (ath10k_core_init(ar) < 0)
+	if (ATHP_IS_ERR_RET(ath10k_core_init(ar)))
 		goto bad0;
 
 	/*

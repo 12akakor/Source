@@ -33,6 +33,39 @@
 #ifndef	_ATHP_LINUX_ERR_H_
 #define	_ATHP_LINUX_ERR_H_
 
+#ifdef __HAIKU__
+/*
+ * Haiku's errno values are themselves negative, in [INT_MIN, INT_MIN + 0xffff],
+ * so the Linux "-errno" idiom yields INT_MIN or a value just below INT_MAX,
+ * not a small negative number. Recognise those values as failures, and carry
+ * them in error pointers inside a non-canonical address range that no real
+ * pointer can occupy.
+ */
+#if __SIZEOF_POINTER__ != 8
+#error "athp error pointers need 64-bit pointers"
+#endif
+
+#define	ATHP_IS_ERR_RET(x)	((x) < 0 || (x) > INT_MAX - 0x10000)
+
+#define	ATHP_ERR_PTR_BASE	0xdead000000000000UL
+
+#define IS_ERR_VALUE(x) \
+	unlikely(((unsigned long)(x) >> 32) == (ATHP_ERR_PTR_BASE >> 32))
+
+static inline void *
+ERR_PTR(long error)
+{
+	return (void *)(ATHP_ERR_PTR_BASE | (uint32_t)error);
+}
+
+static inline long
+PTR_ERR(const void *ptr)
+{
+	return (long)(int32_t)(uint32_t)(unsigned long)ptr;
+}
+#else
+#define	ATHP_IS_ERR_RET(x)	((x) < 0)
+
 #define MAX_ERRNO	4095
 
 #define IS_ERR_VALUE(x) unlikely((x) >= (unsigned long)-MAX_ERRNO)
@@ -48,6 +81,7 @@ PTR_ERR(const void *ptr)
 {
 	return (long)ptr;
 }
+#endif
 
 static inline long
 IS_ERR(const void *ptr)

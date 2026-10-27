@@ -535,7 +535,7 @@ int ath10k_htt_mgmt_tx(struct ath10k_htt *htt, struct athp_buf *msdu)
 	/* XXX note: we're specifically trying to store athp_buf's in the idr */
 	res = ath10k_htt_tx_alloc_msdu_id(htt, msdu);
 	ATHP_HTT_TX_UNLOCK(htt);
-	if (res < 0) {
+	if (ATHP_IS_ERR_RET(res)) {
 		ath10k_err(ar, "%s: Failed to get msdu id (%d)", __func__, res);
 		goto err_tx_dec;
 	}
@@ -643,7 +643,7 @@ ath10k_htt_tx(struct ath10k_htt *htt, struct athp_buf *msdu)
 	ATHP_HTT_TX_LOCK(htt);
 	res = ath10k_htt_tx_alloc_msdu_id(htt, msdu);
 	ATHP_HTT_TX_UNLOCK(htt);
-	if (res < 0) {
+	if (ATHP_IS_ERR_RET(res)) {
 		ath10k_err(ar, "%s: Failed to allocate MSDU id (%d)", __func__, res);
 		goto err_tx_dec;
 	}

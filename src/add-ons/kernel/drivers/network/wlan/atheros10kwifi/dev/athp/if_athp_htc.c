@@ -673,7 +673,7 @@ int ath10k_htc_wait_target(struct ath10k_htc *htc)
 			status = -ETIMEDOUT;
 	}
 
-	if (status < 0) {
+	if (ATHP_IS_ERR_RET(status)) {
 		ath10k_err(ar, "ctl_resp never came in (%d)\n", status);
 		return status;
 	}

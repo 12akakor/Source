@@ -1853,7 +1853,7 @@ static int ath10k_unchain_msdu(athp_buf_head *amsdu)
 	 */
 	space = total_len - skb_tailroom(first);
 	if ((space > 0) &&
-	    (pskb_expand_head(first, 0, space, GFP_ATOMIC) < 0)) {
+	    ATHP_IS_ERR_RET(pskb_expand_head(first, 0, space, GFP_ATOMIC))) {
 		/* TODO:  bump some rx-oom error stat */
 		/* put it back together so we can free the
 		 * whole list at once.
@@ -2123,7 +2123,7 @@ static void ath10k_htt_rx_handler(struct ath10k_htt *htt,
 		TAILQ_INIT(&amsdu);
 		ret = ath10k_htt_rx_amsdu_pop(htt, &fw_desc,
 					      &fw_desc_len, &amsdu);
-		if (ret < 0) {
+		if (ATHP_IS_ERR_RET(ret)) {
 			ath10k_warn(ar, "rx ring became corrupted: %d\n", ret);
 			athp_buf_list_flush(ar, &ar->buf_rx, &amsdu);
 			/* FIXME: It's probably a good idea to reboot the
@@ -2546,7 +2546,7 @@ static void ath10k_htt_rx_in_ord_ind(struct ath10k *ar, struct athp_buf *skb)
 	 */
 	TAILQ_INIT(&list);
 	ret = ath10k_htt_rx_pop_paddr_list(htt, &resp->rx_in_ord_ind, &list);
-	if (ret < 0) {
+	if (ATHP_IS_ERR_RET(ret)) {
 		ath10k_warn(ar, "failed to pop paddr list: %d\n", ret);
 		htt->rx_confused = true;
 		return;
