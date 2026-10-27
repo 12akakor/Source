@@ -1790,7 +1790,18 @@ int
 ath10k_core_register(struct ath10k *ar)
 {
 
+#ifdef __HAIKU__
+	/*
+	 * The compat layer keeps a driver only if its interface exists once
+	 * attach returns, and tears it down otherwise. So load the firmware
+	 * and attach to net80211 now, and let attach fail if that fails.
+	 */
+	ath10k_core_register_work(ar, 0);
+	if (!test_bit(ATH10K_FLAG_CORE_REGISTERED, &ar->dev_flags))
+		return (ENXIO);
+#else
 	taskqueue_enqueue(ar->attach_workqueue, &ar->register_work);
+#endif
 
 	return 0;
 }

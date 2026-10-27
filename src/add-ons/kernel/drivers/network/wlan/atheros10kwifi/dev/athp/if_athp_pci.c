@@ -986,6 +986,20 @@ athp_pci_attach(device_t dev)
 		goto bad4;
 	}
 
+#ifdef __HAIKU__
+	/* Register synchronously so a failure fails attach; see core_register */
+	athp_ioctl_setup(ar);
+	if (ath10k_core_register(ar) != 0) {
+		device_printf(ar->sc_dev, "%s: core registration failed\n",
+		    __func__);
+		athp_ioctl_teardown(ar);
+		err = ENXIO;
+		goto bad4;
+	}
+
+	return (0);
+#endif
+
 	/* Call main attach method with given info */
 	ar->sc_preinit_hook.ich_func = athp_attach_preinit;
 	ar->sc_preinit_hook.ich_arg = ar;
