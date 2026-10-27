@@ -22,6 +22,8 @@
 #define atomic_set_acq_32		atomic_set_32
 
 #define	atomic_load_64(ptr)		atomic_get64((int64*)ptr)
+#define atomic_cmpset_64(ptr, old, new) \
+	(atomic_test_and_set64((int64*)ptr, new, old) == old)
 
 
 #define atomic_add_int			atomic_add_32
@@ -35,6 +37,11 @@
 #define atomic_readandclear_int	atomic_readandclear_32
 
 #define	atomic_load_long		atomic_load_64
+#define	atomic_load_acq_long	atomic_load_64
+#define atomic_cmpset_long		atomic_cmpset_64
+// Unlike atomic_set_32 above, these follow FreeBSD: set and clear bits.
+#define atomic_set_long(ptr, bits)	(void)atomic_or64((int64*)ptr, bits)
+#define atomic_clear_long(ptr, bits) (void)atomic_and64((int64*)ptr, ~(bits))
 
 
 #define mb()    memory_full_barrier()
