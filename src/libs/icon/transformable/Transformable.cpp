@@ -88,8 +88,13 @@ Transformable::StoreTo(double matrix[matrix_size]) const
 
 
 void
-Transformable::LoadFrom(const double matrix[matrix_size])
+Transformable::LoadFrom(const double _matrix[matrix_size])
 {
+	// the matrix often comes straight from an archive, where it does not
+	// have to be aligned
+	double matrix[matrix_size];
+	memcpy(matrix, _matrix, sizeof(matrix));
+
 	// before calling the potentially heavy TransformationChanged()
 	// hook function, make sure that the transformation
 	// really changed
