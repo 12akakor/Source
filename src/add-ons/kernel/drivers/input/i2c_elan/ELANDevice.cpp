@@ -68,6 +68,14 @@
 static const bigtime_t kInputReadyPollInterval = 1000;
 static const bigtime_t kBlindPollInterval = 8000;
 
+// A touch of two or more fingers that ends within this time, without moving
+// or pressing the pad, is a tap for the right (or middle) button.
+static const bigtime_t kMultiFingerTapTimeout = 250000;
+
+#define BUTTON_LEFT		0x01
+#define BUTTON_RIGHT	0x02
+#define BUTTON_MIDDLE	0x04
+
 
 ELANDevice::ELANDevice(device_node* parent, i2c_device_interface* i2c,
 	i2c_device i2cCookie, InputReadyLine* inputReady)
@@ -86,6 +94,7 @@ ELANDevice::ELANDevice(device_node* parent, i2c_device_interface* i2c,
 		fPressureAdjustment(0),
 		fBadReports(0)
 {
+	_ResetContact();
 	mutex_init(&fReadLock, "elan report");
 	memset(fLastReport, 0, sizeof(fLastReport));
 	memset(&fHardwareSpecs, 0, sizeof(fHardwareSpecs));
@@ -321,6 +330,7 @@ ELANDevice::_Wake()
 
 	// Drop any report left over from before the touchpad slept.
 	memset(fLastReport, 0, sizeof(fLastReport));
+	_ResetContact();
 	if (fInputReady != NULL && fInputReady->IsAsserted())
 		_Receive(fReport, fReportLength);
 
@@ -347,6 +357,14 @@ ELANDevice::_ReadReport(touchpad_movement* movement, bigtime_t timeout)
 	while (true) {
 		if (fRemoved)
 			return B_DEV_NOT_READY;
+
+		if (fPendingRelease) {
+			// Second half of an emulated tap click.
+			fPendingRelease = false;
+			memset(movement, 0, sizeof(*movement));
+			movement->fingerWidth = 4;
+			return B_OK;
+		}
 
 		bool ready = !mustWait
 			&& (fInputReady == NULL || fInputReady->IsAsserted());
@@ -402,13 +420,15 @@ ELANDevice::_ReadReport(touchpad_movement* movement, bigtime_t timeout)
 		}
 		memcpy(fLastReport, fReport, fReportLength);
 
-		_ParseReport(fReport, movement);
+		int count = _ParseReport(fReport, movement);
+		if (!_EmulateButtons(movement, count))
+			continue;
 		return B_OK;
 	}
 }
 
 
-void
+int
 ELANDevice::_ParseReport(const uint8* report, touchpad_movement* movement)
 {
 	bool highPrecision = report[ETP_REPORT_ID_OFFSET] == ETP_REPORT_ID2;
@@ -458,7 +478,7 @@ ELANDevice::_ParseReport(const uint8* report, touchpad_movement* movement)
 	if (count == 0) {
 		// A width of 0 or 1 would read as two or three fingers.
 		movement->fingerWidth = 4;
-		return;
+		return 0;
 	}
 
 	movement->xPosition = sumX / count;
@@ -471,6 +491,97 @@ ELANDevice::_ParseReport(const uint8* report, touchpad_movement* movement)
 		movement->fingerWidth = min_c(4 + sumWidth / 3, 15);
 	else
 		movement->fingerWidth = count == 2 ? 0 : 1;
+
+	return count;
+}
+
+
+//!	Turns the single button under the pad into right and middle buttons too.
+bool
+ELANDevice::_EmulateButtons(touchpad_movement* movement, int count)
+{
+	bigtime_t now = system_time();
+
+	if (fIgnoreContact) {
+		// The rest of a touch that was already reported as a tap.
+		if (count == 0)
+			_ResetContact();
+		return false;
+	}
+
+	if (count > 0 && fLastCount == 0) {
+		fContactStart = now;
+		fContactMaxFingers = 0;
+		fContactMoved = false;
+		fContactClicked = false;
+	}
+	fLastCount = count;
+
+	if (count >= 2) {
+		uint32 slop = max_c(fMaxX / 30, 1);
+		if (fContactMaxFingers < 2) {
+			fTapX = movement->xPosition;
+			fTapY = movement->yPosition;
+		} else if (abs((int32)movement->xPosition - (int32)fTapX) > (int32)slop
+			|| abs((int32)movement->yPosition - (int32)fTapY) > (int32)slop) {
+			fContactMoved = true;
+		}
+	}
+	fContactMaxFingers = max_c(fContactMaxFingers, count);
+
+	// The pad clicks as one button. Like Chrome OS, a click with two
+	// fingers, or with one finger in the bottom right corner, is a right
+	// click, and one with three fingers a middle click. The button is
+	// chosen when the pad goes down and kept until it comes up again.
+	if ((movement->buttons & BUTTON_LEFT) != 0) {
+		fContactClicked = true;
+		if (fClickButton == 0) {
+			// Elan Y grows upwards, as movement_maker expects.
+			if (count >= 3)
+				fClickButton = BUTTON_MIDDLE;
+			else if (count == 2)
+				fClickButton = BUTTON_RIGHT;
+			else if (count == 1 && movement->yPosition < fMaxY / 5
+				&& movement->xPosition > fMaxX / 2)
+				fClickButton = BUTTON_RIGHT;
+			else
+				fClickButton = BUTTON_LEFT;
+		}
+		movement->buttons = (movement->buttons & ~BUTTON_LEFT) | fClickButton;
+	} else
+		fClickButton = 0;
+
+	// Tapping with two fingers is a right click, with three a middle click.
+	// It is reported as soon as the fingers start to lift; the rest of the
+	// touch is dropped so movement_maker does not see a one finger tap.
+	if (fContactMaxFingers >= 2 && count < 2 && !fContactMoved
+		&& !fContactClicked && now - fContactStart < kMultiFingerTapTimeout) {
+		uint32 button = fContactMaxFingers == 2 ? BUTTON_RIGHT : BUTTON_MIDDLE;
+		_ResetContact();
+		fIgnoreContact = count > 0;
+		fLastCount = count;
+		memset(movement, 0, sizeof(*movement));
+		movement->buttons = button;
+		movement->fingerWidth = 4;
+		fPendingRelease = true;
+	}
+
+	return true;
+}
+
+
+void
+ELANDevice::_ResetContact()
+{
+	fClickButton = 0;
+	fLastCount = 0;
+	fContactMaxFingers = 0;
+	fContactStart = 0;
+	fTapX = fTapY = 0;
+	fContactMoved = false;
+	fContactClicked = false;
+	fIgnoreContact = false;
+	fPendingRelease = false;
 }
 
 

@@ -48,8 +48,11 @@ private:
 
 			status_t			_ReadReport(touchpad_movement* movement,
 									bigtime_t timeout);
-			void				_ParseReport(const uint8* report,
+			int					_ParseReport(const uint8* report,
 									touchpad_movement* movement);
+			bool				_EmulateButtons(touchpad_movement* movement,
+									int count);
+			void				_ResetContact();
 
 			status_t			_ReadRegister(uint16 reg, void* value,
 									size_t length);
@@ -83,6 +86,18 @@ private:
 			uint8				fReport[ELAN_MAX_REPORT_LENGTH];
 			uint8				fLastReport[ELAN_MAX_REPORT_LENGTH];
 			uint32				fBadReports;
+
+			// clickpad button emulation
+			uint32				fClickButton;
+			int					fLastCount;
+			int					fContactMaxFingers;
+			bigtime_t			fContactStart;
+			uint32				fTapX;
+			uint32				fTapY;
+			bool				fContactMoved;
+			bool				fContactClicked;
+			bool				fIgnoreContact;
+			bool				fPendingRelease;
 
 			touchpad_specs		fHardwareSpecs;
 };
