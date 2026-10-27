@@ -644,8 +644,8 @@ static int ath10k_clear_vdev_key(struct ath10k_vif *arvif,
 			first_errno = ret;
 
 		if (ret)
-			ath10k_warn(ar, "failed to remove key for %6D: %d\n",
-				    addr, ":", ret);
+			ath10k_warn(ar, "failed to remove key for %s: %d\n",
+				    ether_sprintf(addr), ret);
 	}
 
 	return first_errno;
@@ -690,8 +690,8 @@ static int ath10k_mac_vif_update_wep_key(struct ath10k_vif *arvif,
 
 		ret = ath10k_install_peer_wep_keys(arvif, peer->addr);
 		if (ret) {
-			ath10k_warn(ar, "failed to update wep keys on vdev %i for peer %6D: %d\n",
-				    arvif->vdev_id, peer->addr, ":", ret);
+			ath10k_warn(ar, "failed to update wep keys on vdev %i for peer %s: %d\n",
+				    arvif->vdev_id, ether_sprintf(peer->addr), ret);
 			return ret;
 		}
 	}
@@ -916,15 +916,15 @@ static int ath10k_peer_create(struct ath10k *ar, u32 vdev_id, const u8 *addr,
 
 	ret = ath10k_wmi_peer_create(ar, vdev_id, addr, peer_type);
 	if (ret) {
-		ath10k_warn(ar, "failed to create wmi peer %6D on vdev %i: %i\n",
-			    addr, ":", vdev_id, ret);
+		ath10k_warn(ar, "failed to create wmi peer %s on vdev %i: %i\n",
+			    ether_sprintf(addr), vdev_id, ret);
 		return ret;
 	}
 
 	ret = ath10k_wait_for_peer_created(ar, vdev_id, addr);
 	if (ret) {
-		ath10k_warn(ar, "failed to wait for created wmi peer %6D on vdev %i: %i\n",
-			    addr, ":", vdev_id, ret);
+		ath10k_warn(ar, "failed to wait for created wmi peer %s on vdev %i: %i\n",
+			    ether_sprintf(addr), vdev_id, ret);
 		return ret;
 	}
 
@@ -1020,8 +1020,8 @@ static void ath10k_peer_cleanup(struct ath10k *ar, u32 vdev_id)
 		if (peer->vdev_id != vdev_id)
 			continue;
 
-		ath10k_warn(ar, "removing stale peer %6D from vdev_id %d\n",
-			    peer->addr, ":", vdev_id);
+		ath10k_warn(ar, "removing stale peer %s from vdev_id %d\n",
+			    ether_sprintf(peer->addr), vdev_id);
 
 		TAILQ_REMOVE(&ar->peers, peer, list);
 		free(peer, M_ATHPDEV);
@@ -3009,9 +3009,8 @@ static void ath10k_peer_assoc_h_ht(struct ath10k *ar,
 	}
 
 	ath10k_dbg(ar, ATH10K_DBG_MAC,
-	    "mac ht peer %6D mcs cnt %d nss %d maxnss %d htcap 0x%08x\n",
-	    arg->addr,
-	    ":",
+	    "mac ht peer %s mcs cnt %d nss %d maxnss %d htcap 0x%08x\n",
+	    ether_sprintf(arg->addr),
 	    arg->peer_ht_rates.num_rates,
 	    arg->peer_num_spatial_streams,
 	    max_nss,
@@ -3249,14 +3248,14 @@ static void ath10k_peer_assoc_h_vht(struct ath10k *ar,
 	arg->peer_vht_rates.tx_mcs_set = vhtcap.supp_mcs.tx_mcs_map;
 
 	ath10k_dbg(ar, ATH10K_DBG_MAC,
-	    "mac vht peer %6D peer-vhtcaps 0x%08x "
+	    "mac vht peer %s peer-vhtcaps 0x%08x "
 	    "vhtcaps 0x%08x max_mpdu %d flags 0x%x\n",
-	    sta->ni_macaddr, ":", sta->ni_vhtcap,
+	    ether_sprintf(sta->ni_macaddr), sta->ni_vhtcap,
 	    vht_cap, arg->peer_max_mpdu, arg->peer_flags);
 	ath10k_dbg(ar, ATH10K_DBG_MAC,
-	    "mac vht peer %6D peer-rxmcs 0x%04x peer-txmcs 0x%04x "
+	    "mac vht peer %s peer-rxmcs 0x%04x peer-txmcs 0x%04x "
 	    "rxmcs 0x%04x txmcs 0x%04x\n",
-	    sta->ni_macaddr, ":",
+	    ether_sprintf(sta->ni_macaddr),
 	    sta->ni_vht_mcsinfo.rx_mcs_map,
 	    sta->ni_vht_mcsinfo.tx_mcs_map,
 	    vhtcap.supp_mcs.rx_mcs_map,
@@ -3308,8 +3307,8 @@ static void ath10k_peer_assoc_h_qos(struct ath10k *ar,
 
 	if (ni->ni_flags & IEEE80211_NODE_QOS)
 		arg->peer_flags |= WMI_PEER_QOS;
-	ath10k_dbg(ar, ATH10K_DBG_MAC, "mac peer %6D qos %d\n",
-		   ni->ni_macaddr, ":", !!(arg->peer_flags & WMI_PEER_QOS));
+	ath10k_dbg(ar, ATH10K_DBG_MAC, "mac peer %s qos %d\n",
+		   ether_sprintf(ni->ni_macaddr), !!(arg->peer_flags & WMI_PEER_QOS));
 #endif
 }
 
@@ -3418,8 +3417,8 @@ ath10k_peer_assoc_h_phymode_freebsd(struct ath10k *ar,
 
 	phymode = chan_to_phymode(c);
 
-	ath10k_dbg(ar, ATH10K_DBG_MAC, "mac peer %6D phymode %s\n",
-	    ni->ni_macaddr, ":", ath10k_wmi_phymode_str(phymode));
+	ath10k_dbg(ar, ATH10K_DBG_MAC, "mac peer %s phymode %s\n",
+	    ether_sprintf(ni->ni_macaddr), ath10k_wmi_phymode_str(phymode));
 
 	arg->peer_phymode = phymode;
 	WARN_ON(phymode == MODE_UNKNOWN);
@@ -3569,8 +3568,8 @@ void ath10k_bss_assoc(struct ath10k *ar, struct ieee80211_node *ni, int is_run)
 	ether_addr_copy(arvif->bssid, ni->ni_macaddr);
 	arvif->aid = IEEE80211_AID(ni->ni_associd);
 
-	ath10k_dbg(ar, ATH10K_DBG_MAC, "mac vdev %i assoc bssid %6D aid %d\n",
-		   arvif->vdev_id, arvif->bssid, ":", arvif->aid);
+	ath10k_dbg(ar, ATH10K_DBG_MAC, "mac vdev %i assoc bssid %s aid %d\n",
+		   arvif->vdev_id, ether_sprintf(arvif->bssid), arvif->aid);
 
 	/* ap_sta must be accessed only within rcu section which must be left
 	 * before calling ath10k_setup_peer_smps() which might sleep. */
@@ -3585,16 +3584,16 @@ void ath10k_bss_assoc(struct ath10k *ar, struct ieee80211_node *ni, int is_run)
 
 	ret = ath10k_peer_assoc_prepare(ar, vif, ni, &peer_arg, is_run);
 	if (ret) {
-		ath10k_warn(ar, "failed to prepare peer assoc for %6D vdev %i: %d\n",
-			    ni->ni_macaddr, ":", arvif->vdev_id, ret);
+		ath10k_warn(ar, "failed to prepare peer assoc for %s vdev %i: %d\n",
+			    ether_sprintf(ni->ni_macaddr), arvif->vdev_id, ret);
 		return;
 	}
 
 	ret = ath10k_wmi_peer_assoc(ar, &peer_arg);
 	if (ret) {
 		ath10k_warn(ar,
-		    "failed to run peer assoc for %6D vdev %i: %d\n",
-		    ni->ni_macaddr, ":", arvif->vdev_id, ret);
+		    "failed to run peer assoc for %s vdev %i: %d\n",
+		    ether_sprintf(ni->ni_macaddr), arvif->vdev_id, ret);
 		return;
 	}
 
@@ -3608,14 +3607,14 @@ void ath10k_bss_assoc(struct ath10k *ar, struct ieee80211_node *ni, int is_run)
 	ret = ath10k_mac_vif_recalc_txbf(ar, vif, vhtcap);
 	if (ret) {
 		ath10k_warn(ar,
-		    "failed to recalc txbf for vdev %i on bss %6D: %d\n",
-		    arvif->vdev_id, ni->ni_macaddr, ":", ret);
+		    "failed to recalc txbf for vdev %i on bss %s: %d\n",
+		    arvif->vdev_id, ether_sprintf(ni->ni_macaddr), ret);
 		return;
 	}
 
 	ath10k_dbg(ar, ATH10K_DBG_MAC,
-		   "mac vdev %d up (associated) bssid %6D aid %d\n",
-		   arvif->vdev_id, ni->ni_macaddr, ":",
+		   "mac vdev %d up (associated) bssid %s aid %d\n",
+		   arvif->vdev_id, ether_sprintf(ni->ni_macaddr),
 		   IEEE80211_AID(ni->ni_associd));
 
 	WARN_ON(arvif->is_up);
@@ -3644,8 +3643,8 @@ void ath10k_bss_assoc(struct ath10k *ar, struct ieee80211_node *ni, int is_run)
 					WMI_PEER_DUMMY_VAR, 1);
 	if (ret) {
 		ath10k_warn(ar,
-		    "failed to poke peer %6D param for ps workaround on "
-		    "vdev %i: %d\n", arvif->bssid, ":", arvif->vdev_id, ret);
+		    "failed to poke peer %s param for ps workaround on "
+		    "vdev %i: %d\n", ether_sprintf(arvif->bssid), arvif->vdev_id, ret);
 		return;
 	}
 }
@@ -3661,8 +3660,8 @@ void ath10k_bss_disassoc(struct ath10k *ar, struct ieee80211vap *vif, int is_run
 
 	ATHP_CONF_LOCK_ASSERT(ar);
 
-	ath10k_dbg(ar, ATH10K_DBG_MAC, "mac vdev %i disassoc bssid %6D\n",
-		   arvif->vdev_id, arvif->bssid ,":");
+	ath10k_dbg(ar, ATH10K_DBG_MAC, "mac vdev %i disassoc bssid %s\n",
+		   arvif->vdev_id, ether_sprintf(arvif->bssid));
 
 	ret = ath10k_wmi_vdev_down(ar, arvif->vdev_id);
 	if (ret)
@@ -3702,16 +3701,16 @@ int ath10k_station_assoc(struct ath10k *ar,
 	ret = ath10k_peer_assoc_prepare(ar, vif, sta, &peer_arg, 1);
 	if (ret) {
 		ath10k_warn(ar,
-		    "failed to prepare WMI peer assoc for %6D vdev %i: %i\n",
-		    sta->ni_macaddr, ":", arvif->vdev_id, ret);
+		    "failed to prepare WMI peer assoc for %s vdev %i: %i\n",
+		    ether_sprintf(sta->ni_macaddr), arvif->vdev_id, ret);
 		return ret;
 	}
 
 	ret = ath10k_wmi_peer_assoc(ar, &peer_arg);
 	if (ret) {
 		ath10k_warn(ar,
-		    "failed to run peer assoc for STA %6D vdev %i: %d\n",
-		    sta->ni_macaddr, ":", arvif->vdev_id, ret);
+		    "failed to run peer assoc for STA %s vdev %i: %d\n",
+		    ether_sprintf(sta->ni_macaddr), arvif->vdev_id, ret);
 		return ret;
 	}
 
@@ -3733,9 +3732,9 @@ int ath10k_station_assoc(struct ath10k *ar,
 		ret = ath10k_peer_assoc_qos_ap(ar, vif, sta);
 		if (ret) {
 			ath10k_warn(ar,
-			    "failed to set qos params for STA %6D for "
+			    "failed to set qos params for STA %s for "
 			    "vdev %i: %d\n",
-			    sta->ni_macaddr, ":", arvif->vdev_id, ret);
+			    ether_sprintf(sta->ni_macaddr), arvif->vdev_id, ret);
 			return ret;
 		}
 		if (! (sta->ni_flags & IEEE80211_NODE_QOS)) {
@@ -4550,15 +4549,15 @@ ath10k_offchan_tx_work(void *arg, int npending)
 
 		if (peer)
 			/* FIXME: should this use ath10k_warn()? */
-			ath10k_dbg(ar, ATH10K_DBG_MAC, "peer %6D on vdev %d already present\n",
-				   peer_addr, ":", vdev_id);
+			ath10k_dbg(ar, ATH10K_DBG_MAC, "peer %s on vdev %d already present\n",
+				   ether_sprintf(peer_addr), vdev_id);
 
 		if (!peer) {
 			ret = ath10k_peer_create(ar, vdev_id, peer_addr,
 						 WMI_PEER_TYPE_DEFAULT);
 			if (ret)
-				ath10k_warn(ar, "failed to create peer %6D on vdev %d: %d\n",
-					    peer_addr, ":", vdev_id, ret);
+				ath10k_warn(ar, "failed to create peer %s on vdev %d: %d\n",
+					    ether_sprintf(peer_addr), vdev_id, ret);
 			tmp_peer_created = (ret == 0);
 		}
 
@@ -4579,8 +4578,8 @@ ath10k_offchan_tx_work(void *arg, int npending)
 		if (!peer && tmp_peer_created) {
 			ret = ath10k_peer_delete(ar, vdev_id, peer_addr);
 			if (ret)
-				ath10k_warn(ar, "failed to delete peer %6D on vdev %d: %d\n",
-					    peer_addr, ":", vdev_id, ret);
+				ath10k_warn(ar, "failed to delete peer %s on vdev %d: %d\n",
+					    ether_sprintf(peer_addr), vdev_id, ret);
 		}
 
 		ATHP_CONF_UNLOCK(ar);
@@ -5520,7 +5519,7 @@ ath10k_add_interface(struct ath10k *ar, struct ieee80211vap *vif,
 		   arvif->vdev_id, arvif->vdev_type, arvif->vdev_subtype,
 		   arvif->beacon_buf.dd_desc ? "single-buf" : "per-skb");
 
-	ath10k_dbg(ar, ATH10K_DBG_MAC, " -> mac=%6D\n", mac, ":");
+	ath10k_dbg(ar, ATH10K_DBG_MAC, " -> mac=%s\n", ether_sprintf(mac));
 
 	ret = ath10k_wmi_vdev_create(ar, arvif->vdev_id, arvif->vdev_type,
 				     arvif->vdev_subtype, mac);
@@ -6224,8 +6223,8 @@ ath10k_set_key(struct ath10k *ar, int cmd, struct ieee80211vap *vif,
 
 	if (!peer) {
 		if (cmd == SET_KEY) {
-			ath10k_warn(ar, "failed to install key for non-existent peer %6D\n",
-				    peer_addr, ":");
+			ath10k_warn(ar, "failed to install key for non-existent peer %s\n",
+				    ether_sprintf(peer_addr));
 			ret = -EOPNOTSUPP;
 			goto exit;
 		} else {
@@ -6276,18 +6275,18 @@ ath10k_set_key(struct ath10k *ar, int cmd, struct ieee80211vap *vif,
 			flags |= WMI_KEY_TX_USAGE;
 	}
 
-	ath10k_dbg(ar, ATH10K_DBG_MAC, "%s: cmd=%d, peer=%6D, flags=0x%08x, defkey=%d\n",
+	ath10k_dbg(ar, ATH10K_DBG_MAC, "%s: cmd=%d, peer=%s, flags=0x%08x, defkey=%d\n",
 	    __func__,
 	    cmd,
-	    peer_addr, ":",
+	    ether_sprintf(peer_addr),
 	    flags,
 	    arvif->def_wep_key_idx);
 
 	ret = ath10k_install_key(arvif, key, cmd, peer_addr, flags);
 	if (ret) {
 		WARN_ON(ret > 0);
-		ath10k_warn(ar, "failed to install key for vdev %i peer %6D: %d\n",
-			    arvif->vdev_id, peer_addr, ":", ret);
+		ath10k_warn(ar, "failed to install key for vdev %i peer %s: %d\n",
+			    arvif->vdev_id, ether_sprintf(peer_addr), ret);
 		goto exit;
 	}
 
@@ -6307,14 +6306,14 @@ ath10k_set_key(struct ath10k *ar, int cmd, struct ieee80211vap *vif,
 		ret = ath10k_install_key(arvif, key, cmd, peer_addr, flags2);
 		if (ret) {
 			WARN_ON(ret > 0);
-			ath10k_warn(ar, "failed to install (ucast) key for vdev %i peer %6D: %d\n",
-				    arvif->vdev_id, peer_addr, ":", ret);
+			ath10k_warn(ar, "failed to install (ucast) key for vdev %i peer %s: %d\n",
+				    arvif->vdev_id, ether_sprintf(peer_addr), ret);
 			ret2 = ath10k_install_key(arvif, key, DISABLE_KEY,
 			    peer_addr, flags);
 			if (ret2) {
 				WARN_ON(ret2 > 0);
-				ath10k_warn(ar, "failed to disable (mcast) key for vdev %i peer %6D: %d\n",
-					    arvif->vdev_id, peer_addr, ":", ret2);
+				ath10k_warn(ar, "failed to disable (mcast) key for vdev %i peer %s: %d\n",
+					    arvif->vdev_id, ether_sprintf(peer_addr), ret2);
 			}
 			goto exit;
 		}
@@ -6338,7 +6337,7 @@ ath10k_set_key(struct ath10k *ar, int cmd, struct ieee80211vap *vif,
 		memset(&peer->keys[hw_keyidx], 0, sizeof(*key));
 	} else if (peer == NULL) {
 		/* impossible unless FW goes crazy */
-		ath10k_warn(ar, "Peer %6D disappeared!\n", peer_addr, ":");
+		ath10k_warn(ar, "Peer %s disappeared!\n", ether_sprintf(peer_addr));
 	}
 	ATHP_DATA_UNLOCK(ar);
 
@@ -7793,8 +7792,8 @@ ath10k_vif_bring_up(struct ieee80211vap *vap, struct ieee80211_channel *c)
 
 	ret = ath10k_vdev_start(arvif, c);
 	if (ret) {
-		ath10k_warn(ar, "failed to start vdev %i addr %6D on freq %d: %d\n",
-			    arvif->vdev_id, vap->iv_myaddr, ":",
+		ath10k_warn(ar, "failed to start vdev %i addr %s on freq %d: %d\n",
+			    arvif->vdev_id, ether_sprintf(vap->iv_myaddr),
 			    c->ic_freq, ret);
 		goto err;
 	}

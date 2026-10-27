@@ -790,8 +790,8 @@ ath10k_htt_tx(struct ath10k_htt *htt, struct athp_buf *msdu)
 
 	trace_ath10k_htt_tx(ar, msdu_id, mbuf_skb_len(msdu->m), vdev_id, tid);
 	ath10k_dbg(ar, ATH10K_DBG_HTT | ATH10K_DBG_HTT_TX,
-		   "htt tx %6D: flags0 %u flags1 %u len %d id %hu frags_paddr %08x, msdu_paddr %08x vdev %hhu tid %hhu freq %hu\n",
-		   skb_cb->ni->ni_macaddr, ":",
+		   "htt tx %s: flags0 %u flags1 %u len %d id %hu frags_paddr %08x, msdu_paddr %08x vdev %hhu tid %hhu freq %hu\n",
+		   ether_sprintf(skb_cb->ni->ni_macaddr),
 		   (unsigned) flags0, (unsigned) flags1, mbuf_skb_len(msdu->m), msdu_id, frags_paddr,
 		   (u32)msdu->mb.paddr, vdev_id, tid, skb_cb->htt.freq);
 	ath10k_dbg(ar, ATH10K_DBG_HTT | ATH10K_DBG_HTT_TX,
@@ -820,8 +820,8 @@ ath10k_htt_tx(struct ath10k_htt *htt, struct athp_buf *msdu)
 	sg_items[1].paddr = msdu->mb.paddr;
 	sg_items[1].len = prefetch_len;
 
-	ath10k_dbg(ar, ATH10K_DBG_HTT | ATH10K_DBG_HTT_TX, "%s: %6D: paddr=%x, %x (%d)\n",
-	    __func__, skb_cb->ni->ni_macaddr, ":", sg_items[0].paddr, sg_items[1].paddr, prefetch_len);
+	ath10k_dbg(ar, ATH10K_DBG_HTT | ATH10K_DBG_HTT_TX, "%s: %s: paddr=%x, %x (%d)\n",
+	    __func__, ether_sprintf(skb_cb->ni->ni_macaddr), sg_items[0].paddr, sg_items[1].paddr, prefetch_len);
 
 	res = ath10k_hif_tx_sg(htt->ar,
 			       htt->ar->htc.endpoint[htt->eid].ul_pipe_id,

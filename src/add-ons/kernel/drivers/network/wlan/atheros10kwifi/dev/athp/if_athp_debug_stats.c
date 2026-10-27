@@ -503,8 +503,8 @@ static void ath10k_fw_stats_fill(struct ath10k *ar,
 				 "=================");
 
 	TAILQ_FOREACH(peer, &fw_stats->peers, list) {
-		len += scnprintf(buf + len, buf_len - len, "%30s %6D\n",
-				 "Peer MAC address", peer->peer_macaddr, ":");
+		len += scnprintf(buf + len, buf_len - len, "%30s %s\n",
+				 "Peer MAC address", ether_sprintf(peer->peer_macaddr));
 		len += scnprintf(buf + len, buf_len - len, "%30s %u\n",
 				 "Peer RSSI", peer->peer_rssi);
 		len += scnprintf(buf + len, buf_len - len, "%30s %u\n",

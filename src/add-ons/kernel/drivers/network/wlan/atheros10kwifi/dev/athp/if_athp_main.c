@@ -325,8 +325,8 @@ athp_node_deferred_tx_queue(struct ieee80211_node *ni, struct mbuf *m)
 
 	arsta = ATHP_NODE(ni);
 
-	ath10k_dbg(ar, ATH10K_DBG_DEFERRED_TX, "%s: called; MAC %6D\n",
-	    __func__, ni->ni_macaddr, ":");
+	ath10k_dbg(ar, ATH10K_DBG_DEFERRED_TX, "%s: called; MAC %s\n",
+	    __func__, ether_sprintf(ni->ni_macaddr));
 
 	ret = mbufq_enqueue(&arsta->deferred_txq, m);
 	if (ret != 0) {
@@ -417,8 +417,8 @@ athp_transmit_frame(struct ath10k *ar, struct mbuf *m0)
 	arsta = ATHP_NODE(ni);
 	/* XXX TODO: locking? DATA_LOCK ? */
 	if (arsta->is_in_peer_table == 0) {
-		ath10k_warn(ar, "%s: node %6D not yet in peer table!\n",
-		    __func__, ni->ni_macaddr, ":");
+		ath10k_warn(ar, "%s: node %s not yet in peer table!\n",
+		    __func__, ether_sprintf(ni->ni_macaddr));
 		/* Don't free the node/ref */
 		return (ENOBUFS);
 	}
@@ -475,8 +475,8 @@ athp_transmit_frame(struct ath10k *ar, struct mbuf *m0)
 		ieee80211_output_seqno_assign(ni, -1, m);
 
 	ath10k_dbg(ar, ATH10K_DBG_XMIT,
-	    "%s: called; ni=%p, m=%p; pbuf=%p, ni.macaddr=%6D; iswep=%d, isqos=%d, seqno=0x%04x\n",
-	    __func__, ni, m, pbuf, ni->ni_macaddr, ":", is_wep, is_qos, seqno);
+	    "%s: called; ni=%p, m=%p; pbuf=%p, ni.macaddr=%s; iswep=%d, isqos=%d, seqno=0x%04x\n",
+	    __func__, ni, m, pbuf, ether_sprintf(ni->ni_macaddr), is_wep, is_qos, seqno);
 
 	/* Put the mbuf into the given pbuf */
 	athp_buf_give_mbuf(ar, &ar->buf_tx, pbuf, m);
@@ -519,8 +519,8 @@ athp_raw_xmit(struct ieee80211_node *ni, struct mbuf *m0,
 	struct ath10k_sta *arsta;
 	int ret;
 
-	ath10k_dbg(ar, ATH10K_DBG_MISC, "%s: called; MAC %6D\n", __func__,
-	    ni->ni_macaddr, ":");
+	ath10k_dbg(ar, ATH10K_DBG_MISC, "%s: called; MAC %s\n", __func__,
+	    ether_sprintf(ni->ni_macaddr));
 
 	ATHP_CONF_LOCK(ar);
 
@@ -559,17 +559,17 @@ athp_raw_xmit(struct ieee80211_node *ni, struct mbuf *m0,
 
 	/* XXX TODO: locking; we're using DATA_LOCK here */
 	if (arsta->is_in_peer_table == 0) {
-		ath10k_warn(ar, "%s: node %6D not yet in peer table!\n",
-		    __func__, ni->ni_macaddr, ":");
+		ath10k_warn(ar, "%s: node %s not yet in peer table!\n",
+		    __func__, ether_sprintf(ni->ni_macaddr));
 		ret = athp_node_deferred_tx_queue(ni, m0);
 		if (ret != 0) {
-			ath10k_err(ar, "%s: mac=%6D: frame NOT queued (%d)\n", __func__, ni->ni_macaddr, ":", ret);
+			ath10k_err(ar, "%s: mac=%s: frame NOT queued (%d)\n", __func__, ether_sprintf(ni->ni_macaddr), ret);
 			ATHP_DATA_UNLOCK(ar);
 			trace_ath10k_transmit(ar, 0, 1);
 			ieee80211_free_mbuf(m0);
 			return ret;
 		}
-		ath10k_warn(ar, "%s: mac=%6D: frame queued\n", __func__, ni->ni_macaddr, ":");
+		ath10k_warn(ar, "%s: mac=%s: frame queued\n", __func__, ether_sprintf(ni->ni_macaddr));
 		ATHP_DATA_UNLOCK(ar);
 
 		ATHP_CONF_LOCK(ar);
@@ -588,8 +588,8 @@ athp_raw_xmit(struct ieee80211_node *ni, struct mbuf *m0,
 	 * XXX TODO: methodize, simplify!
 	 */
 	if (athp_node_deferred_tx_queue_is_empty(ni) == 0) {
-		ath10k_warn(ar, "%s node %6D queuing deferred frame\n",
-		  __func__, ni->ni_macaddr, ":");
+		ath10k_warn(ar, "%s node %s queuing deferred frame\n",
+		  __func__, ether_sprintf(ni->ni_macaddr));
 		ret = athp_node_deferred_tx_queue(ni, m0);
 		ATHP_DATA_UNLOCK(ar);
 		if (ret != 0) {
@@ -777,8 +777,8 @@ athp_transmit(struct ieee80211com *ic, struct mbuf *m0)
 
 	/* XXX TODO: locking; we're using DATA_LOCK here */
 	if (arsta->is_in_peer_table == 0) {
-		ath10k_warn(ar, "%s: node %6D not yet in peer table!\n",
-		    __func__, ni->ni_macaddr, ":");
+		ath10k_warn(ar, "%s: node %s not yet in peer table!\n",
+		    __func__, ether_sprintf(ni->ni_macaddr));
 		ret = athp_node_deferred_tx_queue(ni, m0);
 		ATHP_DATA_UNLOCK(ar);
 
@@ -808,8 +808,8 @@ athp_transmit(struct ieee80211com *ic, struct mbuf *m0)
 	 * XXX TODO methodize
 	 */
 	if (athp_node_deferred_tx_queue_is_empty(ni) == 0) {
-		ath10k_warn(ar, "%s node %6D queuing deferred frame\n",
-		  __func__, ni->ni_macaddr, ":");
+		ath10k_warn(ar, "%s node %s queuing deferred frame\n",
+		  __func__, ether_sprintf(ni->ni_macaddr));
 		/* XXX fold into deferred pass too */
 		ret = athp_node_deferred_tx_queue(ni, m0);
 		ATHP_DATA_UNLOCK(ar);
@@ -999,9 +999,9 @@ athp_node_bss_update_cb(struct ath10k *ar, struct athp_taskq_entry *e,
 
 	ni = ieee80211_ref_node(vap->iv_bss);
 
-	ath10k_warn(ar, "%s: bss_update_cb: MAC %6D, is_assoc=%d, is_run=%d\n",
+	ath10k_warn(ar, "%s: bss_update_cb: MAC %s, is_assoc=%d, is_run=%d\n",
 	    __func__,
-	    ni->ni_macaddr, ":",
+	    ether_sprintf(ni->ni_macaddr),
 	    ku->is_assoc,
 	    ku->is_run);
 
@@ -1352,8 +1352,8 @@ athp_key_alloc(struct ieee80211vap *vap, struct ieee80211_key *k,
 	ATHP_CONF_UNLOCK(ar);
 
 	ath10k_dbg(ar, ATH10K_DBG_KEYCACHE,
-	    "%s: k=%p, keyix=%d; mac=%6D\n",
-	    __func__, k, k->wk_keyix, k->wk_macaddr, ":");
+	    "%s: k=%p, keyix=%d; mac=%s\n",
+	    __func__, k, k->wk_keyix, ether_sprintf(k->wk_macaddr));
 
 	/*
 	 * This is a total hack which quite honestly needs to be
@@ -1462,12 +1462,12 @@ athp_key_update_cb(struct ath10k *ar, struct athp_taskq_entry *e, int flush)
 
 	ath10k_dbg(ar, ATH10K_DBG_KEYCACHE,
 	    "%s: keyidx=%d, wmi_add=%d, flags=0x%08x, ret=%d,"
-	    " wmimac=%6D\n",
+	    " wmimac=%s\n",
 	    __func__,
 	    ku->key.hw_keyidx,
 	    ku->wmi_add,
 	    ku->key.flags,
-	    ret, ku->wmi_macaddr, ":");
+	    ret, ether_sprintf(ku->wmi_macaddr));
 }
 
 /*
@@ -1583,11 +1583,11 @@ athp_key_set(struct ieee80211vap *vap, const struct ieee80211_key *k)
 	memcpy(ku->key.key, k->wk_key, sizeof(k->wk_key));
 
 	ath10k_dbg(ar, ATH10K_DBG_KEYCACHE,
-	    "%s: scheduling: keyix=%d, wmi_add=%d, flags=0x%08x, wmimac=%6D, bss_ni mac=%6D\n",
+	    "%s: scheduling: keyix=%d, wmi_add=%d, flags=0x%08x, wmimac=%s, bss_ni mac=%s\n",
 	    __func__,
 	    ku->key.hw_keyidx, ku->wmi_add,
 	    ku->key.flags,
-	    ku->wmi_macaddr, ":", ni->ni_macaddr, ":");
+	    ether_sprintf(ku->wmi_macaddr), ether_sprintf(ni->ni_macaddr));
 
 	/* schedule */
 	(void) athp_taskq_queue(ar, e, "athp_key_set", athp_key_update_cb);
@@ -2095,14 +2095,14 @@ athp_node_alloc_cb(struct ath10k *ar, struct athp_taskq_entry *e, int flush)
 	}
 
 	if (athp_peer_create(vap, ku->peer_macaddr) != 0) {
-		ath10k_err(ar, "%s: failed to create peer: %6D\n", __func__,
-		    ku->peer_macaddr, ":");
+		ath10k_err(ar, "%s: failed to create peer: %s\n", __func__,
+		    ether_sprintf(ku->peer_macaddr));
 		ieee80211_free_node(ku->ni);
 		return;
 	}
 
-	ath10k_warn(ar, "%s: added node for mac %6D (%p)\n", __func__,
-	    ku->peer_macaddr, ":", ku->ni);
+	ath10k_warn(ar, "%s: added node for mac %s (%p)\n", __func__,
+	    ether_sprintf(ku->peer_macaddr), ku->ni);
 
 	ATHP_CONF_LOCK(ar);
 	athp_node_set_is_in_peer_table(ku->ni, 1);
@@ -2127,8 +2127,8 @@ athp_node_free_cb(struct ath10k *ar, struct athp_taskq_entry *e, int flush)
 	ku = athp_taskq_entry_to_ptr(e);
 	vap = ku->vap;
 
-	ath10k_warn(ar, "%s: deleted node for mac %6D (%p)\n", __func__,
-	    ku->peer_macaddr, ":", ku->ni);
+	ath10k_warn(ar, "%s: deleted node for mac %s (%p)\n", __func__,
+	    ether_sprintf(ku->peer_macaddr), ku->ni);
 
 	if (flush == 0) {
 		ath10k_warn(ar, "%s: flushing\n", __func__);
@@ -2143,8 +2143,8 @@ athp_node_free_cb(struct ath10k *ar, struct athp_taskq_entry *e, int flush)
 	}
 
 	if (athp_peer_free(vap, ku->peer_macaddr) != 0) {
-		ath10k_err(ar, "%s: failed to delete peer: %6D\n", __func__,
-		    ku->peer_macaddr, ":");
+		ath10k_err(ar, "%s: failed to delete peer: %s\n", __func__,
+		    ether_sprintf(ku->peer_macaddr));
 	}
 }
 
@@ -2159,13 +2159,13 @@ athp_node_flush_deferred_tx(struct ieee80211_node *ni)
 	struct mbuf *m;
 
 	ath10k_dbg(ar, ATH10K_DBG_DEFERRED_TX,
-	    "%s: mac=%6D: flushing deferred tx\n", __func__,
-	    ni->ni_macaddr, ":");
+	    "%s: mac=%s: flushing deferred tx\n", __func__,
+	    ether_sprintf(ni->ni_macaddr));
 
 	while ((m = mbufq_dequeue(&ATHP_NODE(ni)->deferred_txq)) != NULL) {
 		ath10k_dbg(ar, ATH10K_DBG_DEFERRED_TX,
-		    "%s: mac=%6D: flushing frame\n",
-		    __func__, ni->ni_macaddr, ":");
+		    "%s: mac=%s: flushing frame\n",
+		    __func__, ether_sprintf(ni->ni_macaddr));
 		ieee80211_tx_complete(ni, m, 1);
 	}
 }
@@ -2184,16 +2184,16 @@ athp_node_deferred_tx(void *arg, int npending)
 	int ret;
 
 	ath10k_dbg(ar, ATH10K_DBG_DEFERRED_TX,
-	    "%s: mac=%6D: called to transmit frames\n",
-	    __func__, ni->ni_macaddr, ":");
+	    "%s: mac=%s: called to transmit frames\n",
+	    __func__, ether_sprintf(ni->ni_macaddr));
 
 	mbufq_init(&mq, 128); /* limit isn't important here */
 
 	ATHP_DATA_LOCK(ar);
 	/* XXX TODO methodize */
 	if (ATHP_NODE(ni)->is_in_peer_table == 0) {
-		ath10k_err(ar, "%s: mac=%6D: called, but peer isn't in peer table!\n",
-		    __func__, ni->ni_macaddr, ":");
+		ath10k_err(ar, "%s: mac=%s: called, but peer isn't in peer table!\n",
+		    __func__, ether_sprintf(ni->ni_macaddr));
 		ATHP_DATA_UNLOCK(ar);
 		return;
 	}
@@ -2201,12 +2201,12 @@ athp_node_deferred_tx(void *arg, int npending)
 	ATHP_DATA_UNLOCK(ar);
 
 	while ((m = mbufq_dequeue(&mq)) != NULL) {
-		ath10k_warn(ar, "%s: mac=%6D: dequeuing frame\n",
-		    __func__, ni->ni_macaddr, ":");
+		ath10k_warn(ar, "%s: mac=%s: dequeuing frame\n",
+		    __func__, ether_sprintf(ni->ni_macaddr));
 		ret = athp_transmit_frame(ar, m);
 		if (ret != 0) {
-			ath10k_err(ar, "%s: mac=%6D: failed to send mbuf (errno %d)\n",
-			    __func__, ni->ni_macaddr, ":", ret);
+			ath10k_err(ar, "%s: mac=%s: failed to send mbuf (errno %d)\n",
+			    __func__, ether_sprintf(ni->ni_macaddr), ret);
 		}
 	}
 }
@@ -2219,8 +2219,8 @@ athp_node_alloc(struct ieee80211vap *vap,
 	struct ath10k *ar = ic->ic_softc;
 	struct ath10k_sta *an;
 
-	ath10k_dbg(ar, ATH10K_DBG_MISC, "%s: called; mac=%6D\n", __func__,
-	    mac, ":");
+	ath10k_dbg(ar, ATH10K_DBG_MISC, "%s: called; mac=%s\n", __func__,
+	    ether_sprintf(mac));
 
 	an = malloc(sizeof(struct ath10k_sta), M_80211_NODE, M_NOWAIT | M_ZERO);
 	if (! an)
@@ -2237,8 +2237,8 @@ athp_node_init(struct ieee80211_node *ni)
 	struct athp_taskq_entry *e;
 	struct athp_node_alloc_state *ku;
 
-	ath10k_dbg(ar, ATH10K_DBG_MISC, "%s: called; MAC %6D\n", __func__,
-	    ni->ni_macaddr, ":");
+	ath10k_dbg(ar, ATH10K_DBG_MISC, "%s: called; MAC %s\n", __func__,
+	    ether_sprintf(ni->ni_macaddr));
 
 	/* XXX TODO: make sysctl configurable at runtime for new peers */
 	mbufq_init(&ATHP_NODE(ni)->deferred_txq, 128);
@@ -2265,8 +2265,8 @@ athp_node_init(struct ieee80211_node *ni)
 		return (0);
 	}
 
-	ath10k_dbg(ar, ATH10K_DBG_MISC, "%s: add peer for MAC %6D\n",
-	    __func__, ni->ni_macaddr, ":");
+	ath10k_dbg(ar, ATH10K_DBG_MISC, "%s: add peer for MAC %s\n",
+	    __func__, ether_sprintf(ni->ni_macaddr));
 
 	/*
 	 * Allocate a callback function state.
@@ -2328,16 +2328,16 @@ athp_newassoc(struct ieee80211_node *ni, int isnew)
 	if (vap->iv_opmode != IEEE80211_M_HOSTAP)
 		return;
 
-	ath10k_dbg(ar, ATH10K_DBG_MISC, "%s: called; mac=%6D; isnew=%d\n",
-	    __func__, ni->ni_macaddr, ":", isnew);
+	ath10k_dbg(ar, ATH10K_DBG_MISC, "%s: called; mac=%s; isnew=%d\n",
+	    __func__, ether_sprintf(ni->ni_macaddr), isnew);
 
 	if (memcmp(ni->ni_macaddr, vap->iv_myaddr, ETHER_ADDR_LEN) != 0) {
 		struct athp_taskq_entry *e;
 		struct athp_node_alloc_state *ku;
 
 		ath10k_dbg(ar, ATH10K_DBG_MISC,
-		    "%s: add association state for MAC %6D\n",
-		    __func__, ni->ni_macaddr, ":");
+		    "%s: add association state for MAC %s\n",
+		    __func__, ether_sprintf(ni->ni_macaddr));
 
 		/*
 		 * Allocate a callback function state.
@@ -2377,8 +2377,8 @@ athp_node_free(struct ieee80211_node *ni)
 	struct ath10k_sta *arsta;
 
 	ath10k_dbg(ar, ATH10K_DBG_MISC,
-	    "%s: called; mac=%6D\n",
-	    __func__, ni->ni_macaddr, ":");
+	    "%s: called; mac=%s\n",
+	    __func__, ether_sprintf(ni->ni_macaddr));
 
 	arsta = ATHP_NODE(ni);
 
@@ -2390,8 +2390,8 @@ athp_node_free(struct ieee80211_node *ni)
 		struct athp_node_alloc_state *ku;
 
 		ath10k_dbg(ar, ATH10K_DBG_MISC,
-		    "%s: delete peer for MAC %6D\n",
-		    __func__, ni->ni_macaddr, ":");
+		    "%s: delete peer for MAC %s\n",
+		    __func__, ether_sprintf(ni->ni_macaddr));
 
 		ATHP_CONF_LOCK(ar);
 		athp_node_set_is_in_peer_table(ni, 0);
@@ -2489,9 +2489,9 @@ athp_send_mgmt(struct ieee80211_node *ni, int type, int arg)
 
 	return (ieee80211_send_mgmt(ni, type, arg));
 unsupported:
-	ath10k_warn(ar, "%s: %6D: not sending mgmt frame; type=0x%x, arg=0x%x\n",
+	ath10k_warn(ar, "%s: %s: not sending mgmt frame; type=0x%x, arg=0x%x\n",
 	    __func__,
-	    ni->ni_macaddr, ":",
+	    ether_sprintf(ni->ni_macaddr),
 	    type,
 	    arg);
 	return (ENOTSUP);

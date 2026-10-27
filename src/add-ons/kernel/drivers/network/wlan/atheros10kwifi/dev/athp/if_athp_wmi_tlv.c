@@ -2174,8 +2174,8 @@ ath10k_wmi_tlv_op_gen_peer_set_param(struct ath10k *ar, u32 vdev_id,
 	cmd->param_value = __cpu_to_le32(param_value);
 	ether_addr_copy(cmd->peer_macaddr.addr, peer_addr);
 
-	ath10k_dbg(ar, ATH10K_DBG_WMI, "wmi tlv vdev %d peer %6D set param %d -> %d\n",
-	    vdev_id, peer_addr, ":", param_id, param_value);
+	ath10k_dbg(ar, ATH10K_DBG_WMI, "wmi tlv vdev %d peer %s set param %d -> %d\n",
+	    vdev_id, ether_sprintf(peer_addr), param_id, param_value);
 	return pbuf;
 }
 
@@ -2265,17 +2265,17 @@ ath10k_wmi_tlv_op_gen_peer_assoc(struct ath10k *ar,
 	ptr += sizeof(*tlv);
 	ptr += sizeof(*vht_rate);
 
-	ath10k_dbg(ar, ATH10K_DBG_WMI, "wmi tlv vdev %d peer %6D assoc aid %d caps 0x%08x intval %d htcaps 0x%08x vhtcaps 0x%08x\n",
+	ath10k_dbg(ar, ATH10K_DBG_WMI, "wmi tlv vdev %d peer %s assoc aid %d caps 0x%08x intval %d htcaps 0x%08x vhtcaps 0x%08x\n",
 	    arg->vdev_id,
-	    arg->addr, ":",
+	    ether_sprintf(arg->addr),
 	    arg->peer_aid,
 	    arg->peer_caps,
 	    arg->peer_listen_intval,
 	    arg->peer_ht_caps,
 	    arg->peer_vht_caps);
-	ath10k_dbg(ar, ATH10K_DBG_WMI, "wmi tlv vdev %d peer %6D phymode %d nss %d num-legacy-rates %d num-ht-rates %d peer-reassoc %d\n",
+	ath10k_dbg(ar, ATH10K_DBG_WMI, "wmi tlv vdev %d peer %s phymode %d nss %d num-legacy-rates %d num-ht-rates %d peer-reassoc %d\n",
 	    arg->vdev_id,
-	    arg->addr, ":",
+	    ether_sprintf(arg->addr),
 	    arg->peer_phymode,
 	    arg->peer_num_spatial_streams,
 	    arg->peer_legacy_rates.num_rates,

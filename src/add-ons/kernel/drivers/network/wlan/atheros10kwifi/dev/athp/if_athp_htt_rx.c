@@ -1274,12 +1274,12 @@ static void ath10k_process_rx(struct ath10k *ar,
 	}
 
 	ath10k_dbg(ar, ATH10K_DBG_DATA | ATH10K_DBG_RECV,
-		   "rx mbuf %p len %u peer %6D %s %s sn %u %s%s%s%s %srate %u "
+		   "rx mbuf %p len %u peer %s %s %s sn %u %s%s%s%s %srate %u "
 		   "vht_nss %u chan %u freq %u band %u cflag 0x%x pktflag 0x%x "
 		   "decrypt %i fcs-err %i mic-err %i amsdu-more %i\n",
 		   m,
 		   mbuf_skb_len(m),
-		   ieee80211_get_SA(wh), ":",
+		   ether_sprintf(ieee80211_get_SA(wh)),
 		   ath10k_get_tid(wh, tid, sizeof(tid)),
 		   IEEE80211_IS_MULTICAST(ieee80211_get_DA(wh)) ?
 		    "mcast" : "ucast",
@@ -2280,8 +2280,8 @@ static void ath10k_htt_rx_addba(struct ath10k *ar, struct htt_resp *resp)
 
 	//ath10k_dbg(ar, ATH10K_DBG_HTT,
 	ath10k_warn(ar,
-		   "htt rx start rx ba session sta %6D tid %d size %d, ni_rxseq %d\n",
-		   peer->addr, ":", (int) tid, (int) ev->window_size,
+		   "htt rx start rx ba session sta %s tid %d size %d, ni_rxseq %d\n",
+		   ether_sprintf(peer->addr), (int) tid, (int) ev->window_size,
 		   (int) SEQNO(ni->ni_rxseqs[tid]));
 
 	/*
@@ -2338,8 +2338,8 @@ static void ath10k_htt_rx_delba(struct ath10k *ar, struct htt_resp *resp)
 
 	//ath10k_dbg(ar, ATH10K_DBG_HTT,
 	ath10k_warn(ar,
-		   "htt rx stop rx ba session sta %6D tid %d\n",
-		   peer->addr, ":", (int) tid);
+		   "htt rx stop rx ba session sta %s tid %d\n",
+		   ether_sprintf(peer->addr), (int) tid);
 
 	vap = &arvif->av_vap;
 
