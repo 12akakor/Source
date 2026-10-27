@@ -609,7 +609,7 @@ static struct athp_buf *ath10k_htt_rx_pop_paddr(struct ath10k_htt *htt,
 	struct ath10k *ar = htt->ar;
 	struct athp_buf *msdu;
 
-	ath10k_warn(ar, "%s: TODO: untested path!\n", __func__);
+	ath10k_dbg(ar, ATH10K_DBG_HTT, "%s: called\n", __func__);
 
 	ATHP_HTT_RX_LOCK_ASSERT(htt);
 
@@ -646,7 +646,7 @@ static int ath10k_htt_rx_pop_paddr_list(struct ath10k_htt *htt,
 	msdu_count = __le16_to_cpu(ev->msdu_count);
 	is_offload = !!(ev->info & HTT_RX_IN_ORD_IND_INFO_OFFLOAD_MASK);
 
-	ath10k_warn(ar, "%s: TODO: untested path!\n", __func__);
+	ath10k_dbg(ar, ATH10K_DBG_HTT, "%s: called\n", __func__);
 
 	while (msdu_count--) {
 		paddr = __le32_to_cpu(msdu_desc->msdu_paddr);
@@ -663,9 +663,18 @@ static int ath10k_htt_rx_pop_paddr_list(struct ath10k_htt *htt,
 			rxd = (void *)mbuf_skb_data(msdu->m);
 
 			trace_ath10k_htt_rx_desc(ar, rxd, sizeof(*rxd));
+			/*
+			 * The ring is filled with mbufs whose length covers the
+			 * whole buffer (for the DMA map); start from empty, as
+			 * ath10k_htt_rx_amsdu_pop() does, and never claim more
+			 * than the buffer holds.
+			 */
+			mbuf_skb_trim(msdu->m, 0);
 			mbuf_skb_put(msdu->m, sizeof(*rxd));
 			mbuf_skb_pull(msdu->m, sizeof(*rxd));
-			mbuf_skb_put(msdu->m, __le16_to_cpu(msdu_desc->msdu_len));
+			mbuf_skb_put(msdu->m,
+			    min(__le16_to_cpu(msdu_desc->msdu_len),
+			    HTT_RX_MSDU_SIZE));
 
 			if (!(__le32_to_cpu(rxd->attention.flags) &
 			      RX_ATTENTION_FLAGS_MSDU_DONE)) {
