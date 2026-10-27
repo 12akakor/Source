@@ -1716,7 +1716,7 @@ attempt_ath10k_core_probe_fw(struct ath10k *ar, int anum)
 		tsleep(ar, 1, "pausing to wait for the ath cpu to be ready.", 250);
 		if(anum < ATH10K_FW_PROBE_RETRIES) {
 			clean_ath10k_core_probe_fw(ar);
-			return attempt_ath10k_core_probe_fw(ar, anum++);
+			return attempt_ath10k_core_probe_fw(ar, anum + 1);
 		}
 	}
 	return status;
