@@ -9,6 +9,7 @@
 #include <Archivable.h>
 #include <Entry.h>
 #include <List.h>
+#include <Messenger.h>
 #include <String.h>
 
 
@@ -21,6 +22,10 @@ enum notification_type {
 };
 
 class BBitmap;
+
+namespace BPrivate {
+	struct notification_actions;
+}
 
 
 class BNotification : public BArchivable {
@@ -71,6 +76,20 @@ public:
 			const BBitmap*		Icon() const;
 			status_t			SetIcon(const BBitmap* icon);
 
+			// Buttons on the notification. Clicking one sends a copy of its
+			// message to its target (the application by default) and closes
+			// the notification. A click elsewhere still does what the
+			// OnClick*() settings say.
+			status_t			AddAction(const BString& label,
+									BMessage* message);
+			status_t			AddAction(const BString& label,
+									BMessage* message,
+									const BMessenger& target);
+			int32				CountActions() const;
+			const char*			ActionLabelAt(int32 index) const;
+			const BMessage*		ActionMessageAt(int32 index) const;
+			BMessenger			ActionTargetAt(int32 index) const;
+
 			status_t			Send(bigtime_t timeout = -1);
 
 private:
@@ -100,7 +119,9 @@ private:
 			BList				fArgv;
 			BBitmap*			fBitmap;
 
-			uint32				_reserved[8];
+			// Takes room from _reserved, so the class keeps its size
+			BPrivate::notification_actions* fActions;
+			uint32				_reserved[8 - sizeof(void*) / sizeof(uint32)];
 };
 
 
