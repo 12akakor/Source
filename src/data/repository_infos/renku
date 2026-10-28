@@ -4,6 +4,6 @@ name Renku
 vendor "Haiku Project"
 summary "The RenkuOS system repository (for RenkuOS %HAIKU_VERSION_NO_REVISION%)"
 priority 1
-baseurl http://renkuos.freemyip.com/repo/%HAIKU_PACKAGING_ARCH%
+baseurl https://renkuos.freemyip.com/repo/%HAIKU_PACKAGING_ARCH%
 identifier tag:renkuos.org,2026:repositories/renku/%HAIKU_PACKAGING_ARCH%
 architecture %HAIKU_PACKAGING_ARCH%
