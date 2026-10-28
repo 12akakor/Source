@@ -73,6 +73,13 @@ disable_debugger(int state)
 
 
 status_t
+restrict_syscalls(uint32 allowedGroups)
+{
+	return _kern_restrict_syscalls(allowedGroups);
+}
+
+
+status_t
 install_default_debugger(port_id debuggerPort)
 {
 	return _kern_install_default_debugger(debuggerPort);

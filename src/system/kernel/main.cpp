@@ -52,6 +52,7 @@
 #include <sem.h>
 #include <smp.h>
 #include <stack_protector.h>
+#include <syscall_filter.h>
 #include <system_profiler.h>
 #include <team.h>
 #include <timer.h>
@@ -199,6 +200,8 @@ _start(kernel_args *bootKernelArgs, int currentCPU)
 		TRACE("init generic syscall\n");
 		generic_syscall_init();
 		smp_init_post_generic_syscalls();
+		TRACE("init syscall filter\n");
+		syscall_filter_init();
 		TRACE("init scheduler\n");
 		scheduler_init();
 		TRACE("init threads\n");

@@ -1175,6 +1175,7 @@ void _kern_reserve_address_range() {}
 void _kern_resize_area() {}
 void _kern_resize_partition() {}
 void _kern_restore_signal_frame() {}
+void _kern_restrict_syscalls() {}
 void _kern_resume_thread() {}
 void _kern_rewind_dir() {}
 void _kern_seek() {}
@@ -2295,6 +2296,7 @@ void rename() {}
 void rename_thread() {}
 void renameat() {}
 void resize_area() {}
+void restrict_syscalls() {}
 void resume_thread() {}
 void rewind() {}
 void rewinddir() {}

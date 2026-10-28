@@ -47,6 +47,7 @@ KernelMergeObject kernel_core.o :
 	signal.cpp
 	system_info.cpp
 	smp.cpp
+	syscall_filter.cpp
 	syscalls.cpp
 	team.cpp
 	thread.cpp

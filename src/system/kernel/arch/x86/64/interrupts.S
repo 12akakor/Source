@@ -417,6 +417,10 @@ FUNCTION(x86_64_syscall_entry):
 	ja		.Lsyscall_stack_args
 
 .Lperform_syscall:
+	testl	$THREAD_FLAGS_SYSCALL_FILTERED, THREAD_flags(%r12)
+	jnz		.Lsyscall_filter
+
+.Lsyscall_filter_done:
 	testl	$THREAD_FLAGS_DEBUGGER_INSTALLED, THREAD_flags(%r12)
 	jnz		.Lpre_syscall_debug
 
@@ -481,6 +485,31 @@ FUNCTION(x86_64_syscall_entry):
 	// Restore previous GS base and return.
 	swapgs
 	sysretq
+
+.Lsyscall_filter:
+	// The team has restricted its syscalls (restrict_syscalls()).
+	// syscall_filter_check() takes a block of arguments, like
+	// user_debug_pre_syscall below, and returns B_OK or the error to return
+	// instead of making the call.
+	push	IFRAME_r9(%rbp)
+	push	IFRAME_r8(%rbp)
+	push	IFRAME_r10(%rbp)
+	push	IFRAME_dx(%rbp)
+	push	IFRAME_si(%rbp)
+	push	IFRAME_di(%rbp)
+	movq	%r14, %rdi				// syscall number
+	movq	%rsp, %rsi
+	push	%rax					// syscall table entry
+	subq	$8, %rsp
+	call	syscall_filter_check
+	addq	$8, %rsp
+	movslq	%eax, %rdx
+	pop		%rax
+	addq	$48, %rsp
+	testq	%rdx, %rdx
+	jz		.Lsyscall_filter_done
+	movq	%rdx, IFRAME_ax(%rbp)
+	jmp		.Lsyscall_return
 
 .Lpre_syscall_debug:
 	// user_debug_pre_syscall expects a pointer to a block of arguments, need

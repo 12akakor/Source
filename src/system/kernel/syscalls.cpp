@@ -43,6 +43,7 @@
 #include <safemode.h>
 #include <sem.h>
 #include <sys/resource.h>
+#include <syscall_filter.h>
 #include <system_profiler.h>
 #include <thread.h>
 #include <tracing.h>
@@ -122,6 +123,12 @@ _user_generic_syscall(const char* userSubsystem, uint32 function,
 
 	//dprintf("generic_syscall(subsystem = \"%s\", function = %lu)\n", subsystem, function);
 
+	if ((thread_get_current_thread()->flags & THREAD_FLAGS_SYSCALL_FILTERED)
+			!= 0
+		&& !syscall_filter_allows_generic_syscall(subsystem, function)) {
+		return B_NOT_ALLOWED;
+	}
+
 	MutexLocker locker(sGenericSyscallLock);
 
 	generic_syscall* syscall = find_generic_syscall(subsystem);
@@ -196,6 +203,17 @@ syscall_dispatcher(uint32 callIndex, void* args, uint64* _returnValue)
 {
 //	dprintf("syscall_dispatcher: thread 0x%x call 0x%x, arg0 0x%x, arg1 0x%x arg2 0x%x arg3 0x%x arg4 0x%x\n",
 //		thread_get_current_thread_id(), call_num, arg0, arg1, arg2, arg3, arg4);
+
+	// The x86_64 entries check in assembly and do not come through here; the
+	// architectures that do pass one 64 bit slot per argument.
+	if ((thread_get_current_thread()->flags & THREAD_FLAGS_SYSCALL_FILTERED)
+			!= 0) {
+		status_t status = syscall_filter_check(callIndex, (const uint64*)args);
+		if (status != B_OK) {
+			*_returnValue = (uint64)status;
+			return B_HANDLED_INTERRUPT;
+		}
+	}
 
 	user_debug_pre_syscall(callIndex, args);
 

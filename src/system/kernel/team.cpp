@@ -483,6 +483,7 @@ Team::Team(team_id id, bool kernel)
 
 	saved_set_uid = real_uid = effective_uid = -1;
 	saved_set_gid = real_gid = effective_gid = -1;
+	syscall_groups = B_SYSCALL_GROUP_ALL;
 
 	// exit status -- setting initialized to false suffices
 	exit.initialized = false;
@@ -1754,6 +1755,7 @@ load_image_internal(char**& _flatArgs, size_t flatArgsSize, int32 argCount,
 
 	// inherit the parent's user/group
 	inherit_parent_user_and_group(team, parent);
+	team->syscall_groups = atomic_get(&parent->syscall_groups);
 
 	// get a reference to the parent's I/O context -- we need it to create ours
 	parentIOContext = (parent->id == B_SYSTEM_TEAM) ? NULL : parent->io_context;
@@ -2146,6 +2148,7 @@ fork_team(void)
 
 	// Inherit the parent's user/group.
 	inherit_parent_user_and_group(team, parentTeam);
+	team->syscall_groups = atomic_get(&parentTeam->syscall_groups);
 
 	// inherit signal handlers
 	team->InheritSignalActions(parentTeam);
