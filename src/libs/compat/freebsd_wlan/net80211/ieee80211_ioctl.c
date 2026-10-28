@@ -235,27 +235,49 @@ struct scanreq {
 	struct ieee80211req_scan_result *sr;
 	size_t space;
 	const struct ieee80211_scan_state *ss;
-	int matchpass;		/* 1: only requested SSIDs, 0: only the rest */
+	const struct ieee80211vap *vap;
+	int matchpass;		/* 1: only wanted SSIDs, 0: only the rest */
 };
 
+static int
+scan_entry_ssid_is(const struct ieee80211_scan_entry *se,
+    const uint8_t *ssid, int len)
+{
+	return len > 0 && len == se->se_ssid[1] &&
+	    memcmp(ssid, se->se_ssid + 2, len) == 0;
+}
+
 /*
- * Whether this entry carries one of the SSIDs of the last scan request.
- * Those are returned first, so that a reader with a buffer too small for
- * a crowded scan cache (wpa_supplicant uses 24 KB) still sees the networks
- * it asked for.
+ * Whether this entry carries an SSID the reader wants: one from the last
+ * scan request, the vap's desired SSID, or the SSID of the BSS it is
+ * associated with. Those are returned first, so that a reader with a
+ * buffer too small for a crowded scan cache (wpa_supplicant uses 24 KB)
+ * still sees its networks. The vap's own SSIDs matter because any program
+ * may start a wildcard scan, which clears the requested SSIDs; if the
+ * current BSS then falls outside wpa_supplicant's buffer in two scans,
+ * wpa_supplicant forgets it and roams away.
  */
 static int
-scan_entry_requested(const struct ieee80211_scan_state *ss,
+scan_entry_wanted(const struct scanreq *req,
     const struct ieee80211_scan_entry *se)
 {
+	const struct ieee80211_scan_state *ss = req->ss;
+	const struct ieee80211vap *vap = req->vap;
 	int i;
 
 	for (i = 0; i < ss->ss_nssid; i++) {
-		if (ss->ss_ssid[i].len == se->se_ssid[1] &&
-		    memcmp(ss->ss_ssid[i].ssid, se->se_ssid + 2,
-		    se->se_ssid[1]) == 0)
+		if (scan_entry_ssid_is(se, ss->ss_ssid[i].ssid,
+		    ss->ss_ssid[i].len))
 			return 1;
 	}
+	for (i = 0; i < vap->iv_des_nssid; i++) {
+		if (scan_entry_ssid_is(se, vap->iv_des_ssid[i].ssid,
+		    vap->iv_des_ssid[i].len))
+			return 1;
+	}
+	if (vap->iv_bss != NULL && scan_entry_ssid_is(se,
+	    vap->iv_bss->ni_essid, vap->iv_bss->ni_esslen))
+		return 1;
 	return 0;
 }
 
@@ -292,7 +314,7 @@ get_scan_result(void *arg, const struct ieee80211_scan_entry *se)
 	int ielen, len, nr, nxr;
 	uint8_t *cp;
 
-	if (scan_entry_requested(req->ss, se) != req->matchpass)
+	if (scan_entry_wanted(req, se) != req->matchpass)
 		return;
 
 	len = scan_space(se, &ielen);
@@ -364,6 +386,7 @@ ieee80211_ioctl_getscanresults(struct ieee80211vap *vap,
 			return ENOMEM;
 		req.sr = p;
 		req.ss = vap->iv_ic->ic_scan;
+		req.vap = vap;
 		req.matchpass = 1;
 		ieee80211_scan_iterate(vap, get_scan_result, &req);
 		req.matchpass = 0;
