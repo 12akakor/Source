@@ -258,6 +258,8 @@ struct genet_info {
 	bool				nonblocking;
 	bool				promiscuous;
 	int32				openCount;
+	volatile bool		closed;
+		// set by close(), so that blocked readers and writers return
 };
 
 
@@ -738,6 +740,8 @@ retry:
 			& kProdConsMask;
 		if (producer != info->rxConsumer)
 			break;
+		if (info->closed)
+			return B_FILE_ERROR;
 		if (info->nonblocking)
 			return B_WOULD_BLOCK;
 
@@ -748,7 +752,7 @@ retry:
 		// makes us robust against lost interrupts as well.
 		producer = genet_read(info, RX_PROD_INDEX(kDefaultQueue))
 			& kProdConsMask;
-		if (producer == info->rxConsumer) {
+		if (producer == info->rxConsumer && !info->closed) {
 			status_t status = entry.Wait(B_RELATIVE_TIMEOUT | B_CAN_INTERRUPT,
 				100000);
 			if (status != B_OK && status != B_TIMED_OUT)
@@ -811,16 +815,20 @@ genet_send(genet_info* info, net_buffer* buffer)
 		uint32 queued = (info->txProducer - info->txConsumer) & kProdConsMask;
 		if (queued < kDescCount - 1)
 			break;
+		if (info->closed)
+			return B_FILE_ERROR;
 		if (info->nonblocking)
 			return B_WOULD_BLOCK;
 
 		ConditionVariableEntry entry;
 		info->txCondition.Add(&entry);
 		locker.Unlock();
-		status_t status = entry.Wait(B_RELATIVE_TIMEOUT | B_CAN_INTERRUPT,
-			100000);
-		if (status != B_OK && status != B_TIMED_OUT)
-			return status;
+		if (!info->closed) {
+			status_t status = entry.Wait(
+				B_RELATIVE_TIMEOUT | B_CAN_INTERRUPT, 100000);
+			if (status != B_OK && status != B_TIMED_OUT)
+				return status;
+		}
 		locker.Lock();
 	}
 
@@ -877,6 +885,7 @@ genet_open(void* _info, const char* path, int openMode, void** _cookie)
 	if (handle == NULL)
 		return B_NO_MEMORY;
 	handle->info = info;
+	info->closed = false;
 	info->nonblocking = (openMode & O_NONBLOCK) != 0;
 	atomic_add(&info->openCount, 1);
 
@@ -890,6 +899,11 @@ genet_close(void* cookie)
 {
 	genet_handle* handle = (genet_handle*)cookie;
 	genet_info* info = handle->info;
+
+	// Wake up the stack's reader thread (and any blocked writer): they wait
+	// for frames with timeouts and would otherwise never notice the close,
+	// which makes "ifconfig down" hang on an idle network.
+	info->closed = true;
 	info->rxCondition.NotifyAll();
 	info->txCondition.NotifyAll();
 	return B_OK;
@@ -1077,6 +1091,15 @@ genet_register_device(device_node* node)
 }
 
 
+static void
+genet_free_info(genet_info* info)
+{
+	mutex_destroy(&info->rxLock);
+	mutex_destroy(&info->txLock);
+	delete info;
+}
+
+
 static status_t
 genet_init_driver(device_node* node, void** _cookie)
 {
@@ -1110,7 +1133,7 @@ genet_init_driver(device_node* node, void** _cookie)
 		genet_parse_crs, &crs);
 	if (status != B_OK || crs.address == 0 || crs.irq == 0) {
 		ERROR("missing ACPI resources\n");
-		delete info;
+		genet_free_info(info);
 		return B_DEVICE_NOT_FOUND;
 	}
 	info->irq = crs.irq;
@@ -1122,7 +1145,7 @@ genet_init_driver(device_node* node, void** _cookie)
 		&registers);
 	if (info->registerArea < 0) {
 		status = info->registerArea;
-		delete info;
+		genet_free_info(info);
 		return status;
 	}
 	info->registers = (volatile uint32*)registers;
@@ -1134,7 +1157,7 @@ genet_init_driver(device_node* node, void** _cookie)
 	if (major != 6) {
 		ERROR("unsupported GENET version (major %" B_PRIu32 ")\n", major);
 		delete_area(info->registerArea);
-		delete info;
+		genet_free_info(info);
 		return B_NOT_SUPPORTED;
 	}
 
@@ -1155,7 +1178,7 @@ genet_init_driver(device_node* node, void** _cookie)
 	status = genet_alloc_buffers(info);
 	if (status != B_OK) {
 		delete_area(info->registerArea);
-		delete info;
+		genet_free_info(info);
 		return status;
 	}
 
@@ -1200,9 +1223,7 @@ genet_uninit_driver(void* _cookie)
 
 	delete_area(info->bufferArea);
 	delete_area(info->registerArea);
-	mutex_destroy(&info->rxLock);
-	mutex_destroy(&info->txLock);
-	delete info;
+	genet_free_info(info);
 }
 
 
