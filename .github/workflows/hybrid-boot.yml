@@ -398,10 +398,12 @@ jobs:
           if-no-files-found: ignore
 
       - name: Upload USB image
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: hybrid-usb-image
           path: usb/hybrid-usb.img
+          if-no-files-found: ignore
           retention-days: 7
           compression-level: 6
 
