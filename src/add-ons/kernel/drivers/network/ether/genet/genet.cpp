@@ -1,16 +1,58 @@
 /*
  * Copyright 2026, Bryan Irvine
- * All rights reserved. Distributed under the terms of the MIT license.
- * SPDX-License-Identifier: MIT
+ * Copyright (c) 2020 Michael J Karels
+ * Copyright (c) 2016, 2020 Jared McNeill <jmcneill@invisible.ca>
+ * SPDX-License-Identifier: BSD-2-Clause
  *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
+ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+ * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
+ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+ * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED
+ * AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+ * SUCH DAMAGE.
+ */
+
+/*
  * Driver for the Broadcom GENET v5 Ethernet controller of the BCM2711
  * (Raspberry Pi 4 / 400), as exposed by the Raspberry Pi 4 UEFI firmware in
  * ACPI mode (HID "BCM6E4E").
  *
- * Register layout and programming sequence follow FreeBSD's if_genet
- * (sys/arm64/broadcom/genet). The controller's DMA is not cache coherent, so
- * all packet buffers live in uncached memory and frames are copied in and
- * out. The descriptors themselves live in the controller's register space.
+ * The controller's DMA is not cache coherent, so all packet buffers live in
+ * uncached memory and frames are copied in and out. The descriptors
+ * themselves live in the controller's register space.
+ *
+ * Provenance: the register layout and the reset, DMA and ring
+ * initialisation sequences follow FreeBSD's if_genet
+ * (sys/arm64/broadcom/genet/if_genet.c and if_genetreg.h, by Michael J
+ * Karels and Jared McNeill), which is itself derived from NetBSD's
+ * bcmgenet (sys/dev/ic/bcmgenet.c, by Jared McNeill). This file is
+ * therefore distributed under their BSD-2-Clause licence, with their
+ * copyright notices kept above. The rest (the Haiku device manager, ACPI,
+ * net_buffer and ioctl glue, the uncached-buffer scheme, the PHY polling)
+ * was written for Haiku/RenkuOS and is offered under the same terms.
+ *
+ * Acknowledgements: thanks to the authors of the drivers this one was
+ * written with, or checked against:
+ *  - FreeBSD if_genet, Michael J Karels and Jared McNeill (BSD-2-Clause)
+ *  - NetBSD bcmgenet, Jared McNeill (BSD-2-Clause)
+ *  - Linux bcmgenet, Broadcom Corporation and contributors (GPL-2.0),
+ *    compared against only; no code was taken from it
+ *  - 9front's ethergenet for the Raspberry Pi 4 (MIT), compared against
+ *    only; no code was taken from it
  */
 
 
