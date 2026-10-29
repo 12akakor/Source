@@ -1,0 +1,439 @@
+# Tests the hybrid boot path: a 32-bit EFI loader (BOOTIA32.EFI) that loads
+# and starts a 64-bit kernel, as needed on 64-bit Atom tablets and early Intel
+# Macs that only have 32-bit UEFI firmware.
+#
+# Two builds are combined:
+#   x86_gcc2h  provides esp.image, the EFI system partition with the 32-bit
+#              haiku_loader.efi as BOOTIA32.EFI
+#   x86_64     provides the 64-bit system image, which holds the 64-bit kernel
+# QEMU then boots both with 32-bit OVMF firmware on a 64-bit CPU, which is the
+# same situation as on the tablet.
+#
+# Runs on GitHub-hosted runners only and has no secrets. It is started by hand
+# or by a push to the hybrid-boot-efi branch, and never by pull_request: the
+# pr-gate workflow stays the only pull request trigger.
+#
+# Prerequisite: the cross-compiler images from toolchain.yml must exist and be
+# public, for the owner named below.
+name: hybrid-boot
+
+on:
+  workflow_dispatch:
+    inputs:
+      toolchain_owner:
+        description: GHCR owner of the cross-compiler images
+        default: renkuos
+        required: false
+  push:
+    branches: [bisect-main-a]
+    paths:
+      - 'src/system/boot/**'
+      - 'headers/private/kernel/**'
+      - 'build/jam/**'
+      - '.github/workflows/hybrid-boot.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hybrid-boot-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TOOLCHAIN_OWNER: ${{ inputs.toolchain_owner || 'renkuos' }}
+
+jobs:
+  build:
+    name: build ${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: x86_64
+            packaging: x86_64
+            triple: x86_64-unknown-haiku
+            secondary: ''
+            secondary_triple: ''
+            target: '@nightly-raw'
+          - arch: x86_gcc2h
+            packaging: x86_gcc2
+            triple: i586-pc-haiku
+            secondary: x86
+            secondary_triple: i586-pc-haiku
+            target: '@nightly-anyboot'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Resolve toolchain image
+        id: img
+        run: |
+          set -euo pipefail
+          if [ -f .github/toolchain.pin ]; then
+            # shellcheck disable=SC1091
+            . .github/toolchain.pin
+          fi
+          REV="${BUILDTOOLS_REV:-master}"
+          OWNER="$(echo "${TOOLCHAIN_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          echo "image=ghcr.io/${OWNER}/cross-compiler:${{ matrix.arch }}-${REV}" >> "$GITHUB_OUTPUT"
+
+      - name: Pull toolchain
+        run: docker pull --quiet "${{ steps.img.outputs.image }}"
+
+      - name: Cache dependency packages
+        uses: actions/cache@v4
+        with:
+          path: generated.${{ matrix.arch }}/download
+          key: hpkg-${{ matrix.arch }}-${{ hashFiles(format('build/jam/repositories/HaikuPorts/{0}', matrix.packaging)) }}
+          restore-keys: |
+            hpkg-${{ matrix.arch }}-
+
+      - name: Brand the build
+        run: |
+          set -euo pipefail
+          # A fork does not carry upstream's hrev tags, and the revision is
+          # derived from them. Fetch them from the organisation repository.
+          if ! git describe --tags --match='hrev*' >/dev/null 2>&1; then
+            git fetch --quiet --no-recurse-submodules \
+              https://github.com/RenkuOS/Source.git \
+              'refs/tags/hrev*:refs/tags/hrev*'
+          fi
+          REV="$(git describe --dirty --tags --match='hrev*' --abbrev=1 \
+                 | sed 's/-g[0-9a-z]\+//' | sed 's/-/+/g')"
+          if [ -z "${REV}" ]; then
+            echo "::error::no hrev tag reachable; checkout is missing tags"
+            exit 1
+          fi
+          BUILD="hybrid$(printf '%05d' "${{ github.run_number }}")"
+          cat > build/jam/UserBuildConfig <<EOF
+          HAIKU_IMAGE_LABEL = "RenkuOS" ;
+          HAIKU_REVISION = "${REV}" ;
+          RENKUOS_BUILD = "${BUILD}" ;
+          EOF
+          echo "HAIKU_REVISION=${REV}" >> "$GITHUB_ENV"
+          echo "HAIKU_IMAGE_LABEL=RenkuOS" >> "$GITHUB_ENV"
+          echo "RENKUOS_BUILD=${BUILD}" >> "$GITHUB_ENV"
+
+      - name: Configure and build
+        env:
+          IMAGE: ${{ steps.img.outputs.image }}
+          ARCH: ${{ matrix.arch }}
+          PACKAGING: ${{ matrix.packaging }}
+          TRIPLE: ${{ matrix.triple }}
+          SECONDARY: ${{ matrix.secondary }}
+          SECONDARY_TRIPLE: ${{ matrix.secondary_triple }}
+          JAM_TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "${PWD}:/src" -w /src \
+            -e ARCH -e PACKAGING -e TRIPLE -e SECONDARY -e SECONDARY_TRIPLE \
+            -e JAM_TARGET \
+            -e HOME=/tmp -e TERM=dumb \
+            -e HAIKU_REVISION -e HAIKU_IMAGE_LABEL -e RENKUOS_BUILD \
+            "${IMAGE}" \
+            bash -euo pipefail -c '
+              git config --global --add safe.directory /src
+              printf "tries = 10\nwaitretry = 5\ntimeout = 60\nretry_connrefused = on\n" > /tmp/.wgetrc
+              mkdir -p "generated.${ARCH}"
+              cd "generated.${ARCH}"
+              set -- --cross-tools-prefix "/tools/cross-tools-${PACKAGING}/bin/${TRIPLE}-"
+              if [ -n "${SECONDARY}" ]; then
+                set -- "$@" --cross-tools-prefix \
+                  "/tools/cross-tools-${SECONDARY}/bin/${SECONDARY_TRIPLE}-"
+              fi
+              ../configure "$@" --distro-compatibility default
+              jam -q -j"$(nproc)" "${JAM_TARGET}"
+              if [ "${ARCH}" = x86_64 ]; then
+                # the native 64-bit EFI loader, for firmware that only runs 64-bit images
+                jam -q -j"$(nproc)" haiku_loader.efi
+              fi
+            '
+
+      - name: Restore ownership
+        if: always()
+        run: sudo chown -R "$(id -u):$(id -g)" . || true
+
+      - name: Collect output
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          GEN="generated.${{ matrix.arch }}"
+          if [ "${{ matrix.arch }}" = x86_64 ]; then
+            # The raw system image that holds the 64-bit kernel.
+            IMG="$(find "${GEN}" -maxdepth 1 -name '*.image' | head -1)"
+            if [ -z "${IMG}" ]; then
+              echo "::error::no raw image found"; ls -la "${GEN}"; exit 1
+            fi
+            mv "${IMG}" out/system64.image
+            LOADER64="$(find "${GEN}" -name haiku_loader.efi | head -1)"
+            if [ -z "${LOADER64}" ]; then
+              echo "::error::no 64-bit haiku_loader.efi found"; exit 1
+            fi
+            cp "${LOADER64}" out/haiku_loader64.efi
+          else
+            # The EFI system partition with the 32-bit loader.
+            ESP="$(find "${GEN}" -name esp.image | head -1)"
+            LOADER="$(find "${GEN}" -name haiku_loader.efi | head -1)"
+            if [ -z "${ESP}" ]; then
+              echo "::error::no esp.image found"; find "${GEN}" -name '*.efi'; exit 1
+            fi
+            cp "${ESP}" out/esp.image
+            [ -n "${LOADER}" ] && cp "${LOADER}" out/haiku_loader.efi
+          fi
+          ls -la out
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: hybrid-${{ matrix.arch }}
+          path: out/*
+          retention-days: 7
+          compression-level: 1
+
+  boot:
+    name: boot 32-bit EFI, 64-bit kernel
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: hybrid-*
+          path: images
+
+      - name: Install QEMU and 32-bit OVMF
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 ovmf-ia32 mtools
+          qemu-system-x86_64 --version | head -1
+          dpkg -L ovmf-ia32 | tee ovmf-files.txt
+
+      - name: Boot and watch the serial console
+        run: |
+          set -uo pipefail
+          ESP="$(find images -name esp.image | head -1)"
+          SYS="$(find images -name system64.image | head -1)"
+          if [ -z "${ESP}" ] || [ -z "${SYS}" ]; then
+            echo "::error::missing image(s)"; find images -type f; exit 1
+          fi
+
+          # Prefer the plain firmware over the Secure Boot variant, which needs
+          # SMM support from the machine.
+          CODE="$(grep -E 'OVMF.*CODE.*\.fd$' ovmf-files.txt | grep -vi secboot | head -1)"
+          VARS="$(grep -E 'OVMF.*VARS.*\.fd$' ovmf-files.txt | grep -vi 'ms\|snakeoil' | head -1)"
+          if [ -z "${CODE}" ] || [ -z "${VARS}" ]; then
+            echo "::error::no suitable 32-bit OVMF firmware found, see ovmf-files.txt"
+            exit 1
+          fi
+          cp "${VARS}" vars.fd
+          echo "Firmware: ${CODE}"
+
+          : > serial.log
+          # A 64-bit CPU with 32-bit firmware: the mixed-mode situation.
+          qemu-system-x86_64 \
+            -machine q35 -cpu qemu64 -smp 4 \
+            -accel tcg \
+            -m 2048 \
+            -drive if=pflash,format=raw,readonly=on,file="${CODE}" \
+            -drive if=pflash,format=raw,file=vars.fd \
+            -drive file="${ESP}",format=raw,if=ide,index=0 \
+            -drive file="${SYS}",format=raw,if=ide,index=1 \
+            -display none \
+            -serial file:serial.log \
+            -no-reboot &
+          QEMU=$!
+          trap "kill ${QEMU} 2>/dev/null || true" EXIT
+
+          fail_re='Kernel Debugging Land|^PANIC:|error starting "'
+          banner='Haiku revision:'
+          elapsed=0
+          while :; do
+            if grep -qF "${banner}" serial.log 2>/dev/null; then
+              echo "64-bit kernel from a 32-bit loader reached the kernel banner after ${elapsed}s."
+              sleep 30
+              if grep -qE "${fail_re}" serial.log; then
+                echo "::error::Kernel failed after the banner"; exit 1
+              fi
+              exit 0
+            fi
+            if grep -qE "${fail_re}" serial.log 2>/dev/null; then
+              echo "::error::Guest failed:"; grep -nE "${fail_re}" serial.log | head; exit 1
+            fi
+            if ! kill -0 "${QEMU}" 2>/dev/null; then
+              echo "::error::QEMU exited after ${elapsed}s"; exit 1
+            fi
+            if [ "${elapsed}" -ge 300 ]; then
+              echo "::error::No kernel banner within 300s"; exit 1
+            fi
+            sleep 5
+            elapsed=$(( elapsed + 5 ))
+          done
+
+      # One disk image for a USB stick: an MBR with the EFI system partition
+      # (type 0xef) and the Haiku BFS volume (type 0xeb), the same layout that
+      # Haiku's own anyboot image uses. It is booted once in QEMU as a single
+      # disk, so what ends up on the stick has been tried.
+      - name: Build and boot the combined USB image
+        run: |
+          set -uo pipefail
+          ESP="$(find images -name esp.image | head -1)"
+          SYS="$(find images -name system64.image | head -1)"
+          CODE="$(grep -E 'OVMF.*CODE.*\.fd$' ovmf-files.txt | grep -vi secboot | head -1)"
+          VARS="$(grep -E 'OVMF.*VARS.*\.fd$' ovmf-files.txt | grep -vi 'ms\|snakeoil' | head -1)"
+
+          ALIGN=2048   # 1 MiB in 512 byte sectors
+          ESP_SECT=$(( ($(stat -c %s "${ESP}") + 511) / 512 ))
+          SYS_SECT=$(( ($(stat -c %s "${SYS}") + 511) / 512 ))
+          START1=${ALIGN}
+          START2=$(( (START1 + ESP_SECT + ALIGN - 1) / ALIGN * ALIGN ))
+          TOTAL=$(( START2 + SYS_SECT + ALIGN ))
+
+          mkdir -p usb
+          truncate -s $(( TOTAL * 512 )) usb/hybrid-usb.img
+          sfdisk --quiet usb/hybrid-usb.img <<EOF
+          label: dos
+          start=${START1}, size=${ESP_SECT}, type=ef, bootable
+          start=${START2}, size=${SYS_SECT}, type=eb
+          EOF
+          dd if="${ESP}" of=usb/hybrid-usb.img bs=512 seek=${START1} conv=notrunc status=none
+          dd if="${SYS}" of=usb/hybrid-usb.img bs=512 seek=${START2} conv=notrunc status=none
+
+          # Also offer the native 64-bit loader, for firmware that only runs
+          # 64-bit images (it ignores BOOTIA32.EFI).
+          LOADER64="$(find images -name haiku_loader64.efi | head -1)"
+          if [ -z "${LOADER64}" ]; then
+            echo "::error::haiku_loader64.efi is missing"; exit 1
+          fi
+          mcopy -i "usb/hybrid-usb.img@@$(( START1 * 512 ))" "${LOADER64}" ::EFI/BOOT/BOOTX64.EFI
+          sfdisk -l usb/hybrid-usb.img
+
+          # Show what the firmware will find: the files of the EFI system
+          # partition inside the final image. A 32-bit firmware boots
+          # EFI/BOOT/BOOTIA32.EFI.
+          {
+            echo "### contents of the EFI partition in hybrid-usb.img"
+            echo '```'
+            sfdisk -l usb/hybrid-usb.img
+            echo
+            mdir -/ -i "usb/hybrid-usb.img@@$(( START1 * 512 ))" :: 2>&1
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          if ! mdir -i "usb/hybrid-usb.img@@$(( START1 * 512 ))" ::EFI/BOOT/BOOTIA32.EFI >/dev/null 2>&1; then
+            echo "::error::EFI/BOOT/BOOTIA32.EFI is missing from the EFI partition"
+            exit 1
+          fi
+
+          cp "${VARS}" vars2.fd
+          : > serial-combined.log
+          qemu-system-x86_64 \
+            -machine q35 -cpu qemu64 -smp 4 -accel tcg -m 2048 \
+            -drive if=pflash,format=raw,readonly=on,file="${CODE}" \
+            -drive if=pflash,format=raw,file=vars2.fd \
+            -drive file=usb/hybrid-usb.img,format=raw,if=ide \
+            -display none -serial file:serial-combined.log -no-reboot \
+            -monitor unix:mon.sock,server,nowait &
+          QEMU=$!
+          trap "kill ${QEMU} 2>/dev/null || true" EXIT
+
+          elapsed=0
+          while ! grep -qF 'Haiku revision:' serial-combined.log 2>/dev/null; do
+            if ! kill -0 "${QEMU}" 2>/dev/null || [ "${elapsed}" -ge 300 ]; then
+              echo "::error::The combined image did not reach the kernel banner"
+              tail -30 serial-combined.log
+              exit 1
+            fi
+            sleep 5
+            elapsed=$(( elapsed + 5 ))
+          done
+          echo "Combined image reached the kernel banner after ${elapsed}s."
+
+          # Look at the guest screen a while after the banner: does the
+          # desktop (or the first boot prompt) come up?
+          mkdir -p screens
+          shot() {
+            python3 - "$1" <<'PY'
+          import socket, sys, time, zlib, struct
+          name = sys.argv[1]
+          s = socket.socket(socket.AF_UNIX)
+          s.connect("mon.sock")
+          time.sleep(1)
+          s.sendall(("screendump screens/%s.ppm\n" % name).encode())
+          time.sleep(3)
+          d = open("screens/%s.ppm" % name, "rb").read()
+          # binary PPM (P6) to PNG
+          parts = d.split(None, 4)
+          w, h = int(parts[1]), int(parts[2])
+          px = d[len(d) - w * h * 3:]
+          raw = b"".join(b"\x00" + px[y * w * 3:(y + 1) * w * 3] for y in range(h))
+          def chunk(t, c):
+              b = t + c
+              return struct.pack(">I", len(c)) + b + struct.pack(">I", zlib.crc32(b))
+          png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b"")
+          open("screens/%s.png" % name, "wb").write(png)
+          print("screenshot", name, w, h)
+          PY
+          }
+          sleep 90
+          shot after-90s
+          sleep 150
+          shot after-240s
+          echo "--- last 40 lines of the serial log ---"
+          tail -40 serial-combined.log
+          if grep -qE 'Kernel Debugging Land|^PANIC:' serial-combined.log; then
+            echo "::error::Kernel failed after the banner"; exit 1
+          fi
+
+      - name: Upload guest screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: guest-screens
+          path: screens/
+          if-no-files-found: ignore
+
+      - name: Upload USB image
+        uses: actions/upload-artifact@v4
+        with:
+          name: hybrid-usb-image
+          path: usb/hybrid-usb.img
+          retention-days: 7
+          compression-level: 6
+
+      - name: Stage report
+        if: always()
+        run: |
+          {
+            echo "### hybrid boot stages seen in the serial log"
+            echo ""
+            for s in "Calling ExitBootServices" \
+                     "Starting a 64-bit kernel from a 32-bit loader" \
+                     "enter_kernel(" \
+                     "Haiku revision:"; do
+              if grep -qF "${s}" serial.log 2>/dev/null; then
+                echo "- yes: \`${s}\`"
+              else
+                echo "- no: \`${s}\`"
+              fi
+            done
+            echo ""
+            echo '```'
+            tail -40 serial.log 2>/dev/null
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload serial log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: serial-hybrid
+          path: |
+            serial.log
+            serial-combined.log
+            ovmf-files.txt
+          retention-days: 14
