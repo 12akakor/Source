@@ -215,6 +215,9 @@ jobs:
           dpkg -L ovmf-ia32 | tee ovmf-files.txt
 
       - name: Boot and watch the serial console
+        # The diag image always panics on purpose: go on, so the USB image
+        # still gets built and uploaded.
+        continue-on-error: true
         run: |
           set -uo pipefail
           ESP="$(find images -name esp.image | head -1)"
@@ -280,6 +283,7 @@ jobs:
       # Haiku's own anyboot image uses. It is booted once in QEMU as a single
       # disk, so what ends up on the stick has been tried.
       - name: Build and boot the combined USB image
+        continue-on-error: true
         run: |
           set -uo pipefail
           ESP="$(find images -name esp.image | head -1)"
