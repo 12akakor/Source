@@ -332,18 +332,20 @@ pch_i2c_scan_bus_callback(acpi_handle object, uint32 nestingLevel,
 	if (status == B_OK && (sta & ACPI_STA_DEVICE_PRESENT) == 0)
 		return B_OK;
 
-	// Attach devices for I2C resources
+	// Attach devices for I2C resources. Children that are not I2C clients,
+	// like an ADAU7002 microphone bridge without any _CRS, are skipped:
+	// returning an error here would end the walk before later siblings.
 	struct pch_i2c_crs crs = { .i2c_addr = UINT16_MAX };
 	status = gACPI->walk_resources(object, (ACPI_STRING)"_CRS",
 		pch_i2c_scan_parse_callback, &crs);
 	if (status != B_OK) {
-		ERROR("Error while getting I2C devices\n");
-		return status;
+		TRACE("pch_i2c_scan_bus_callback: no resources, skipping\n");
+		return B_OK;
 	}
 
 	if (crs.i2c_addr == UINT16_MAX) {
-		ERROR("Could not find i2c address in device resources");
-		return B_BAD_DATA;
+		TRACE("pch_i2c_scan_bus_callback: no i2c address, skipping\n");
+		return B_OK;
 	}
 
 	TRACE("pch_i2c_scan_bus_callback deviceAddress %x speed %x\n", crs.i2c_addr, crs.bus_speed);
