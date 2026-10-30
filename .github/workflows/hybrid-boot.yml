@@ -25,7 +25,7 @@ on:
         default: renkuos
         required: false
   push:
-    branches: [bisect-main-d]
+    branches: [bisect-1027-pr191]
     paths:
       - 'src/system/boot/**'
       - 'headers/private/kernel/**'
@@ -397,11 +397,22 @@ jobs:
           path: screens/
           if-no-files-found: ignore
 
+      - name: Name the USB image
+        if: always()
+        run: |
+          if [ -f usb/hybrid-usb.img ]; then
+            NAME="renkuos-${GITHUB_REF_NAME//\//-}-$(date -u +%Y%m%d-%H%M)-${GITHUB_SHA::7}"
+            mv usb/hybrid-usb.img "usb/${NAME}.img"
+            echo "USB_IMAGE_NAME=${NAME}" >> "$GITHUB_ENV"
+          fi
+
       - name: Upload USB image
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: hybrid-usb-image
-          path: usb/hybrid-usb.img
+          name: ${{ env.USB_IMAGE_NAME || 'hybrid-usb-image' }}
+          path: usb/*.img
+          if-no-files-found: ignore
           retention-days: 7
           compression-level: 6
 
