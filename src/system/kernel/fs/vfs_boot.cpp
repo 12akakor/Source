@@ -530,8 +530,11 @@ vfs_mount_boot_file_system(kernel_args* args)
 			device->VisitEachDescendant(&printer);
 		}
 
-		panic("did not find any boot partitions! @! syslog | tail 15");
+		panic("did not find any boot partitions! @! syslog | grep -i baytrail; syslog | grep -i pmic; syslog | grep -i GenericSerial");
 	}
+
+	// Test only: show what the ACPI GPIO events and the PMIC did.
+	panic("acpi-test: boot partition found @! syslog | grep -i baytrail; syslog | grep -i pmic; syslog | grep -i GenericSerial");
 
 	dev_t bootDevice = -1;
 

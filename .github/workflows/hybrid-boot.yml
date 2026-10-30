@@ -25,12 +25,7 @@ on:
         default: renkuos
         required: false
   push:
-    branches: [main-no-i2chid]
-    paths:
-      - 'src/system/boot/**'
-      - 'headers/private/kernel/**'
-      - 'build/jam/**'
-      - '.github/workflows/hybrid-boot.yml'
+    branches: [acpi-test]
 
 permissions:
   contents: read
