@@ -58,7 +58,7 @@
 #define ETP_TOUCH_INFO_OFFSET	3
 #define ETP_FINGER_DATA_OFFSET	4
 #define ETP_MK_DATA_OFFSET		33		// high precision only
-#define ETP_MAX_FINGERS			5
+#define ETP_MAX_FINGERS			ELAN_MAX_FINGERS
 #define ETP_FINGER_DATA_LEN		5
 
 #define ETP_RETRY_COUNT			3
@@ -92,7 +92,11 @@ ELANDevice::ELANDevice(device_node* parent, i2c_device_interface* i2c,
 		fMaxX(0),
 		fMaxY(0),
 		fPressureAdjustment(0),
-		fBadReports(0)
+		fBadReports(0),
+		fFingerMask(0),
+		fLastFingerMask(0),
+		fPositionX(0),
+		fPositionY(0)
 {
 	_ResetContact();
 	mutex_init(&fReadLock, "elan report");
@@ -330,6 +334,7 @@ ELANDevice::_Wake()
 
 	// Drop any report left over from before the touchpad slept.
 	memset(fLastReport, 0, sizeof(fLastReport));
+	fLastFingerMask = 0;
 	_ResetContact();
 	if (fInputReady != NULL && fInputReady->IsAsserted())
 		_Receive(fReport, fReportLength);
@@ -421,6 +426,7 @@ ELANDevice::_ReadReport(touchpad_movement* movement, bigtime_t timeout)
 		memcpy(fLastReport, fReport, fReportLength);
 
 		int count = _ParseReport(fReport, movement);
+		_TrackPosition(movement, count);
 		if (!_EmulateButtons(movement, count))
 			continue;
 		return B_OK;
@@ -441,9 +447,8 @@ ELANDevice::_ParseReport(const uint8* report, touchpad_movement* movement)
 
 	// Records are only present for fingers in contact, in order.
 	const uint8* finger = report + ETP_FINGER_DATA_OFFSET;
-	uint32 fingers = 0;
+	fFingerMask = 0;
 	int count = 0;
-	uint32 sumX = 0, sumY = 0, sumZ = 0, sumWidth = 0;
 	for (int i = 0; i < ETP_MAX_FINGERS; i++) {
 		if ((info & (1 << (3 + i))) == 0)
 			continue;
@@ -465,24 +470,77 @@ ELANDevice::_ParseReport(const uint8* report, touchpad_movement* movement)
 		if (x > fMaxX || y > fMaxY)
 			continue;
 
-		fingers |= 1 << i;
+		fFingerMask |= 1 << i;
 		count++;
-		sumX += x;
-		sumY += y;
-		sumZ += pressure;
+		fFingers[i].x = x;
+		fFingers[i].y = y;
+		fFingers[i].pressure = pressure;
 		// The width is given in traces covered along x and y.
-		sumWidth += max_c(traces & 0x0f, traces >> 4);
+		fFingers[i].width = max_c(traces & 0x0f, traces >> 4);
 	}
 
-	movement->fingers = fingers;
+	return count;
+}
+
+
+/*!	Reports one position for all fingers. The slots the touchpad gives each
+	finger stay the same while it is down, so the position follows the
+	fingers that were down in the last report too. Averaging them instead
+	would make the position jump whenever a finger is added or lifted, as at
+	the end of every two finger scroll, and movement_maker would move the
+	cursor by that much.
+*/
+void
+ELANDevice::_TrackPosition(touchpad_movement* movement, int count)
+{
+	uint32 common = fFingerMask & fLastFingerMask;
+	uint32 sumZ = 0, sumWidth = 0;
+	uint32 sumX = 0, sumY = 0;
+	int32 deltaX = 0, deltaY = 0, moved = -1;
+	for (int i = 0; i < ETP_MAX_FINGERS; i++) {
+		if ((fFingerMask & (1 << i)) == 0)
+			continue;
+		sumX += fFingers[i].x;
+		sumY += fFingers[i].y;
+		sumZ += fFingers[i].pressure;
+		sumWidth += fFingers[i].width;
+
+		if ((common & (1 << i)) == 0)
+			continue;
+		// Follow the finger that moved most, so that a thumb resting on
+		// the pad does not slow down the finger dragging next to it.
+		int32 dx = (int32)fFingers[i].x - (int32)fLastFingers[i].x;
+		int32 dy = (int32)fFingers[i].y - (int32)fLastFingers[i].y;
+		if (abs(dx) + abs(dy) > moved) {
+			moved = abs(dx) + abs(dy);
+			deltaX = dx;
+			deltaY = dy;
+		}
+	}
+
+	if (count > 0 && fLastFingerMask == 0) {
+		fPositionX = sumX / count;
+		fPositionY = sumY / count;
+	} else {
+		// When every finger was swapped for another at once, there is
+		// nothing to follow; hold the position.
+		fPositionX = min_c(max_c(fPositionX + deltaX, 0), (int32)fMaxX);
+		fPositionY = min_c(max_c(fPositionY + deltaY, 0), (int32)fMaxY);
+	}
+
+	memcpy(fLastFingers, fFingers, sizeof(fLastFingers));
+	fLastFingerMask = fFingerMask;
+
+	movement->fingers = fFingerMask;
 	if (count == 0) {
 		// A width of 0 or 1 would read as two or three fingers.
 		movement->fingerWidth = 4;
-		return 0;
+		return;
 	}
 
-	movement->xPosition = sumX / count;
-	movement->yPosition = sumY / count;
+	// movement_maker reads 0, 0 as no touch.
+	movement->xPosition = max_c(fPositionX, 1);
+	movement->yPosition = fPositionY;
 	// movement_maker ignores contacts at maxPressure and up.
 	movement->zPressure = min_c(sumZ / count, 254);
 	// movement_maker follows the Synaptics width scale: 4 to 7 is a
@@ -491,7 +549,32 @@ ELANDevice::_ParseReport(const uint8* report, touchpad_movement* movement)
 		movement->fingerWidth = min_c(4 + sumWidth / 3, 15);
 	else
 		movement->fingerWidth = count == 2 ? 0 : 1;
+}
 
+
+/*!	Counts the fingers of a click. A thumb pressing the bottom of the pad
+	while another finger rests higher up is a one finger click, so that a
+	thumb can click and the other finger drag. Returns the finger that
+	presses the pad: the lowest.
+*/
+int
+ELANDevice::_ClickFingers(int count, const elan_finger** presser) const
+{
+	const elan_finger* lowest = NULL;
+	int low = 0;
+	for (int i = 0; i < ETP_MAX_FINGERS; i++) {
+		if ((fFingerMask & (1 << i)) == 0)
+			continue;
+		// Elan Y grows upwards, as movement_maker expects.
+		if (lowest == NULL || fFingers[i].y < lowest->y)
+			lowest = &fFingers[i];
+		if (fFingers[i].y < fMaxY / 5)
+			low++;
+	}
+
+	*presser = lowest;
+	if (count == 2 && low == 1)
+		return 1;
 	return count;
 }
 
@@ -536,13 +619,14 @@ ELANDevice::_EmulateButtons(touchpad_movement* movement, int count)
 	if ((movement->buttons & BUTTON_LEFT) != 0) {
 		fContactClicked = true;
 		if (fClickButton == 0) {
-			// Elan Y grows upwards, as movement_maker expects.
-			if (count >= 3)
+			const elan_finger* presser;
+			int fingers = _ClickFingers(count, &presser);
+			if (fingers >= 3)
 				fClickButton = BUTTON_MIDDLE;
-			else if (count == 2)
+			else if (fingers == 2)
 				fClickButton = BUTTON_RIGHT;
-			else if (count == 1 && movement->yPosition < fMaxY / 5
-				&& movement->xPosition > fMaxX / 2)
+			else if (fingers == 1 && presser->y < fMaxY / 5
+				&& presser->x > fMaxX / 2)
 				fClickButton = BUTTON_RIGHT;
 			else
 				fClickButton = BUTTON_LEFT;
@@ -550,6 +634,14 @@ ELANDevice::_EmulateButtons(touchpad_movement* movement, int count)
 		movement->buttons = (movement->buttons & ~BUTTON_LEFT) | fClickButton;
 	} else
 		fClickButton = 0;
+
+	// After a click, the rest of the touch is one finger to movement_maker,
+	// even with more on the pad: it would scroll instead of drag, and turn
+	// a held left button into the right one when a second finger comes.
+	if (fContactClicked && count >= 2) {
+		movement->fingers &= -movement->fingers;
+		movement->fingerWidth = 5;
+	}
 
 	// Tapping with two fingers is a right click, with three a middle click.
 	// It is reported as soon as the fingers start to lift; the rest of the
