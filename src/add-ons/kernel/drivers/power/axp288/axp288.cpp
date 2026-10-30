@@ -53,7 +53,7 @@ extern "C" {
 #define BATTERY_PATH_ID			"acpi_battery/path_id"
 #define BUTTON_PATH				"power/button/power_pmic"
 
-#define TRACE_ALWAYS(x...)		dprintf("axp288 PMIC: " x)
+#define TRACE_ALWAYS(x...)		dprintf("acpitest axp288 PMIC: " x)
 //#define TRACE_AXP288
 #ifdef TRACE_AXP288
 #	define TRACE(x...)			dprintf("axp288 PMIC: " x)

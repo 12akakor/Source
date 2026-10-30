@@ -118,7 +118,7 @@ acquire_punit_semaphore()
 		snooze(1000);
 	}
 
-	ERROR("PMIC bus: timed out waiting for the P-Unit semaphore\n");
+	dprintf("acpitest PMIC bus: timed out waiting for the P-Unit semaphore\n");
 	release_punit_semaphore();
 	return B_TIMED_OUT;
 }

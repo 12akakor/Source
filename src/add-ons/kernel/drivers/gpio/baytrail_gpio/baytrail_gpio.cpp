@@ -50,11 +50,11 @@ extern "C" {
 
 //#define TRACE_BAYTRAIL_GPIO
 #ifdef TRACE_BAYTRAIL_GPIO
-#	define TRACE(x...)	dprintf("baytrail_gpio: " x)
+#	define TRACE(x...)	dprintf("acpitest baytrail_gpio: " x)
 #else
 #	define TRACE(x...)
 #endif
-#define ERROR(x...)	dprintf("baytrail_gpio: " x)
+#define ERROR(x...)	dprintf("acpitest baytrail_gpio: " x)
 
 
 // Pad registers, at pad * 16 from the start of the community
@@ -215,7 +215,7 @@ write_level(gpio_controller* controller, uint32 pin, uint32 level)
 	restore_interrupts(state);
 
 	if (enabledOutput) {
-		dprintf("baytrail_gpio: %s pin %" B_PRIu32 ": output enabled\n",
+		dprintf("acpitest baytrail_gpio: %s pin %" B_PRIu32 ": output enabled\n",
 			controller->community->name, pin);
 	}
 }
@@ -225,7 +225,7 @@ static void
 dump_pins(gpio_controller* controller)
 {
 	const gpio_community* community = controller->community;
-	dprintf("baytrail_gpio: %s pins (pin: conf0 val)\n", community->name);
+	dprintf("acpitest baytrail_gpio: %s pins (pin: conf0 val)\n", community->name);
 
 	char line[160];
 	size_t length = 0;
@@ -238,7 +238,7 @@ dump_pins(gpio_controller* controller)
 			read_pad(controller, pin, PAD_CONF0),
 			read_pad(controller, pin, PAD_VAL) & 0x7);
 		if ((pin % 4) == 3 || pin + 1 == community->pinCount) {
-			dprintf("baytrail_gpio:%s\n", line);
+			dprintf("acpitest baytrail_gpio:%s\n", line);
 			length = 0;
 		}
 	}
@@ -439,7 +439,7 @@ boot_event_thread(void* /*data*/)
 				snooze(BOOT_EVENT_RETRY_DELAY);
 			}
 
-			dprintf("baytrail_gpio: %s pin %" B_PRIu16 ": %s %s\n",
+			dprintf("acpitest baytrail_gpio: %s pin %" B_PRIu16 ": %s %s\n",
 				controller->community->name, list.events[i].pin, method,
 				status == B_OK ? "done" : "failed");
 		}
@@ -586,7 +586,7 @@ baytrail_gpio_init_driver(device_node* node, void** _driverCookie)
 		return status;
 	}
 
-	dprintf("baytrail_gpio: %s at %#" B_PRIxPHYSADDR ", %" B_PRIu32
+	dprintf("acpitest baytrail_gpio: %s at %#" B_PRIxPHYSADDR ", %" B_PRIu32
 		" pins, irq %" B_PRIu32 "\n", controller->community->name,
 		controller->physicalBase, controller->community->pinCount,
 		controller->irq);

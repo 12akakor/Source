@@ -101,7 +101,7 @@ gsbus_region_handler(uint32 function, acpi_physical_address address,
 	i2c_addr slave;
 	if (!parse_i2c_connection(context->connection.Connection,
 			context->connection.Length, &slave)) {
-		ERROR("GenericSerialBus: unsupported connection\n");
+		dprintf("acpitest GenericSerialBus: unsupported connection\n");
 		return AE_BAD_PARAMETER;
 	}
 
@@ -117,7 +117,7 @@ gsbus_region_handler(uint32 function, acpi_physical_address address,
 			length = context->connection.AccessLength;
 			break;
 		default:
-			ERROR("GenericSerialBus: access attribute %#" B_PRIx32
+			dprintf("acpitest GenericSerialBus: access attribute %#" B_PRIx32
 				" not supported\n", function >> 16);
 			return AE_BAD_PARAMETER;
 	}
@@ -138,7 +138,7 @@ gsbus_region_handler(uint32 function, acpi_physical_address address,
 			&command, 1, data, length);
 	}
 
-	TRACE("GenericSerialBus: %s %#x register %#x, %" B_PRIuSIZE
+	dprintf("acpitest GenericSerialBus: %s %#x register %#x, %" B_PRIuSIZE
 		" bytes: %s\n", (function & ACPI_IO_MASK) == ACPI_WRITE ? "write"
 			: "read", slave, command, length, strerror(status));
 
@@ -173,8 +173,9 @@ install_region_handler(void* cookie)
 			ACPI_ADR_SPACE_GSBUS, gsbus_region_handler, gsbus_region_setup,
 			&bus->region) == B_OK) {
 		bus->region_handler_installed = true;
+		dprintf("acpitest GenericSerialBus: handler installed\n");
 	} else
-		ERROR("installing the GenericSerialBus region handler failed\n");
+		dprintf("acpitest GenericSerialBus: installing the handler failed\n");
 }
 
 
