@@ -13,9 +13,17 @@
 #include <lock.h>
 
 #define ELAN_MAX_REPORT_LENGTH	39
+#define ELAN_MAX_FINGERS		5
 
 
 class InputReadyLine;
+
+struct elan_finger {
+	uint32	x;
+	uint32	y;
+	uint32	pressure;
+	uint32	width;
+};
 
 class ELANDevice {
 public:
@@ -50,6 +58,10 @@ private:
 									bigtime_t timeout);
 			int					_ParseReport(const uint8* report,
 									touchpad_movement* movement);
+			void				_TrackPosition(touchpad_movement* movement,
+									int count);
+			int					_ClickFingers(int count,
+									const elan_finger** presser) const;
 			bool				_EmulateButtons(touchpad_movement* movement,
 									int count);
 			void				_ResetContact();
@@ -86,6 +98,13 @@ private:
 			uint8				fReport[ELAN_MAX_REPORT_LENGTH];
 			uint8				fLastReport[ELAN_MAX_REPORT_LENGTH];
 			uint32				fBadReports;
+
+			elan_finger			fFingers[ELAN_MAX_FINGERS];
+			elan_finger			fLastFingers[ELAN_MAX_FINGERS];
+			uint32				fFingerMask;
+			uint32				fLastFingerMask;
+			int32				fPositionX;
+			int32				fPositionY;
 
 			// clickpad button emulation
 			uint32				fClickButton;
