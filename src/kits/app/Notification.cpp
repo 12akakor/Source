@@ -12,17 +12,35 @@
 #include <Notification.h>
 
 #include <new>
+#include <vector>
 
 #include <stdlib.h>
 #include <string.h>
 
 #include <notification/Notifications.h>
 
+#include <Application.h>
 #include <Bitmap.h>
 #include <Message.h>
+#include <Messenger.h>
 #include <NodeInfo.h>
 #include <Path.h>
 #include <Roster.h>
+
+
+namespace BPrivate {
+
+struct notification_action {
+	BString		label;
+	BMessage*	message;
+	BMessenger	target;
+};
+
+// Kept outside BNotification, so that its size and layout stay the same
+struct notification_actions : std::vector<notification_action> {
+};
+
+}	// namespace BPrivate
 
 
 BNotification::BNotification(notification_type type)
@@ -32,7 +50,8 @@ BNotification::BNotification(notification_type type)
 	fType(type),
 	fProgress(0.f),
 	fFile(NULL),
-	fBitmap(NULL)
+	fBitmap(NULL),
+	fActions(NULL)
 {
 	team_info teamInfo;
 	get_team_info(B_CURRENT_TEAM, &teamInfo);
@@ -61,7 +80,8 @@ BNotification::BNotification(BMessage* archive)
 	fInitStatus(B_OK),
 	fProgress(0.0f),
 	fFile(NULL),
-	fBitmap(NULL)
+	fBitmap(NULL),
+	fActions(NULL)
 {
 	BString appName;
 	if (archive->FindString("_appname", &appName) == B_OK)
@@ -116,6 +136,18 @@ BNotification::BNotification(BMessage* archive)
 	while (archive->FindString("_onClickArgv", index++, &onClickArgv) == B_OK)
 		AddOnClickArg(onClickArgv);
 
+	const char* actionLabel;
+	index = 0;
+	while (archive->FindString("_actionLabel", index, &actionLabel) == B_OK) {
+		BMessage actionMessage;
+		BMessenger actionTarget;
+		archive->FindMessage("_actionMessage", index, &actionMessage);
+		archive->FindMessenger("_actionTarget", index, &actionTarget);
+		AddAction(actionLabel, new(std::nothrow) BMessage(actionMessage),
+			actionTarget);
+		index++;
+	}
+
 	status_t ret = B_OK;
 	BMessage icon;
 	if ((ret = archive->FindMessage("_icon", &icon)) == B_OK) {
@@ -131,6 +163,12 @@ BNotification::~BNotification()
 {
 	delete fFile;
 	delete fBitmap;
+
+	if (fActions != NULL) {
+		for (size_t i = 0; i < fActions->size(); i++)
+			delete (*fActions)[i].message;
+		delete fActions;
+	}
 
 	for (int32 i = fRefs.CountItems() - 1; i >= 0; i--)
 		delete (entry_ref*)fRefs.ItemAtFast(i);
@@ -203,6 +241,22 @@ BNotification::Archive(BMessage* archive, bool deep) const
 	if (status == B_OK) {
 		for (int32 i = 0; i < CountOnClickArgs(); i++) {
 			status = archive->AddString("_onClickArgv", OnClickArgAt(i));
+			if (status != B_OK)
+				break;
+		}
+	}
+
+	if (status == B_OK) {
+		for (int32 i = 0; i < CountActions(); i++) {
+			status = archive->AddString("_actionLabel", ActionLabelAt(i));
+			if (status == B_OK) {
+				status = archive->AddMessage("_actionMessage",
+					ActionMessageAt(i));
+			}
+			if (status == B_OK) {
+				status = archive->AddMessenger("_actionTarget",
+					ActionTargetAt(i));
+			}
 			if (status != B_OK)
 				break;
 		}
@@ -441,6 +495,73 @@ BNotification::SetIcon(const BBitmap* icon)
 
 	fBitmap = NULL;
 	return B_OK;
+}
+
+
+status_t
+BNotification::AddAction(const BString& label, BMessage* message)
+{
+	return AddAction(label, message, be_app_messenger);
+}
+
+
+status_t
+BNotification::AddAction(const BString& label, BMessage* message,
+	const BMessenger& target)
+{
+	if (message == NULL)
+		return B_BAD_VALUE;
+
+	if (fActions == NULL) {
+		fActions = new(std::nothrow) BPrivate::notification_actions;
+		if (fActions == NULL) {
+			delete message;
+			return B_NO_MEMORY;
+		}
+	}
+
+	BPrivate::notification_action action = { label, message, target };
+	try {
+		fActions->push_back(action);
+	} catch (...) {
+		delete message;
+		return B_NO_MEMORY;
+	}
+	return B_OK;
+}
+
+
+int32
+BNotification::CountActions() const
+{
+	return fActions != NULL ? (int32)fActions->size() : 0;
+}
+
+
+const char*
+BNotification::ActionLabelAt(int32 index) const
+{
+	if (index < 0 || index >= CountActions())
+		return NULL;
+	return (*fActions)[index].label.String();
+}
+
+
+const BMessage*
+BNotification::ActionMessageAt(int32 index) const
+{
+	if (index < 0 || index >= CountActions())
+		return NULL;
+	return (*fActions)[index].message;
+}
+
+
+BMessenger
+BNotification::ActionTargetAt(int32 index) const
+{
+	if (index < 0 || index >= CountActions())
+		return BMessenger();
+	return (*fActions)[index].target;
 }
 
 

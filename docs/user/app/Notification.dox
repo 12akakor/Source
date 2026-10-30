@@ -550,6 +550,81 @@
 
 
 /*!
+	\fn status_t BNotification::AddAction(const BString& label,
+		BMessage* message)
+	\brief Add a button to the notification that sends \a message to the
+	       application.
+
+	This is the same as calling
+	BNotification::AddAction(const BString&, BMessage*, const BMessenger&)
+	with \c be_app_messenger as the target.
+*/
+
+
+/*!
+	\fn status_t BNotification::AddAction(const BString& label,
+		BMessage* message, const BMessenger& target)
+	\brief Add a button to the notification that sends \a message to
+	       \a target.
+
+	The notification_server shows the actions as a row of buttons, in the
+	order they were added, under the notification's text. When the user
+	clicks one, a copy of its \a message is sent to its \a target and the
+	notification is removed. A click elsewhere on the notification still does
+	what was set with BNotification::SetOnClickApp(),
+	BNotification::SetOnClickFile() and the related methods.
+
+	Use actions for choices the user can make straight from the
+	notification, such as "Reply" or "Snooze". Keep the labels short: the
+	buttons share the width of the notification.
+
+	\param label The label of the button.
+	\param message The message to send. The notification takes ownership of
+	       it, also when an error is returned.
+	\param target Where to send the message.
+	\returns \c B_OK if the action was added, \c B_BAD_VALUE if \a message
+	         is \c NULL, or \c B_NO_MEMORY.
+*/
+
+
+/*!
+	\fn int32 BNotification::CountActions() const
+	\brief Returns the number of actions.
+
+	\see BNotification::AddAction()
+*/
+
+
+/*!
+	\fn const char* BNotification::ActionLabelAt(int32 index) const
+	\brief Returns the label of the action at \a index, or \c NULL if there
+	       is none.
+
+	\see BNotification::AddAction()
+*/
+
+
+/*!
+	\fn const BMessage* BNotification::ActionMessageAt(int32 index) const
+	\brief Returns the message of the action at \a index, or \c NULL if
+	       there is none.
+
+	\return Returns a borrowed reference, owned by the notification.
+
+	\see BNotification::AddAction()
+*/
+
+
+/*!
+	\fn BMessenger BNotification::ActionTargetAt(int32 index) const
+	\brief Returns the target of the action at \a index, or an invalid
+	       messenger if there is none.
+
+	\see BNotification::AddAction()
+*/
+
+
+/*!
 	\fn status_t BNotification::Send(bigtime_t timeout = -1)
 	\brief Send the notification to the notification_server.
 
