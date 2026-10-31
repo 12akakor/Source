@@ -10,7 +10,9 @@
 
 #include "vfs_boot.h"
 
+#include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <strings.h>
 
 #include <fs_info.h>
@@ -490,6 +492,99 @@ vfs_bootstrap_file_systems(void)
 }
 
 
+extern size_t debug_copy_syslog_tail(char* buffer, size_t size);
+
+// Test only, see syslog_to_esp_thread().
+static const char kSyslogMarker[] = "RENKUOS-SYSLOG-AREA-v1\n";
+static const size_t kSyslogAreaSize = 512 * 1024;
+
+
+/*!	Finds the SYSLOG.TXT area that the test image build put on the EFI
+	partition: a FAT partition with a block that starts with the marker.
+*/
+static int
+open_syslog_area(off_t* _offset)
+{
+	const size_t kChunk = 64 * 1024;
+	char* chunk = (char*)malloc(kChunk);
+	if (chunk == NULL)
+		return -1;
+
+	KDiskDeviceManager* manager = KDiskDeviceManager::Default();
+	KDiskDevice* device;
+	int32 cookie = 0;
+	while ((device = manager->NextDevice(&cookie)) != NULL) {
+		for (int32 i = 0; i < device->CountChildren(); i++) {
+			KPartition* partition = device->ChildAt(i);
+			if (partition->ContentType() == NULL
+				|| strstr(partition->ContentType(), "FAT") == NULL) {
+				continue;
+			}
+			KPath path;
+			if (partition->GetPath(&path) != B_OK)
+				continue;
+			int fd = _kern_open(-1, path.Path(), O_RDWR, 0);
+			if (fd < 0)
+				continue;
+			for (off_t pos = 0; pos < partition->Size(); pos += kChunk) {
+				ssize_t bytes = _kern_read(fd, pos, chunk, kChunk);
+				if (bytes <= 0)
+					break;
+				for (ssize_t at = 0; at + 512 <= bytes; at += 512) {
+					if (memcmp(chunk + at, kSyslogMarker,
+							sizeof(kSyslogMarker) - 1) == 0) {
+						free(chunk);
+						*_offset = pos + at;
+						dprintf("syslog-to-esp: area in %s at %" B_PRIdOFF
+							"\n", path.Path(), *_offset);
+						return fd;
+					}
+				}
+			}
+			_kern_close(fd);
+		}
+	}
+
+	free(chunk);
+	return -1;
+}
+
+
+static status_t
+syslog_to_esp_thread(void*)
+{
+	off_t offset = 0;
+	int fd = -1;
+	for (int32 attempt = 0; attempt < 30 && fd < 0; attempt++) {
+		fd = open_syslog_area(&offset);
+		if (fd < 0)
+			snooze(2000000);
+	}
+	if (fd < 0) {
+		dprintf("syslog-to-esp: no SYSLOG.TXT area found\n");
+		return B_ENTRY_NOT_FOUND;
+	}
+
+	char* area = (char*)malloc(kSyslogAreaSize);
+	if (area == NULL)
+		return B_NO_MEMORY;
+
+	while (true) {
+		size_t header = snprintf(area, kSyslogAreaSize,
+			"%s(written %" B_PRIdBIGTIME " s after boot)\n", kSyslogMarker,
+			system_time() / 1000000);
+		size_t length = debug_copy_syslog_tail(area + header,
+			kSyslogAreaSize - header);
+		memset(area + header + length, ' ', kSyslogAreaSize - header - length);
+		_kern_write(fd, offset, area, kSyslogAreaSize);
+		_kern_fsync(fd, false);
+		snooze(10000000);
+	}
+
+	return B_OK;
+}
+
+
 void
 vfs_mount_boot_file_system(kernel_args* args)
 {
@@ -625,6 +720,13 @@ vfs_mount_boot_file_system(kernel_args* args)
 	KDiskDeviceManager *manager = KDiskDeviceManager::Default();
 	manager->RescanDiskSystems();
 	manager->StartMonitoring();
+
+	// Test only: copy the syslog into SYSLOG.TXT of the EFI partition every
+	// 10 seconds, so it can be read on another computer after a hang.
+	thread_id syslogThread = spawn_kernel_thread(&syslog_to_esp_thread,
+		"syslog to ESP", B_LOW_PRIORITY, NULL);
+	if (syslogThread >= 0)
+		resume_thread(syslogThread);
 
 	// Test only: if the desktop does not come up, show which processes run
 	// after two minutes.

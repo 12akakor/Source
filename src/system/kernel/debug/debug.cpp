@@ -117,7 +117,8 @@ static const char* sCurrentKernelDebuggerMessagePrefix;
 static const char* sCurrentKernelDebuggerMessage;
 static va_list sCurrentKernelDebuggerMessageArgs;
 
-#define DEFAULT_SYSLOG_BUFFER_SIZE 65536
+#define DEFAULT_SYSLOG_BUFFER_SIZE (512 * 1024)
+	// test only: large enough to keep a whole boot (was 65536)
 #define OUTPUT_BUFFER_SIZE 1024
 static char sOutputBuffer[OUTPUT_BUFFER_SIZE];
 static char sInterruptOutputBuffer[OUTPUT_BUFFER_SIZE];
@@ -1295,6 +1296,23 @@ syslog_sender(void* data)
 	}
 
 	return 0;
+}
+
+
+/*!	Test only: copies the newest part of the syslog into \a buffer and
+	returns the number of bytes copied.
+*/
+size_t
+debug_copy_syslog_tail(char* buffer, size_t size)
+{
+	InterruptsSpinLocker _(sSpinlock);
+	if (sSyslogBuffer == NULL)
+		return 0;
+
+	size_t readable = ring_buffer_readable(sSyslogBuffer);
+	size_t start = readable > size ? readable - size : 0;
+	return ring_buffer_peek(sSyslogBuffer, start, buffer,
+		std::min(readable, size));
 }
 
 
