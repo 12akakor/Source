@@ -761,7 +761,33 @@ vfs_mount_boot_file_system(kernel_args* args)
 	// Test only: if the desktop does not come up, show which processes run
 	// after two minutes.
 	thread_id hangDiag = spawn_kernel_thread([](void*) -> status_t {
-		snooze(120000000);
+		snooze(95000000);
+
+		// List every team with its threads, their state and the semaphore
+		// they wait on, so that SYSLOG.TXT shows where userland is stuck.
+		team_info team;
+		int32 teamCookie = 0;
+		while (get_next_team_info(&teamCookie, &team) == B_OK) {
+			dprintf("hangdiag: team %" B_PRId32 " %s (%" B_PRId32
+				" threads)\n", team.team, team.args, team.thread_count);
+			if (team.team == B_SYSTEM_TEAM)
+				continue;
+			thread_info thread;
+			int32 threadCookie = 0;
+			while (get_next_thread_info(team.team, &threadCookie, &thread)
+					== B_OK) {
+				sem_info sem;
+				const char* semName = "-";
+				if (thread.sem >= 0 && get_sem_info(thread.sem, &sem) == B_OK)
+					semName = sem.name;
+				dprintf("hangdiag:   thread %" B_PRId32 " %-24s state %d sem %"
+					B_PRId32 " %s\n", thread.thread, thread.name,
+					(int)thread.state, thread.sem, semName);
+			}
+		}
+
+		// Give the syslog writer time for one more copy.
+		snooze(25000000);
 		panic("hang-diag: 2 minutes after boot @! teams");
 		return B_OK;
 	}, "hang diag", B_LOW_PRIORITY, NULL);
