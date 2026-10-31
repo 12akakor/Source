@@ -11,6 +11,7 @@
 #include "vfs_boot.h"
 
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <strings.h>
@@ -569,13 +570,42 @@ syslog_to_esp_thread(void*)
 	if (area == NULL)
 		return B_NO_MEMORY;
 
+	// The first half gets the kernel syslog, the second half the end of
+	// the syslog file that syslog_daemon writes (with the messages of
+	// the userland servers and the crash reports of debug_server).
+	const size_t kHalf = kSyslogAreaSize / 2;
 	while (true) {
-		size_t header = snprintf(area, kSyslogAreaSize,
-			"%s(written %" B_PRIdBIGTIME " s after boot)\n", kSyslogMarker,
+		memset(area, ' ', kSyslogAreaSize);
+		size_t header = snprintf(area, kHalf,
+			"%s(written %" B_PRIdBIGTIME " s after boot)\n"
+			"==== kernel syslog ====\n", kSyslogMarker,
 			system_time() / 1000000);
-		size_t length = debug_copy_syslog_tail(area + header,
-			kSyslogAreaSize - header);
-		memset(area + header + length, ' ', kSyslogAreaSize - header - length);
+		debug_copy_syslog_tail(area + header, kHalf - header);
+
+		char* user = area + kHalf;
+		size_t userHeader = snprintf(user, kHalf,
+			"\n==== /boot/system/var/log/syslog (end) ====\n");
+		int logFD = _kern_open(-1, "/boot/system/var/log/syslog", O_RDONLY, 0);
+		if (logFD >= 0) {
+			struct stat st;
+			off_t start = 0;
+			if (_kern_read_stat(logFD, NULL, false, &st, sizeof(st)) == B_OK
+				&& st.st_size > (off_t)(kHalf - userHeader)) {
+				start = st.st_size - (kHalf - userHeader);
+			}
+			ssize_t bytes = _kern_read(logFD, start, user + userHeader,
+				kHalf - userHeader);
+			if (bytes < 0) {
+				snprintf(user + userHeader, kHalf - userHeader,
+					"(read failed)\n");
+			}
+			_kern_close(logFD);
+		} else
+			snprintf(user + userHeader, kHalf - userHeader, "(no file yet)\n");
+		for (size_t i = 0; i < kSyslogAreaSize; i++) {
+			if (area[i] == '\0')
+				area[i] = ' ';
+		}
 		_kern_write(fd, offset, area, kSyslogAreaSize);
 		_kern_fsync(fd, false);
 		snooze(10000000);
