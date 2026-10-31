@@ -1,5 +1,5 @@
 /*
- * Copyright 2026, Haiku, Inc. All rights reserved.
+ * Copyright 2026 Akakor. All rights reserved.
  * Distributed under the terms of the MIT license.
  * SPDX-License-Identifier: MIT
  */
