@@ -25,7 +25,7 @@ on:
         default: renkuos
         required: false
   push:
-    branches: [tablet-all]
+    branches: [tablet-hangdiag]
 
 permissions:
   contents: read

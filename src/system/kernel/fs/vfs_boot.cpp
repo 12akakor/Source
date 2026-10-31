@@ -625,5 +625,15 @@ vfs_mount_boot_file_system(kernel_args* args)
 	KDiskDeviceManager *manager = KDiskDeviceManager::Default();
 	manager->RescanDiskSystems();
 	manager->StartMonitoring();
+
+	// Test only: if the desktop does not come up, show which processes run
+	// after two minutes.
+	thread_id hangDiag = spawn_kernel_thread([](void*) -> status_t {
+		snooze(120000000);
+		panic("hang-diag: 2 minutes after boot @! teams");
+		return B_OK;
+	}, "hang diag", B_LOW_PRIORITY, NULL);
+	if (hangDiag >= 0)
+		resume_thread(hangDiag);
 }
 
