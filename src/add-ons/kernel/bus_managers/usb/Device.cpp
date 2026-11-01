@@ -69,6 +69,14 @@ Device::Device(Object* parent, int8 hubAddress, uint8 hubPort,
 	TRACE("\tserial_number:.......0x%02x\n", fDeviceDescriptor.serial_number);
 	TRACE("\tnum_configurations:..%d\n", fDeviceDescriptor.num_configurations);
 
+	// test only: name every device in the syslog
+	dprintf("usb: device %04x:%04x, class %02x/%02x/%02x, usb %04x, "
+		"hub %d port %d, %d configurations\n", fDeviceDescriptor.vendor_id,
+		fDeviceDescriptor.product_id, fDeviceDescriptor.device_class,
+		fDeviceDescriptor.device_subclass, fDeviceDescriptor.device_protocol,
+		fDeviceDescriptor.usb_version, fHubAddress, fHubPort,
+		fDeviceDescriptor.num_configurations);
+
 	if (fDeviceDescriptor.num_configurations == 0) {
 		TRACE_ERROR("device without any configuration!\n");
 		return;

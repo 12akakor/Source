@@ -310,6 +310,14 @@ jobs:
             echo "::error::haiku_loader64.efi is missing"; exit 1
           fi
           mcopy -i "usb/hybrid-usb.img@@$(( START1 * 512 ))" "${LOADER64}" ::EFI/BOOT/BOOTX64.EFI
+
+          # Test only: a 512 KiB SYSLOG.TXT that the kernel finds by its first
+          # line and overwrites with the syslog every 10 seconds.
+          { printf 'RENKUOS-SYSLOG-AREA-v1\n(not written yet)\n'
+            head -c $(( 512 * 1024 - 41 )) /dev/zero | tr '\0' ' '; } > SYSLOG.TXT
+          ls -l SYSLOG.TXT
+          mcopy -i "usb/hybrid-usb.img@@$(( START1 * 512 ))" SYSLOG.TXT ::SYSLOG.TXT \
+            || echo "::warning::no room for SYSLOG.TXT on the EFI partition"
           sfdisk -l usb/hybrid-usb.img
 
           # Show what the firmware will find: the files of the EFI system

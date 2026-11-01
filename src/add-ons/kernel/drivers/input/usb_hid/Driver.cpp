@@ -67,6 +67,9 @@ usb_hid_device_added(usb_device device, void **cookie)
 
 	TRACE("vendor id: 0x%04x; product id: 0x%04x\n",
 		deviceDescriptor->vendor_id, deviceDescriptor->product_id);
+	// test only
+	dprintf("usb_hid: device added %04x:%04x\n", deviceDescriptor->vendor_id,
+		deviceDescriptor->product_id);
 
 	for (int32 i = 0; i < gBlackListedDeviceCount; i++) {
 		usb_support_descriptor &entry = gBlackListedDevices[i];
@@ -168,6 +171,8 @@ usb_hid_device_added(usb_device device, void **cookie)
 					}
 
 					gDeviceList->AddDevice(handler->PublishPath(), handler);
+					// test only
+					dprintf("usb_hid: publishing %s\n", handler->PublishPath());
 					devicesFound = true;
 				}
 			} else
