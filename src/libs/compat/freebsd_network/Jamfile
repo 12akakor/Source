@@ -64,7 +64,7 @@ KernelStaticLibrary freebsd_sdio.a :
 	sdio.cpp
 	;
 
-ObjectHdrs [ FGristFiles sdio.o ]
+ObjectHdrs [ FGristFiles sdio$(SUFOBJ) ]
 	: [ FDirName $(HAIKU_TOP) headers private drivers ] ;
 
 SEARCH_SOURCE += [ FDirName $(SUBDIR) dev mii ] ;
