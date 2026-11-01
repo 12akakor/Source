@@ -23,6 +23,7 @@
 
 extern driver_t* DRIVER_MODULE_NAME(rtwn_pci, pci);
 extern driver_t* DRIVER_MODULE_NAME(rtwn_usb, uhub);
+extern driver_t* DRIVER_MODULE_NAME(rtwn_sdio, sdio);
 
 HAIKU_FBSD_WLAN_DRIVERS_GLUE(realtekwifi)
 HAIKU_DRIVER_REQUIREMENTS(FBSD_WLAN);
@@ -54,8 +55,13 @@ __haiku_init_hardware()
 		DRIVER_MODULE_NAME(rtwn_usb, uhub),
 		NULL
 	};
+	driver_t *sdio_drivers[] = {
+		DRIVER_MODULE_NAME(rtwn_sdio, sdio),
+		NULL
+	};
 	_fbsd_init_hardware_pci(pci_drivers);
 	_fbsd_init_hardware_uhub(usb_drivers);
+	_fbsd_init_hardware_sdio(sdio_drivers);
 }
 
 
