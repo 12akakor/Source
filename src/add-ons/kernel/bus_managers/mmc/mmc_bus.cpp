@@ -438,9 +438,18 @@ MMCBus::_ReadCISManufacturer(uint16_t rca, uint32_t cisPointer,
 bool
 MMCBus::_ProbeSDIO()
 {
-	uint32_t ocr;
-	if (ExecuteCommand(0, SDIO_IO_SEND_OP_COND, 0, &ocr) != B_OK)
+	uint32_t ocr = 0;
+	status_t status = ExecuteCommand(0, SDIO_IO_SEND_OP_COND, 0, &ocr);
+	if (status == B_BUSY) {
+		// the command line is still busy after the CMD8 timeout
+		snooze(10000);
+		status = ExecuteCommand(0, SDIO_IO_SEND_OP_COND, 0, &ocr);
+	}
+	if (status != B_OK) {
+		TRACE_ALWAYS("no answer to CMD5 (%s), not an SDIO card\n",
+			strerror(status));
 		return false;
+	}
 
 	uint8_t functions = (ocr >> 28) & 7;
 	bool memoryPresent = (ocr & (1 << 27)) != 0;
