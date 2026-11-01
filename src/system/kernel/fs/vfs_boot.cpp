@@ -33,6 +33,9 @@
 #include <util/KMessage.h>
 #include <util/Stack.h>
 #include <vfs.h>
+#include <lock.h>
+#include <condition_variable.h>
+#include <thread.h>
 
 #include "vfs_net_boot.h"
 
@@ -506,6 +509,78 @@ static const size_t kSyslogAreaSize = 512 * 1024;
 */
 // Test only: lists every team with its threads and what they wait on.
 
+static void
+dump_teams_for_diag(int32 round)
+{
+	dprintf("hangdiag: ==== snapshot %" B_PRId32 " at %" B_PRIdBIGTIME
+		" s, real time clock %" B_PRIu32 " ====\n", round,
+		system_time() / 1000000, (uint32)real_time_clock());
+	team_info team;
+	int32 teamCookie = 0;
+	while (get_next_team_info(&teamCookie, &team) == B_OK) {
+		dprintf("hangdiag: team %" B_PRId32 " %s (%" B_PRId32 " threads)\n",
+			team.team, team.args, team.thread_count);
+		if (team.team == B_SYSTEM_TEAM)
+			continue;
+		thread_info info;
+		int32 threadCookie = 0;
+		while (get_next_thread_info(team.team, &threadCookie, &info) == B_OK) {
+			char wait[64] = "-";
+			Thread* thread = Thread::GetAndLock(info.thread);
+			if (thread != NULL) {
+				if (thread->state == B_THREAD_WAITING) {
+					switch (thread->wait.type) {
+						case THREAD_BLOCK_TYPE_SEMAPHORE:
+						{
+							sem_info sem;
+							sem_id id = (sem_id)(addr_t)thread->wait.object;
+							snprintf(wait, sizeof(wait), "sem %" B_PRId32 " %s",
+								id, get_sem_info(id, &sem) == B_OK
+									? sem.name : "?");
+							break;
+						}
+						case THREAD_BLOCK_TYPE_CONDITION_VARIABLE:
+						{
+							char name[5] = "";
+							ConditionVariable::DebugGetType(
+								(ConditionVariable*)thread->wait.object, name,
+								sizeof(name));
+							snprintf(wait, sizeof(wait), "cvar %s %p", name,
+								thread->wait.object);
+							break;
+						}
+						case THREAD_BLOCK_TYPE_SNOOZE:
+							strlcpy(wait, "snooze", sizeof(wait));
+							break;
+						case THREAD_BLOCK_TYPE_SIGNAL:
+							strlcpy(wait, "signal", sizeof(wait));
+							break;
+						case THREAD_BLOCK_TYPE_MUTEX:
+							snprintf(wait, sizeof(wait), "mutex %s",
+								((mutex*)thread->wait.object)->name);
+							break;
+						case THREAD_BLOCK_TYPE_USER:
+							strlcpy(wait, "user", sizeof(wait));
+							break;
+						case THREAD_BLOCK_TYPE_OTHER:
+							snprintf(wait, sizeof(wait), "other %s",
+								(const char*)thread->wait.object);
+							break;
+						default:
+							snprintf(wait, sizeof(wait), "type %" B_PRIu32 " %p",
+								thread->wait.type, thread->wait.object);
+							break;
+					}
+				}
+				thread->UnlockAndReleaseReference();
+			}
+			dprintf("hangdiag:   thread %" B_PRId32 " %-24s state %d %s\n",
+				info.thread, info.name, (int)info.state, wait);
+		}
+	}
+}
+
+
 static int
 open_syslog_area(off_t* _offset)
 {
@@ -761,5 +836,17 @@ vfs_mount_boot_file_system(kernel_args* args)
 		"syslog to ESP", B_LOW_PRIORITY, NULL);
 	if (syslogThread >= 0)
 		resume_thread(syslogThread);
+
+	// Test only: list all threads with what they wait for, 60 and 120
+	// seconds after boot, so a hang can be read from SYSLOG.TXT.
+	thread_id threadDump = spawn_kernel_thread([](void*) -> status_t {
+		for (int32 round = 0; round < 2; round++) {
+			snooze(60000000);
+			dump_teams_for_diag(round);
+		}
+		return B_OK;
+	}, "thread dump", B_LOW_PRIORITY, NULL);
+	if (threadDump >= 0)
+		resume_thread(threadDump);
 }
 
