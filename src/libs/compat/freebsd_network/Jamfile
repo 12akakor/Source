@@ -2,7 +2,7 @@ SubDir HAIKU_TOP src libs compat freebsd_network ;
 
 UseHeaders [ FDirName $(SUBDIR) ] : true ;
 UseHeaders [ FDirName $(SUBDIR) compat ] : true ;
-UsePrivateHeaders net ;
+UsePrivateHeaders drivers net ;
 UsePrivateKernelHeaders ;
 UseHeaders $(HAIKU_PRIVATE_KERNEL_HEADERS) : true ;
 
@@ -63,9 +63,6 @@ KernelStaticLibrary freebsd_usb.a :
 KernelStaticLibrary freebsd_sdio.a :
 	sdio.cpp
 	;
-
-ObjectHdrs [ FGristFiles sdio$(SUFOBJ) ]
-	: [ FDirName $(HAIKU_TOP) headers private drivers ] ;
 
 SEARCH_SOURCE += [ FDirName $(SUBDIR) dev mii ] ;
 
