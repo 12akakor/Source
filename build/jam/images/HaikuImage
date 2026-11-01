@@ -42,9 +42,11 @@ if $(HAIKU_BUILD_TYPE) = test {
 if $(HAIKU_BUILD_TYPE) = regular {
 	AddPackageFilesToHaikuImage system packages : mediatek_wifi_firmwares.hpkg
 		: nameFromMetaInfo ;
-	AddPackageFilesToHaikuImage system packages
-		: realtek_rtw88_wifi_firmwares.hpkg : nameFromMetaInfo ;
 }
+
+# test: also on nightly images
+AddPackageFilesToHaikuImage system packages
+	: realtek_rtw88_wifi_firmwares.hpkg : nameFromMetaInfo ;
 
 # import what is shared by all images
 include [ FDirName $(HAIKU_BUILD_RULES_DIR) images definitions common-tail ] ;

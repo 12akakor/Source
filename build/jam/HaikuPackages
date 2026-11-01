@@ -24,8 +24,10 @@ if $(HAIKU_BUILD_TYPE) = test {
 
 if $(HAIKU_BUILD_TYPE) = regular {
 	packages += MediatekWifiFirmwares ;
-	packages += RealtekRtw88WifiFirmwares ;
 }
+
+# test: also on nightly images
+packages += RealtekRtw88WifiFirmwares ;
 
 local archDependentPackages =
 	HaikuCrossDevel
