@@ -489,11 +489,15 @@ static void
 probe_sdio_nodes(device_node* parent, device_t root, driver_t* drivers[],
 	bool* _found)
 {
+	// An empty attribute list matches every child; NULL matches none.
+	const device_attr anyChild[] = { { NULL } };
 	device_node* node = NULL;
-	while (sDeviceManager->get_next_child_node(parent, NULL, &node)
+	while (sDeviceManager->get_next_child_node(parent, anyChild, &node)
 			== B_OK) {
 		compat_sdio_device probe;
 		if (get_sdio_function(node, &probe)) {
+			dprintf("sdio: function %u of %04x:%04x\n", probe.args.function,
+				probe.args.vendor, probe.args.device);
 			struct device device = {};
 			device.parent = root;
 			device.root = root;
