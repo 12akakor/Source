@@ -25,7 +25,7 @@ on:
         default: renkuos
         required: false
   push:
-    branches: [tablet-next]
+    branches: [tablet-sdio]
 
 permissions:
   contents: read
