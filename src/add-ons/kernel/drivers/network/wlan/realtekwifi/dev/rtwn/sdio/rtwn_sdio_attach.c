@@ -5,274 +5,249 @@
  */
 
 
-/*!	SDIO bus glue of rtwn for the RTL8723BS.
+/*!	SDIO bus glue of rtwn, for the RTL8723BS.
 
-	First stage: find the chip, switch it on with the power sequence of the
-	RTL8723B and log its identity. The chip is not yet attached as a network
-	device.
-
-	The SDIO register access of Realtek chips is described by the rtw88 driver
-	(sdio.c and sdio.h, GPL-2.0 OR BSD-3-Clause): CMD52 and CMD53 on function
-	1 reach the SDIO local registers at their offset, and the MAC registers at
-	0x10000 plus their offset (bits 16:13 of the address select the block).
+	The structure follows the USB glue of rtwn (rtwn_usb_attach.c). The SDIO
+	specifics, the register windows, the transmit FIFOs and the receive FIFO,
+	are described by the rtw88 driver (sdio.c and sdio.h, GPL-2.0 OR
+	BSD-3-Clause).
 */
 
 
 #include <sys/param.h>
 #include <sys/systm.h>
-#include <sys/bus.h>
 #include <sys/kernel.h>
+#include <sys/lock.h>
+#include <sys/mutex.h>
+#include <sys/mbuf.h>
+#include <sys/malloc.h>
 #include <sys/module.h>
+#include <sys/socket.h>
+#include <sys/sysctl.h>
+#include <sys/bus.h>
+#include <sys/endian.h>
+#include <sys/taskqueue.h>
+
+#include <net/if.h>
+#include <net/if_var.h>
+#include <net/ethernet.h>
+#include <net/if_media.h>
+
+#include <net80211/ieee80211_var.h>
 
 #include <dev/sdio/sdio_haiku.h>
 
-#include <dev/rtwn/rtl8723b/r8723b_pwrseq.h>
+#include <dev/rtwn/if_rtwnreg.h>
+#include <dev/rtwn/if_rtwnvar.h>
+#include <dev/rtwn/if_rtwn_nop.h>
+
+#include <dev/rtwn/sdio/rtwn_sdio_reg.h>
+#include <dev/rtwn/sdio/rtwn_sdio_var.h>
+
+#include <dev/rtwn/rtl8192c/r92c_reg.h>
 
 
 #define RTWN_SDIO_VENDOR_REALTEK	0x024c
 #define RTWN_SDIO_DEVICE_RTL8723BS	0xb723
 
-#define RTWN_SDIO_LOCAL_REG(x)		((x) & 0x0fff)
-#define RTWN_SDIO_MAC_REG(x)		(((x) & 0xffff) | (8 << 13))
 
-#define RTWN_SDIO_HSUS_CTRL			0x0086
-#define RTWN_SDIO_HSUS_SUS_REQ		0x01
-#define RTWN_SDIO_HSUS_RESUME_RDY	0x02
-#define RTWN_SDIO_HIMR				0x0014
-
-#define RTWN_REG_SYS_CFG			0x00f0
-#define RTWN_REG_SYS_STATUS1		0x00f4
-#define RTWN_REG_SYS_CLKR			0x0008
-#define RTWN_REG_CR					0x0100
-
-#define RTWN_SDIO_BLOCK_SIZE		512
+static device_probe_t	rtwn_sdio_probe;
+static device_attach_t	rtwn_sdio_attach;
+static device_detach_t	rtwn_sdio_detach;
 
 
-struct rtwn_sdio_softc {
-	device_t			sc_dev;
-	struct sdio_func*	sc_func;
-};
-
-
-static uint8_t
-rtwn_sdio_read_1(struct rtwn_sdio_softc* sc, uint32_t addr, int* err)
+static void
+rtwn_sdio_start_xfers(struct rtwn_softc *sc)
 {
-	return sdio_read_1(sc->sc_func, addr, err);
+	struct rtwn_sdio_softc *uc = RTWN_SDIO_SOFTC(sc);
+	uint32_t hisr;
+
+	/* Acknowledge what came in while the interrupt was off. */
+	hisr = rtwn_sdio_local_read_4(uc, RTWN_SDIO_HISR);
+	if (hisr != 0xffffffff && (hisr & RTWN_SDIO_HISR_CLEAR_MASK) != 0) {
+		rtwn_sdio_local_write_4(uc, RTWN_SDIO_HISR,
+		    hisr & RTWN_SDIO_HISR_CLEAR_MASK);
+	}
+
+	rtwn_sdio_enable_intr(uc, true);
 }
 
 
 static void
-rtwn_sdio_write_1(struct rtwn_sdio_softc* sc, uint32_t addr, uint8_t value,
-	int* err)
+rtwn_sdio_abort_xfers(struct rtwn_softc *sc)
 {
-	sdio_write_1(sc->sc_func, addr, value, err);
+	rtwn_sdio_enable_intr(RTWN_SDIO_SOFTC(sc), false);
 }
 
 
-/*!	Reads a 32 bit register byte by byte: before the chip is on, only CMD52
-	works (rtw88 uses CMD53 only once the chip is powered).
-*/
-static uint32_t
-rtwn_sdio_read_4_bytes(struct rtwn_sdio_softc* sc, uint32_t addr, int* err)
+static void
+rtwn_sdio_reset_lists(struct rtwn_softc *sc, struct ieee80211vap *vap)
 {
-	uint32_t value = 0;
-	for (int i = 0; i < 4; i++) {
-		uint8_t byte = rtwn_sdio_read_1(sc, addr + i, err);
-		if (*err != 0)
-			return 0;
-		value |= (uint32_t)byte << (i * 8);
-	}
-	return value;
-}
+	struct rtwn_sdio_softc *uc = RTWN_SDIO_SOFTC(sc);
+	struct mbufq keep;
+	struct mbuf *m;
 
+	RTWN_ASSERT_LOCKED(sc);
 
-/*!	Runs one power sequence table for the SDIO interface (the format of
-	rtw88, see r8723b_pwrseq.h).
-*/
-static int
-rtwn_sdio_run_pwr_seq(struct rtwn_sdio_softc* sc,
-	const struct rtw_pwr_seq_cmd* cmd)
-{
-	int err = 0;
+	mbufq_init(&keep, IFQ_MAXLEN);
+	while ((m = mbufq_dequeue(&uc->sc_tx_done)) != NULL) {
+		struct ieee80211_node *ni = m->m_pkthdr.PH_loc.ptr;
 
-	for (; cmd->cmd != RTW_PWR_CMD_END; cmd++) {
-		if ((cmd->intf_mask & RTW_PWR_INTF_SDIO_MSK) == 0
-			|| (cmd->cut_mask & RTW_PWR_CUT_ALL_MSK) == 0) {
+		if (vap != NULL && ni->ni_vap != vap) {
+			mbufq_enqueue(&keep, m);
 			continue;
 		}
-		// Test chips (cut mask TEST only) are skipped
-		if (cmd->cut_mask == RTW_PWR_CUT_TEST_MSK)
-			continue;
-
-		uint32_t addr = cmd->base == RTW_PWR_ADDR_SDIO
-			? RTWN_SDIO_LOCAL_REG(cmd->offset)
-			: RTWN_SDIO_MAC_REG(cmd->offset);
-
-		switch (cmd->cmd) {
-			case RTW_PWR_CMD_WRITE:
-			{
-				uint8_t value = rtwn_sdio_read_1(sc, addr, &err);
-				if (err != 0)
-					return err;
-				value = (value & ~cmd->mask) | (cmd->value & cmd->mask);
-				rtwn_sdio_write_1(sc, addr, value, &err);
-				if (err != 0)
-					return err;
-				break;
-			}
-
-			case RTW_PWR_CMD_POLLING:
-			{
-				int tries;
-				for (tries = 0; tries < RTW_PWR_POLLING_CNT; tries++) {
-					uint8_t value = rtwn_sdio_read_1(sc, addr, &err);
-					if (err != 0)
-						return err;
-					if ((value & cmd->mask) == (cmd->value & cmd->mask))
-						break;
-					DELAY(50);
-				}
-				if (tries == RTW_PWR_POLLING_CNT) {
-					device_printf(sc->sc_dev, "power sequence: polling "
-						"%#x mask %#x for %#x timed out\n", cmd->offset,
-						cmd->mask, cmd->value);
-					return ETIMEDOUT;
-				}
-				break;
-			}
-
-			case RTW_PWR_CMD_DELAY:
-				if (cmd->value == RTW_PWR_DELAY_US)
-					DELAY(cmd->offset);
-				else
-					DELAY(cmd->offset * 1000);
-				break;
-
-			default:
-				break;
-		}
+		m->m_pkthdr.PH_loc.ptr = NULL;
+		ieee80211_free_node(ni);
+		m_freem(m);
 	}
-
-	return 0;
+	while ((m = mbufq_dequeue(&keep)) != NULL)
+		mbufq_enqueue(&uc->sc_tx_done, m);
 }
 
 
-static int
-rtwn_sdio_power_on(struct rtwn_sdio_softc* sc)
+/*!	Queue to FIFO mapping of the RQPN table of rtw88 for SDIO: VO, MGT and
+	HI to the high queue, VI to the normal one, BE and BK to the low one.
+*/
+static uint16_t
+rtwn_sdio_get_qmap(struct rtwn_softc *sc)
 {
-	int err = 0;
+	return (R92C_TRXDMA_CTRL_QMAP_3EP);
+}
 
-	// Leave the SDIO suspend state (rtw88 mac.c, pre system config)
-	uint8_t value = rtwn_sdio_read_1(sc,
-		RTWN_SDIO_LOCAL_REG(RTWN_SDIO_HSUS_CTRL), &err);
-	if (err != 0)
-		return err;
-	rtwn_sdio_write_1(sc, RTWN_SDIO_LOCAL_REG(RTWN_SDIO_HSUS_CTRL),
-		value & ~RTWN_SDIO_HSUS_SUS_REQ, &err);
-	int tries;
-	for (tries = 0; tries < RTW_PWR_POLLING_CNT; tries++) {
-		value = rtwn_sdio_read_1(sc,
-			RTWN_SDIO_LOCAL_REG(RTWN_SDIO_HSUS_CTRL), &err);
-		if (err == 0 && (value & RTWN_SDIO_HSUS_RESUME_RDY) != 0)
-			break;
-		DELAY(50);
-	}
-	if (tries == RTW_PWR_POLLING_CNT) {
-		device_printf(sc->sc_dev, "SDIO does not leave suspend (HSUS %#x)\n",
-			value);
-		return ETIMEDOUT;
-	}
 
-	// No interrupts while the power state changes
-	for (int i = 0; i < 4; i++) {
-		rtwn_sdio_write_1(sc, RTWN_SDIO_LOCAL_REG(RTWN_SDIO_HIMR + i), 0,
-			&err);
-	}
+static void
+rtwn_sdio_attach_methods(struct rtwn_softc *sc)
+{
+	sc->sc_write_1		= rtwn_sdio_write_1;
+	sc->sc_write_2		= rtwn_sdio_write_2;
+	sc->sc_write_4		= rtwn_sdio_write_4;
+	sc->sc_read_1		= rtwn_sdio_read_1;
+	sc->sc_read_2		= rtwn_sdio_read_2;
+	sc->sc_read_4		= rtwn_sdio_read_4;
+	sc->sc_delay		= rtwn_sdio_delay;
+	sc->sc_tx_start		= rtwn_sdio_tx_start;
+	sc->sc_start_xfers	= rtwn_sdio_start_xfers;
+	sc->sc_reset_lists	= rtwn_sdio_reset_lists;
+	sc->sc_abort_xfers	= rtwn_sdio_abort_xfers;
+	sc->sc_fw_write_block	= rtwn_sdio_fw_write_block;
+	sc->sc_get_qmap		= rtwn_sdio_get_qmap;
+	sc->sc_set_desc_addr	= rtwn_nop_softc;
+	sc->sc_drop_incorrect_tx = rtwn_nop_softc;
+	sc->sc_beacon_update_begin = rtwn_nop_softc_vap;
+	sc->sc_beacon_update_end = rtwn_nop_softc_vap;
+	sc->sc_beacon_unload	= rtwn_nop_softc_int;
 
-	for (int i = 0; card_enable_flow_8723b[i] != NULL; i++) {
-		err = rtwn_sdio_run_pwr_seq(sc, card_enable_flow_8723b[i]);
-		if (err != 0) {
-			device_printf(sc->sc_dev, "power sequence %d failed: %d\n", i,
-				err);
-			return err;
-		}
-	}
-
-	return 0;
+	sc->bcn_check_interval	= 100;
 }
 
 
 static int
 rtwn_sdio_probe(device_t dev)
 {
-	struct sdio_attach_args* args
-		= (struct sdio_attach_args*)device_get_ivars(dev);
+	struct sdio_attach_args *args = device_get_ivars(dev);
+
 	if (args == NULL || args->vendor != RTWN_SDIO_VENDOR_REALTEK
-		|| args->device != RTWN_SDIO_DEVICE_RTL8723BS
-		|| args->function != 1) {
-		return ENXIO;
-	}
+	    || args->device != RTWN_SDIO_DEVICE_RTL8723BS
+	    || args->function != 1)
+		return (ENXIO);
 
 	device_set_desc(dev, "Realtek RTL8723BS");
-	return BUS_PROBE_DEFAULT;
+	return (BUS_PROBE_DEFAULT);
 }
 
 
 static int
 rtwn_sdio_attach(device_t dev)
 {
-	struct rtwn_sdio_softc* sc = device_get_softc(dev);
+	struct rtwn_sdio_softc *uc = device_get_softc(dev);
+	struct rtwn_softc *sc = &uc->sc_sc;
+	struct ieee80211com *ic = &sc->sc_ic;
+	int error;
+
 	sc->sc_dev = dev;
-	sc->sc_func = sdio_get_function(dev);
-	int err = 0;
+	ic->ic_name = device_get_nameunit(dev);
+	uc->sc_func = sdio_get_function(dev);
 
-	err = sdio_enable_func(sc->sc_func);
-	if (err != 0) {
-		device_printf(dev, "cannot enable SDIO function 1: %d\n", err);
-		return ENXIO;
+	uc->sc_rx_buf = malloc(RTWN_SDIO_RXBUFSZ, M_DEVBUF, M_WAITOK);
+	uc->sc_tx_buf = malloc(RTWN_SDIO_TXBUFSZ, M_DEVBUF, M_WAITOK);
+	mbufq_init(&uc->sc_tx_done, IFQ_MAXLEN);
+	TASK_INIT(&uc->sc_tx_task, 0, rtwn_sdio_tx_done_task, uc);
+
+	rtwn_sysctlattach(sc);
+	mtx_init(&sc->sc_mtx, ic->ic_name, MTX_NETWORK_LOCK, MTX_DEF);
+
+	error = sdio_enable_func(uc->sc_func);
+	if (error != 0) {
+		device_printf(dev, "cannot enable SDIO function 1: %d\n",
+		    error);
+		goto fail;
 	}
-	err = sdio_set_block_size(sc->sc_func, RTWN_SDIO_BLOCK_SIZE);
-	if (err != 0)
-		device_printf(dev, "cannot set the block size: %d\n", err);
-
-	uint32_t sysCfg = rtwn_sdio_read_4_bytes(sc,
-		RTWN_SDIO_MAC_REG(RTWN_REG_SYS_CFG), &err);
-	device_printf(dev, "before power on: SYS_CFG %08x (err %d)\n", sysCfg, err);
-
-	err = rtwn_sdio_power_on(sc);
-	device_printf(dev, "power on: %s\n", err == 0 ? "done" : "failed");
-
-	sysCfg = rtwn_sdio_read_4_bytes(sc, RTWN_SDIO_MAC_REG(RTWN_REG_SYS_CFG),
-		&err);
-	uint32_t status = rtwn_sdio_read_4_bytes(sc,
-		RTWN_SDIO_MAC_REG(RTWN_REG_SYS_STATUS1), &err);
-	uint32_t cr = rtwn_sdio_read_4_bytes(sc, RTWN_SDIO_MAC_REG(RTWN_REG_CR),
-		&err);
-	device_printf(dev, "after power on: SYS_CFG %08x (chip version field "
-		"%u), SYS_STATUS1 %08x, CR %08x (err %d)\n", sysCfg,
-		(sysCfg >> 12) & 0xf, status, cr, err);
-
-	// A CMD53 read of the same register shows that block transfers work
-	uint32_t sysCfg53 = 0;
-	uint8_t bytes[4];
-	err = sdio_read_bytes(sc->sc_func, RTWN_SDIO_MAC_REG(RTWN_REG_SYS_CFG),
-		bytes, 4, true);
-	if (err == 0) {
-		sysCfg53 = bytes[0] | (bytes[1] << 8) | (bytes[2] << 16)
-			| ((uint32_t)bytes[3] << 24);
+	error = sdio_set_block_size(uc->sc_func, RTWN_SDIO_BLOCK_SIZE);
+	if (error != 0) {
+		device_printf(dev, "cannot set the block size: %d\n", error);
+		goto fail;
 	}
-	device_printf(dev, "SYS_CFG through CMD53: %08x (err %d)\n", sysCfg53,
-		err);
 
-	// Not a network device yet
-	return ENXIO;
+	rtwn_sdio_attach_methods(sc);
+	r8723bs_attach(uc);
+
+	/*
+	 * The efuse is only readable with the chip on; rtwn_attach() reads
+	 * it, rtwn_init() switches the chip on again.
+	 */
+	RTWN_LOCK(sc);
+	error = rtwn_power_on(sc);
+	RTWN_UNLOCK(sc);
+	if (error != 0) {
+		device_printf(dev, "power on failed: %d\n", error);
+		goto fail;
+	}
+
+	error = sdio_setup_intr(uc->sc_func, rtwn_sdio_intr, uc);
+	if (error != 0) {
+		device_printf(dev, "cannot set up the interrupt: %d\n", error);
+		goto fail;
+	}
+
+	error = rtwn_attach(sc);
+	if (error != 0)
+		goto fail_intr;
+
+	return (0);
+
+fail_intr:
+	sdio_teardown_intr(uc->sc_func);
+fail:
+	if (sc->sc_detach_private != NULL)
+		rtwn_detach_private(sc);
+	sdio_disable_func(uc->sc_func);
+	mtx_destroy(&sc->sc_mtx);
+	free(uc->sc_tx_buf, M_DEVBUF);
+	free(uc->sc_rx_buf, M_DEVBUF);
+	return (ENXIO);
 }
 
 
 static int
 rtwn_sdio_detach(device_t dev)
 {
-	return 0;
+	struct rtwn_sdio_softc *uc = device_get_softc(dev);
+	struct rtwn_softc *sc = &uc->sc_sc;
+
+	rtwn_detach(sc);
+
+	sdio_teardown_intr(uc->sc_func);
+	taskqueue_drain(taskqueue_thread, &uc->sc_tx_task);
+	rtwn_sdio_tx_drain(uc, 1);
+
+	rtwn_detach_private(sc);
+	sdio_disable_func(uc->sc_func);
+	mtx_destroy(&sc->sc_mtx);
+
+	free(uc->sc_tx_buf, M_DEVBUF);
+	free(uc->sc_rx_buf, M_DEVBUF);
+	return (0);
 }
 
 
