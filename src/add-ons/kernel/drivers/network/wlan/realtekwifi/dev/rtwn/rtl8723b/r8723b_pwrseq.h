@@ -94,6 +94,7 @@ struct rtw_pwr_seq_cmd {
 #define REG_SYS_FUNC_EN		0x0002
 #define REG_RSV_CTRL		0x001C
 #define REG_MCUFW_CTRL		0x0080
+#define BIT_FEN_CPUEN		BIT(2)
 
 static const struct rtw_pwr_seq_cmd trans_pre_enable_8723b[] = {
 	/* unlock ISO/CLK/power control register */
