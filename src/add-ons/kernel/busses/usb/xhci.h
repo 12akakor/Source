@@ -267,6 +267,7 @@ private:
 	inline	void				_WriteContext(uint64* p, uint64 value);
 
 			void				_SwitchIntelPorts();
+			void				_LogBayTrailOtg();
 
 private:
 			area_id				fRegisterArea;

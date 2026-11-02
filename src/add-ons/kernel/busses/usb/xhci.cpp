@@ -747,6 +747,8 @@ XHCI::XHCI(pci_info *info, 	pci_device_module_info* pci, pci_device* device, Sta
 				_SwitchIntelPorts();
 				break;
 		}
+		if (fPCIInfo->device_id == PCI_DEVICE_INTEL_BAYTRAIL_XHCI)
+			_LogBayTrailOtg();
 	}
 
 	// halt the host controller
@@ -889,6 +891,51 @@ XHCI::_SwitchIntelPorts()
 }
 
 
+/*!	Test only: logs how the USB 2.0 ports and the micro-USB OTG port of a
+	Bay Trail SoC are set up, to find out why the OTG port runs at full
+	speed. The registers and GPIOs are those the ACPI tables of the Teclast
+	X98 Air III use (XHC1 PWON/PWOF, GPO2._E12).
+*/
+void
+XHCI::_LogBayTrailOtg()
+{
+	uint32 b0 = fPci->read_pci_config(fDevice, 0xb0, 4);
+	TRACE_ALWAYS("usbdiag: cfg 0xb0 %#" B_PRIx32 " (PHY2 %" B_PRIu32
+		", USHP %" B_PRIu32 ", SCFG %" B_PRIu32 ")\n", b0, (b0 >> 13) & 3,
+		(b0 >> 28) & 1, (b0 >> 30) & 1);
+	TRACE_ALWAYS("usbdiag: XUSB2PR %#" B_PRIx32 " USB2PRM %#" B_PRIx32
+		" USB3_PSSEN %#" B_PRIx32 " USB3PRM %#" B_PRIx32 "\n",
+		fPci->read_pci_config(fDevice, 0xd0, 4),
+		fPci->read_pci_config(fDevice, 0xd4, 4),
+		fPci->read_pci_config(fDevice, 0xd8, 4),
+		fPci->read_pci_config(fDevice, 0xdc, 4));
+
+	acpi_module_info* acpi;
+	if (get_module(B_ACPI_MODULE_NAME, (module_info**)&acpi) != B_OK)
+		return;
+	static const char* const kObjects[] = { "\\OTGM", "\\_SB.GPO2.MOTG",
+		"\\_SB.GPO2.USID", "\\_SB.GPO1.BST5", "\\_SB.GPO2.AVBL",
+		"\\_SB.GPO1.AVBL" };
+	for (size_t i = 0; i < B_COUNT_OF(kObjects); i++) {
+		acpi_object_type object;
+		acpi_data buffer;
+		buffer.pointer = &object;
+		buffer.length = sizeof(object);
+		status_t status = acpi->evaluate_method(NULL, kObjects[i], NULL,
+			&buffer);
+		if (status == B_OK && object.object_type == ACPI_TYPE_INTEGER) {
+			TRACE_ALWAYS("usbdiag: %s = %" B_PRIu64 "\n", kObjects[i],
+				(uint64)object.integer.integer);
+		} else {
+			TRACE_ALWAYS("usbdiag: %s: %s (type %" B_PRIu32 ")\n",
+				kObjects[i], strerror(status),
+				status == B_OK ? object.object_type : 0);
+		}
+	}
+	put_module(B_ACPI_MODULE_NAME);
+}
+
+
 status_t
 XHCI::Start()
 {
@@ -946,6 +993,8 @@ XHCI::Start()
 			else
 				fPortSpeeds[i] = USB_SPEED_HIGHSPEED;
 
+			TRACE_ALWAYS("usbdiag: port %" B_PRId32 " is USB %" B_PRIu32
+				"\n", i, XHCI_SUPPORTED_PROTOCOLS_0_MAJOR(eec));
 			TRACE("speed for port %" B_PRId32 " is %s\n", i,
 				fPortSpeeds[i] == USB_SPEED_SUPERSPEED ? "super" : "high");
 		}
@@ -2715,6 +2764,9 @@ XHCI::GetPortSpeed(uint8 index, usb_speed* speed)
 		return B_BAD_INDEX;
 
 	uint32 portStatus = ReadOpReg(XHCI_PORTSC(index));
+	TRACE_ALWAYS("usbdiag: port %" B_PRIu8 " PORTSC %#" B_PRIx32 ", speed %"
+		B_PRIu32 " (1 full, 2 low, 3 high, 4 super)\n", index, portStatus,
+		PS_SPEED_GET(portStatus));
 
 	switch (PS_SPEED_GET(portStatus)) {
 	case 2:
