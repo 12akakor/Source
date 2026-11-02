@@ -9,9 +9,10 @@
 
 	MAC registers are reached through function 1 at RTWN_SDIO_MAC(), the
 	SDIO local registers at RTWN_SDIO_LOCAL(). Until the chip is powered on
-	only CMD52 works on the MAC registers, so 16 and 32 bit accesses are made
-	byte by byte; afterwards aligned accesses use one CMD53 (the rtw88 driver
-	does the same, see sdio.c there).
+	only CMD52 works on the MAC registers, so 32 bit accesses are made byte
+	by byte; afterwards aligned ones use one CMD53. 16 bit accesses are
+	always made byte by byte: a 2 byte CMD53 fails on the RTL8723BS (the
+	rtw88 driver does the same, see sdio.c there).
 */
 
 
@@ -84,10 +85,9 @@ rtwn_sdio_read(struct rtwn_sdio_softc *uc, uint32_t addr, int len)
 
 	if (len == 1)
 		value = sdio_read_1(uc->sc_func, addr, &err);
-	else if (uc->sc_powered && (addr % len) == 0) {
-		value = len == 2 ? sdio_read_2(uc->sc_func, addr, &err)
-		    : sdio_read_4(uc->sc_func, addr, &err);
-	} else
+	else if (len == 4 && uc->sc_powered && (addr % 4) == 0)
+		value = sdio_read_4(uc->sc_func, addr, &err);
+	else
 		value = rtwn_sdio_read_bytewise(uc, addr, len, &err);
 
 	if (err != 0) {
@@ -107,12 +107,9 @@ rtwn_sdio_write(struct rtwn_sdio_softc *uc, uint32_t addr, uint32_t value,
 
 	if (len == 1)
 		sdio_write_1(uc->sc_func, addr, value, &err);
-	else if (uc->sc_powered && (addr % len) == 0) {
-		if (len == 2)
-			sdio_write_2(uc->sc_func, addr, value, &err);
-		else
-			sdio_write_4(uc->sc_func, addr, value, &err);
-	} else
+	else if (len == 4 && uc->sc_powered && (addr % 4) == 0)
+		sdio_write_4(uc->sc_func, addr, value, &err);
+	else
 		err = rtwn_sdio_write_bytewise(uc, addr, value, len);
 
 	if (err != 0) {
