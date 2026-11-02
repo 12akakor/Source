@@ -214,6 +214,7 @@ rtwn_sdio_attach(device_t dev)
 	if (error != 0)
 		goto fail_intr;
 
+	rtwn_sdio_diag_start(uc);
 	return (0);
 
 fail_intr:
@@ -235,6 +236,7 @@ rtwn_sdio_detach(device_t dev)
 	struct rtwn_sdio_softc *uc = device_get_softc(dev);
 	struct rtwn_softc *sc = &uc->sc_sc;
 
+	rtwn_sdio_diag_stop(uc);
 	rtwn_detach(sc);
 
 	sdio_teardown_intr(uc->sc_func);

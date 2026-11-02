@@ -142,6 +142,7 @@ rtwn_sdio_tx_start(struct rtwn_softc *sc, struct ieee80211_node *ni,
 	pages = howmany(roundup2(length, 4), sc->page_size);
 	error = rtwn_sdio_wait_pages(uc, queue, pages);
 	if (error != 0) {
+		uc->sc_diag_tx_errors++;
 		RTWN_DPRINTF(sc, RTWN_DEBUG_XMIT,
 		    "%s: no free pages in queue %d\n", __func__, queue);
 		return (error);
@@ -163,7 +164,9 @@ rtwn_sdio_tx_start(struct rtwn_softc *sc, struct ieee80211_node *ni,
 	addr = RTWN_SDIO_ADDR(RTWN_SDIO_ADDR_TXFF_HIGH + queue,
 	    howmany(length, 4));
 	error = sdio_write_bytes(uc->sc_func, addr, uc->sc_tx_buf, size, true);
+	uc->sc_diag_tx++;
 	if (error != 0) {
+		uc->sc_diag_tx_errors++;
 		device_printf(sc->sc_dev, "%s: writing %zu bytes to queue %d "
 		    "failed: %d\n", __func__, size, queue, error);
 		return (EIO);

@@ -142,6 +142,10 @@ rtwn_sdio_rx_parse(struct rtwn_softc *sc, uint8_t *buf, int len)
 		switch (rtwn_classify_intr(sc, buf, totlen)) {
 		case RTWN_RX_DATA:
 			m = rtwn_sdio_rx_copy(sc, stat, totlen);
+			if (m != NULL)
+				RTWN_SDIO_SOFTC(sc)->sc_diag_rx_frames++;
+			else
+				RTWN_SDIO_SOFTC(sc)->sc_diag_rx_dropped++;
 			if (m != NULL) {
 				if (last == NULL)
 					m0 = m;
@@ -165,6 +169,7 @@ rtwn_sdio_rx_parse(struct rtwn_softc *sc, uint8_t *buf, int len)
 			}
 			break;
 		default:
+			RTWN_SDIO_SOFTC(sc)->sc_diag_rx_other++;
 			rtwn_handle_c2h_report(sc, buf, totlen);
 			break;
 		}
@@ -235,6 +240,8 @@ rtwn_sdio_rx(struct rtwn_sdio_softc *uc)
 			break;
 		}
 		total += len;
+		uc->sc_diag_rx_reads++;
+		uc->sc_diag_rx_bytes += len;
 
 		m = rtwn_sdio_rx_parse(sc, uc->sc_rx_buf, MIN(len, size));
 		if (m != NULL)
@@ -258,6 +265,7 @@ rtwn_sdio_intr(void *arg)
 	uint32_t hisr;
 
 	RTWN_LOCK(sc);
+	uc->sc_diag_intr++;
 	if (!uc->sc_intr_enabled) {
 		RTWN_UNLOCK(sc);
 		return;
@@ -281,4 +289,76 @@ rtwn_sdio_intr(void *arg)
 
 	rtwn_start(sc);
 	RTWN_UNLOCK(sc);
+}
+
+
+/*
+ * Test only: every 5 s, log the interrupt and receive counters and the
+ * SDIO interrupt registers. When a receive request is pending, service it
+ * from here too, so that frames arrive even if the card interrupt does not.
+ */
+static status_t
+rtwn_sdio_diag_thread(void *arg)
+{
+	struct rtwn_sdio_softc *uc = arg;
+	struct rtwn_softc *sc = &uc->sc_sc;
+	int ticks = 0;
+
+	while (!uc->sc_diag_stop) {
+		snooze(50000);
+
+		RTWN_LOCK(sc);
+		if (uc->sc_intr_enabled) {
+			uint32_t hisr = rtwn_sdio_local_read_4(uc, RTWN_SDIO_HISR);
+			if (hisr != 0xffffffff
+			    && (hisr & RTWN_SDIO_INT_RX_REQUEST) != 0) {
+				uc->sc_diag_polled++;
+				rtwn_sdio_rx(uc);
+			}
+		}
+
+		if (++ticks >= 100) {
+			ticks = 0;
+			device_printf(sc->sc_dev, "diag: intr %u, polled %u, "
+			    "rx reads %u (%u bytes), frames %u, dropped %u, "
+			    "other %u, tx %u, tx errors %u; HIMR %#x HISR %#x "
+			    "RX0_REQ_LEN %u, running %d\n",
+			    uc->sc_diag_intr, uc->sc_diag_polled,
+			    uc->sc_diag_rx_reads, uc->sc_diag_rx_bytes,
+			    uc->sc_diag_rx_frames, uc->sc_diag_rx_dropped,
+			    uc->sc_diag_rx_other, uc->sc_diag_tx,
+			    uc->sc_diag_tx_errors,
+			    rtwn_sdio_local_read_4(uc, RTWN_SDIO_HIMR),
+			    rtwn_sdio_local_read_4(uc, RTWN_SDIO_HISR),
+			    rtwn_sdio_local_read_2(uc, RTWN_SDIO_RX0_REQ_LEN),
+			    (sc->sc_flags & RTWN_RUNNING) != 0);
+		}
+		RTWN_UNLOCK(sc);
+	}
+
+	return (B_OK);
+}
+
+
+void
+rtwn_sdio_diag_start(struct rtwn_sdio_softc *uc)
+{
+	uc->sc_diag_stop = false;
+	uc->sc_diag_thread = spawn_kernel_thread(rtwn_sdio_diag_thread,
+	    "rtwn sdio diag", B_LOW_PRIORITY, uc);
+	if (uc->sc_diag_thread >= 0)
+		resume_thread(uc->sc_diag_thread);
+}
+
+
+void
+rtwn_sdio_diag_stop(struct rtwn_sdio_softc *uc)
+{
+	status_t result;
+
+	if (uc->sc_diag_thread < 0)
+		return;
+	uc->sc_diag_stop = true;
+	wait_for_thread(uc->sc_diag_thread, &result);
+	uc->sc_diag_thread = -1;
 }
