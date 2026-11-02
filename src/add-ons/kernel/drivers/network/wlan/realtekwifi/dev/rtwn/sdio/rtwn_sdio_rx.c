@@ -302,7 +302,7 @@ rtwn_sdio_diag_thread(void *arg)
 {
 	struct rtwn_sdio_softc *uc = arg;
 	struct rtwn_softc *sc = &uc->sc_sc;
-	int ticks = 0;
+	int rounds = 0;
 
 	while (!uc->sc_diag_stop) {
 		snooze(50000);
@@ -317,8 +317,8 @@ rtwn_sdio_diag_thread(void *arg)
 			}
 		}
 
-		if (++ticks >= 100) {
-			ticks = 0;
+		if (++rounds >= 100) {
+			rounds = 0;
 			device_printf(sc->sc_dev, "diag: intr %u, polled %u, "
 			    "rx reads %u (%u bytes), frames %u, dropped %u, "
 			    "other %u, tx %u, tx errors %u; HIMR %#x HISR %#x "
