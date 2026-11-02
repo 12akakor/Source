@@ -170,6 +170,9 @@ AddNewDriversToPackage input :
 AddNewDriversToPackage display :
 #	display_adapter@x86
 	;
+AddNewDriversToPackage audio :
+	intel_lpe@x86,x86_64
+	;
 AddNewDriversToPackage audio hmulti :
 #	virtio_sound
 	;
