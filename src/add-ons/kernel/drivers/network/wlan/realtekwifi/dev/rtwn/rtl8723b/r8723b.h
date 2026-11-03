@@ -45,6 +45,7 @@ struct r8723b_softc {
 void	r8723b_init_bb(struct rtwn_softc *);
 void	r8723b_init_rf(struct rtwn_softc *);
 void	r8723b_lc_calib(struct rtwn_softc *);
+void	r8723b_iq_calib(struct rtwn_softc *);
 int	r8723b_set_page_size(struct rtwn_softc *);
 void	r8723b_init_rx_agg(struct rtwn_softc *);
 void	r8723b_post_init(struct rtwn_softc *);

@@ -160,7 +160,7 @@ r8723bs_attach(struct rtwn_sdio_softc *uc)
 	sc->sc_llt_init			= r92e_llt_init;
 	sc->sc_set_page_size		= r8723b_set_page_size;
 	sc->sc_lc_calib			= r8723b_lc_calib;
-	sc->sc_iq_calib			= rtwn_nop_softc;	/* XXX TODO */
+	sc->sc_iq_calib			= r8723b_iq_calib;
 	sc->sc_read_chipid_vendor	= rtwn_nop_softc_uint32;
 	sc->sc_adj_devcaps		= r8723bs_adj_devcaps;
 	sc->sc_vap_preattach		= rtwn_nop_softc_vap;

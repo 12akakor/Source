@@ -275,6 +275,9 @@ r8723bs_post_init(struct rtwn_softc *sc)
 		}
 	}
 
+	/* IQ calibration, as the vendor driver does at init. */
+	r8723b_iq_calib(sc);
+
 	value = rtwn_sdio_local_read_4(uc, RTWN_SDIO_TX_CTRL);
 	rtwn_sdio_local_write_4(uc, RTWN_SDIO_TX_CTRL, value & 0x0000fff8);
 
