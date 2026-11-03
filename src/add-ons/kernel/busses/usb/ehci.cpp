@@ -47,6 +47,36 @@ typedef struct {
 //	#pragma mark -
 
 
+/*!	On the Intel Bay Trail SoC, the EHCI (8086:0f34) and the xHCI (8086:0f35)
+	share the USB 2 ports, and the xHCI driver routes all of them to the xHCI
+	(XUSB2PR, see XHCI::_SwitchIntelPorts()). The EHCI still sees a device
+	on its port 0 then and keeps resetting it, which disturbs the transfers
+	of the xHCI on that port. Leave the EHCI alone when the xHCI is there.
+*/
+static bool
+is_baytrail_ehci_with_xhci(uint16 vendorID, uint16 deviceID)
+{
+	if (vendorID != 0x8086 || deviceID != 0x0f34)
+		return false;
+
+	pci_module_info* pci;
+	if (get_module(B_PCI_MODULE_NAME, (module_info**)&pci) != B_OK)
+		return false;
+
+	bool found = false;
+	pci_info info;
+	for (int32 i = 0; pci->get_nth_pci_info(i, &info) == B_OK; i++) {
+		if (info.vendor_id == 0x8086 && info.device_id == 0x0f35) {
+			found = true;
+			break;
+		}
+	}
+
+	put_module(B_PCI_MODULE_NAME);
+	return found;
+}
+
+
 static status_t
 init_bus(device_node* node, void** bus_cookie)
 {
@@ -200,6 +230,17 @@ supports_device(device_node* parent)
 	}
 
 	if (type == PCI_serial_bus && subType == PCI_usb && api == PCI_usb_ehci) {
+		uint16 vendorID, deviceID;
+		if (gDeviceManager->get_attr_uint16(parent, B_DEVICE_VENDOR_ID,
+				&vendorID, false) == B_OK
+			&& gDeviceManager->get_attr_uint16(parent, B_DEVICE_ID,
+				&deviceID, false) == B_OK
+			&& is_baytrail_ehci_with_xhci(vendorID, deviceID)) {
+			TRACE_MODULE_ALWAYS("Bay Trail EHCI: the xHCI owns the ports, "
+				"skipping\n");
+			return 0.0f;
+		}
+
 		pci_device_module_info* pci;
 		pci_device* device;
 		gDeviceManager->get_driver(parent, (driver_module_info**)&pci,
