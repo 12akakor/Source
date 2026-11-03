@@ -39,6 +39,7 @@
 
 // RT5640 (ALC5640) registers
 #define RT5640_RESET			0x00	// write resets, bits 2:1 device id
+#define RT5640_PWR_ANLG1		0x63
 #define RT5640_JD_CTRL1			0xbb
 #define RT5640_IRQ_CTRL1		0xbd
 #define RT5640_GPIO_STATUS		0xbf
@@ -208,13 +209,13 @@ jack_thread(void* cookie)
 			continue;
 		}
 
-		status &= RT5640_STA_GPIO1 | RT5640_STA_GPIO2 | RT5640_STA_JD;
-		status2 &= RT5640_STA_JD2;
 		if (status != lastStatus || status2 != lastStatus2) {
 			TRACE_ALWAYS("jack: JD (source JD1) %d, JD2 %d, GPIO1 %d, "
-				"GPIO2 %d\n", (status & RT5640_STA_JD) != 0,
-				status2 != 0, (status & RT5640_STA_GPIO1) != 0,
-				(status & RT5640_STA_GPIO2) != 0);
+				"GPIO2 %d (status %#04x, general control 2 %#04x)\n",
+				(status & RT5640_STA_JD) != 0,
+				(status2 & RT5640_STA_JD2) != 0,
+				(status & RT5640_STA_GPIO1) != 0,
+				(status & RT5640_STA_GPIO2) != 0, status, status2);
 			lastStatus = status;
 			lastStatus2 = status2;
 		}
@@ -273,9 +274,26 @@ start_codec(lpe_device* device)
 	TRACE_ALWAYS("before: JD control %#04x, general control 2 %#04x\n",
 		jdCtrl, genCtrl2);
 
+	// The JD pins share IN1N and IN2N, which have to be single ended for
+	// that (datasheet 7.9). The comparators need the references and the
+	// bias, and the debounce the I2S input clock.
+	codec_update(device, RT5640_GEN_CTRL1, (1 << 9) | (1 << 8) | (1 << 0),
+		(1 << 9) | (1 << 8) | (1 << 0));
+	codec_update(device, RT5640_PWR_ANLG1,
+		(1 << 15) | (1 << 13) | (1 << 11) | (1 << 4) | (1 << 2),
+		(1 << 15) | (1 << 13) | (1 << 11) | (1 << 4) | (1 << 2));
 	codec_update(device, RT5640_JD_CTRL1, RT5640_JD_SRC_MASK,
 		RT5640_JD_SRC_JD1);
 	codec_update(device, RT5640_GEN_CTRL2, RT5640_EN_JD2, RT5640_EN_JD2);
+
+	uint16 genCtrl1, power;
+	codec_read(device, RT5640_GEN_CTRL1, &genCtrl1);
+	codec_read(device, RT5640_PWR_ANLG1, &power);
+	codec_read(device, RT5640_JD_CTRL1, &jdCtrl);
+	codec_read(device, RT5640_GEN_CTRL2, &genCtrl2);
+	TRACE_ALWAYS("after: general control 1 %#04x, analog power 1 %#04x, "
+		"JD control %#04x, general control 2 %#04x\n", genCtrl1, power,
+		jdCtrl, genCtrl2);
 
 	return B_OK;
 }
