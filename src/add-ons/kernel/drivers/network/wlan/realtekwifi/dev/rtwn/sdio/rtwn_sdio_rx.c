@@ -441,8 +441,12 @@ rtwn_sdio_diag_thread(void *arg)
 	struct rtwn_sdio_softc *uc = arg;
 	struct rtwn_softc *sc = &uc->sc_sc;
 	struct ieee80211com *ic = &sc->sc_ic;
-	/* Test only: one scan per IGI value, 60 s after attach, every 15 s. */
-	static const uint8_t igis[] = { 0x20, 0x28, 0x30, 0x38, 0x3e, 0x24 };
+	/*
+	 * Test only: one scan per crystal capacitance value (AFE_CTRL3 bits
+	 * 23:12, the 6 bit value twice), 60 s after attach, every 15 s.
+	 */
+	static const uint8_t xtals[] = { 0x24, 0x10, 0x18, 0x2c, 0x34, 0x3c,
+	    0x00, 0x3f };
 	int rounds = 0, prints = 0, step = 0;
 
 	while (!uc->sc_diag_stop) {
@@ -478,11 +482,14 @@ rtwn_sdio_diag_thread(void *arg)
 			if (uc->sc_powered)
 				rtwn_sdio_diag_phy(uc);
 			if (++prints >= 12 && (prints - 12) % 3 == 0
-			    && step < (int)nitems(igis) && uc->sc_powered
+			    && step < (int)nitems(xtals) && uc->sc_powered
 			    && (sc->sc_flags & RTWN_RUNNING) != 0) {
-				rtwn_bb_setbits(sc, 0xc50, 0x7f, igis[step]);
-				device_printf(sc->sc_dev, "diag: scan %d with IGI "
-				    "%#x\n", step, rtwn_bb_read(sc, 0xc50) & 0x7f);
+				rtwn_setbits_4(sc, 0x2c, 0x00fff000,
+				    (uint32_t)(xtals[step] | xtals[step] << 6) << 12);
+				device_printf(sc->sc_dev, "diag: scan %d with crystal "
+				    "cap %#x, AFE_CTRL3 %#x, IGI %#x\n", step,
+				    xtals[step], rtwn_read_4(sc, 0x2c),
+				    rtwn_bb_read(sc, 0xc50) & 0x7f);
 				step++;
 				uc->sc_diag_logged = 340;
 				scan = true;
