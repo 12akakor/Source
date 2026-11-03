@@ -49,6 +49,8 @@ struct rtwn_sdio_softc {
 	uint32_t		sc_diag_rx_other;
 	uint32_t		sc_diag_tx;
 	uint32_t		sc_diag_tx_errors;
+	uint32_t		sc_diag_logged;
+	uint16_t		sc_diag_chan_frames[15];
 	thread_id		sc_diag_thread;
 	volatile bool		sc_diag_stop;
 	uint8_t			*sc_rx_buf;
