@@ -431,6 +431,32 @@ rtwn_sdio_diag_phy(struct rtwn_sdio_softc *uc)
 
 
 /*
+ * Test only: dump MAC 0x000 to 0x7ff, BB 0x800 to 0xfff and RF path A
+ * 0x00 to 0xff, in the layout of the vendor driver's proc files
+ * (mac_reg_dump, bb_reg_dump, rf_reg_dump).
+ */
+static void
+rtwn_sdio_diag_dump(struct rtwn_sdio_softc *uc)
+{
+	struct rtwn_softc *sc = &uc->sc_sc;
+	int reg;
+
+	for (reg = 0; reg < 0x1000; reg += 16) {
+		device_printf(sc->sc_dev, "dump %s 0x%03x 0x%08x 0x%08x 0x%08x "
+		    "0x%08x\n", reg < 0x800 ? "mac" : "bb", reg,
+		    rtwn_read_4(sc, reg), rtwn_read_4(sc, reg + 4),
+		    rtwn_read_4(sc, reg + 8), rtwn_read_4(sc, reg + 12));
+	}
+	for (reg = 0; reg < 0x100; reg += 4) {
+		device_printf(sc->sc_dev, "dump rf 0x%02x 0x%05x 0x%05x 0x%05x "
+		    "0x%05x\n", reg, rtwn_rf_read(sc, 0, reg),
+		    rtwn_rf_read(sc, 0, reg + 1), rtwn_rf_read(sc, 0, reg + 2),
+		    rtwn_rf_read(sc, 0, reg + 3));
+	}
+}
+
+
+/*
  * Test only: every 5 s, log the interrupt and receive counters and the
  * SDIO interrupt registers. When a receive request is pending, service it
  * from here too, so that frames arrive even if the card interrupt does not.
@@ -442,11 +468,10 @@ rtwn_sdio_diag_thread(void *arg)
 	struct rtwn_softc *sc = &uc->sc_sc;
 	struct ieee80211com *ic = &sc->sc_ic;
 	/*
-	 * Test only: one scan per crystal capacitance value (AFE_CTRL3 bits
-	 * 23:12, the 6 bit value twice), 60 s after attach, every 15 s.
+	 * Test only: 60 s after attach dump the MAC, BB and RF registers (to
+	 * compare with the vendor driver on Android), then scan three times,
+	 * every 15 s.
 	 */
-	static const uint8_t xtals[] = { 0x24, 0x10, 0x18, 0x2c, 0x34, 0x3c,
-	    0x00, 0x3f };
 	int rounds = 0, prints = 0, step = 0;
 
 	while (!uc->sc_diag_stop) {
@@ -481,15 +506,12 @@ rtwn_sdio_diag_thread(void *arg)
 			    (sc->sc_flags & RTWN_RUNNING) != 0);
 			if (uc->sc_powered)
 				rtwn_sdio_diag_phy(uc);
-			if (++prints >= 12 && (prints - 12) % 3 == 0
-			    && step < (int)nitems(xtals) && uc->sc_powered
+			if (++prints == 12 && uc->sc_powered)
+				rtwn_sdio_diag_dump(uc);
+			if (prints >= 12 && (prints - 12) % 3 == 0 && step < 3
+			    && uc->sc_powered
 			    && (sc->sc_flags & RTWN_RUNNING) != 0) {
-				rtwn_setbits_4(sc, 0x2c, 0x00fff000,
-				    (uint32_t)(xtals[step] | xtals[step] << 6) << 12);
-				device_printf(sc->sc_dev, "diag: scan %d with crystal "
-				    "cap %#x, AFE_CTRL3 %#x, IGI %#x\n", step,
-				    xtals[step], rtwn_read_4(sc, 0x2c),
-				    rtwn_bb_read(sc, 0xc50) & 0x7f);
+				device_printf(sc->sc_dev, "diag: scan %d\n", step);
 				step++;
 				uc->sc_diag_logged = 340;
 				scan = true;
