@@ -123,7 +123,15 @@ jobs:
           # The build number goes three places: the ISO filename, the About
           # window (via RENKUOS_BUILD) and the release notes. It is the one
           # identifier that is ours, so it is what a bug report should quote.
-          BUILD="build$(printf '%05d' "${{ github.run_number }}")"
+          # A fork does not carry upstream's hrev tags, and the revision is
+          # derived from them. Fetch them from the organisation repository,
+          # as hybrid-boot.yml does.
+          if ! git describe --tags --match='hrev*' >/dev/null 2>&1; then
+            git fetch --quiet --no-recurse-submodules \
+              https://github.com/RenkuOS/Source.git \
+              'refs/tags/hrev*:refs/tags/hrev*'
+          fi
+          BUILD="x270$(printf '%05d' "${{ github.run_number }}")"
           # Mirror determine_haiku_revision: strip the -g<sha> suffix and turn
           # remaining hyphens into plus signs. HaikuPorts packages require
           # haiku >= r1~beta6_hrev59866_5-1 and that version is built from this
