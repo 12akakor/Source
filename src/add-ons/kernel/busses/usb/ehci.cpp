@@ -200,6 +200,18 @@ supports_device(device_node* parent)
 	}
 
 	if (type == PCI_serial_bus && subType == PCI_usb && api == PCI_usb_ehci) {
+		// Test only: leave the EHCI of Bay Trail (8086:0f34) alone, to
+		// see whether it disturbs the ports that xHCI owns.
+		uint16 vendorID, deviceID;
+		if (gDeviceManager->get_attr_uint16(parent, B_DEVICE_VENDOR_ID,
+				&vendorID, false) == B_OK
+			&& gDeviceManager->get_attr_uint16(parent, B_DEVICE_ID,
+				&deviceID, false) == B_OK
+			&& vendorID == 0x8086 && deviceID == 0x0f34) {
+			dprintf("usb ehci: test: skipping the Bay Trail EHCI\n");
+			return 0.0f;
+		}
+
 		pci_device_module_info* pci;
 		pci_device* device;
 		gDeviceManager->get_driver(parent, (driver_module_info**)&pci,
