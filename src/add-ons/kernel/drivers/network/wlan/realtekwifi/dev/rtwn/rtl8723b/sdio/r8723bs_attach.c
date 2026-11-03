@@ -76,9 +76,10 @@
 static void
 r8723bs_attach_private(struct rtwn_softc *sc)
 {
-	struct r92e_softc *rs;
+	struct r8723b_softc *rs;
 
-	rs = malloc(sizeof(struct r92e_softc), M_RTWN_PRIV, M_WAITOK | M_ZERO);
+	rs = malloc(sizeof(struct r8723b_softc), M_RTWN_PRIV,
+	    M_WAITOK | M_ZERO);
 	sc->sc_priv = rs;
 }
 

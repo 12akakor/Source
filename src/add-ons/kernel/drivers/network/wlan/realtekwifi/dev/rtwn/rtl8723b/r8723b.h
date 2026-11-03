@@ -6,6 +6,8 @@
 #ifndef RTL8723B_H
 #define RTL8723B_H
 
+#include <dev/rtwn/rtl8192e/r92e_var.h>
+
 /*
  * Global definitions. The page numbers are those of the Realtek driver for
  * the RTL8723B (and rtl8xxxu): 247 transmit pages of 128 bytes, 12 for the
@@ -25,6 +27,16 @@
 
 #define R8723B_EFUSE_MAX_LEN	512
 #define R8723B_EFUSE_MAP_LEN	512
+
+/*
+ * Private data: the RTL8192E data that its methods use, first, so that they
+ * can take sc_priv as their own.
+ */
+struct r8723b_softc {
+	struct r92e_softc	rs;
+	uint8_t			bt_setting;	/* efuse 0xc3 */
+#define R8723B_BT_SETTING_AUX_ANT	0x40	/* WLAN on S0 (aux) */
+};
 
 /*
  * Function declarations.
