@@ -1,6 +1,7 @@
 /*
  * Copyright 2026, RenkuOS contributors.
  * Distributed under the terms of the MIT License.
+ * SPDX-License-Identifier: MIT
  *
  * Intel PCH SMBus host controller (the "i801" family, PCI D31:F4).
  *

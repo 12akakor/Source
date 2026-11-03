@@ -1,6 +1,7 @@
 /*
  * Copyright 2026, RenkuOS contributors.
  * Distributed under the terms of the MIT License.
+ * SPDX-License-Identifier: MIT
  */
 #ifndef _I801_SMBUS_H
 #define _I801_SMBUS_H

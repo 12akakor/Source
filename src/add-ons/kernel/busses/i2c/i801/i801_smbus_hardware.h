@@ -1,6 +1,7 @@
 /*
  * Copyright 2026, RenkuOS contributors.
  * Distributed under the terms of the MIT License.
+ * SPDX-License-Identifier: MIT
  *
  * Register definitions for the Intel PCH SMBus host controller
  * (PCI device 31, function 4).
