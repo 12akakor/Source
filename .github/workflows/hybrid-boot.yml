@@ -240,8 +240,8 @@ jobs:
             -m 2048 \
             -drive if=pflash,format=raw,readonly=on,file="${CODE}" \
             -drive if=pflash,format=raw,file=vars.fd \
-            -drive file="${ESP}",format=raw,if=ide,index=0 \
-            -drive file="${SYS}",format=raw,if=ide,index=1 \
+            -drive file="${ESP}",format=raw,if=ide,index=0,snapshot=on \
+            -drive file="${SYS}",format=raw,if=ide,index=1,snapshot=on \
             -display none \
             -serial file:serial.log \
             -no-reboot &
