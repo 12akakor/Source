@@ -9,7 +9,8 @@
  * BSD-3-Clause license.
  * Changes for RenkuOS by Akakor, 2026: rewritten for the rtwn driver, with
  * the power sequences run by its SDIO bus glue; of the coexistence code only
- * the fixed antenna setup for WLAN without Bluetooth.
+ * the fixed antenna setup and coexistence table for WLAN without
+ * Bluetooth.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are
@@ -92,6 +93,9 @@
 #define R8723BS_RFE_CTRL_ANT_SW		0x944
 #define R8723BS_BB_SEL_BTG		0x948
 #define R8723BS_RFE_CTRL_E		0x974
+#define R8723BS_COEX_TABLE0		0x6c0
+#define R8723BS_COEX_TABLE1		0x6c4
+#define R8723BS_COEX_BRK_TABLE		0x6c8
 #define R8723BS_SDIO_H2C		0x60	/* SDIO local */
 #define R8723BS_RF_WLINT		0x01
 
@@ -210,6 +214,11 @@ r8723bs_antenna_wlan_only(struct rtwn_softc *sc)
 	rtwn_write_1(sc, R8723BS_GNT_BT, 0x00);
 	rtwn_write_1(sc, R8723BS_BT_COEX_ENH_INTR_CTRL, 0x0c);
 	rtwn_bb_write(sc, R8723BS_BB_SEL_BTG, aux ? 0x280 : 0x0);
+
+	/* Coexistence table case 1 of rtw88: the medium always to WLAN. */
+	rtwn_write_4(sc, R8723BS_COEX_TABLE0, 0x55555555);
+	rtwn_write_4(sc, R8723BS_COEX_TABLE1, 0x55555555);
+	rtwn_write_4(sc, R8723BS_COEX_BRK_TABLE, 0xf0ffffff);
 
 	device_printf(sc->sc_dev, "antenna to WLAN (%s): BB_SEL_BTG %#x, "
 	    "LED_CFG %#x, 0x67 %#x, GNT_BT %#x, 0x76e %#x\n",
