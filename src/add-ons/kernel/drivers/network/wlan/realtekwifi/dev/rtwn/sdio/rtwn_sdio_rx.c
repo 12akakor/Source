@@ -440,9 +440,14 @@ rtwn_sdio_diag_thread(void *arg)
 {
 	struct rtwn_sdio_softc *uc = arg;
 	struct rtwn_softc *sc = &uc->sc_sc;
-	int rounds = 0;
+	struct ieee80211com *ic = &sc->sc_ic;
+	/* Test only: one scan per IGI value, 60 s after attach, every 15 s. */
+	static const uint8_t igis[] = { 0x20, 0x28, 0x30, 0x38, 0x3e, 0x24 };
+	int rounds = 0, prints = 0, step = 0;
 
 	while (!uc->sc_diag_stop) {
+		bool scan = false;
+
 		snooze(50000);
 
 		RTWN_LOCK(sc);
@@ -472,8 +477,28 @@ rtwn_sdio_diag_thread(void *arg)
 			    (sc->sc_flags & RTWN_RUNNING) != 0);
 			if (uc->sc_powered)
 				rtwn_sdio_diag_phy(uc);
+			if (++prints >= 12 && (prints - 12) % 3 == 0
+			    && step < (int)nitems(igis) && uc->sc_powered
+			    && (sc->sc_flags & RTWN_RUNNING) != 0) {
+				rtwn_bb_setbits(sc, 0xc50, 0x7f, igis[step]);
+				device_printf(sc->sc_dev, "diag: scan %d with IGI "
+				    "%#x\n", step, rtwn_bb_read(sc, 0xc50) & 0x7f);
+				step++;
+				uc->sc_diag_logged = 340;
+				scan = true;
+			}
 		}
 		RTWN_UNLOCK(sc);
+
+		if (scan) {
+			struct ieee80211vap *vap = TAILQ_FIRST(&ic->ic_vaps);
+
+			if (vap != NULL) {
+				ieee80211_start_scan(vap, IEEE80211_SCAN_ACTIVE
+				    | IEEE80211_SCAN_ONCE | IEEE80211_SCAN_NOPICK,
+				    IEEE80211_SCAN_FOREVER, 0, 0, 0, NULL);
+			}
+		}
 	}
 
 	return (B_OK);
