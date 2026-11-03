@@ -243,6 +243,18 @@ r8723bs_post_init(struct rtwn_softc *sc)
 	r8723b_post_init(sc);
 	r8723bs_antenna_wlan_only(sc);
 
+	/*
+	 * Test only: the RF values of the package dependent branch of the RF
+	 * table, as the vendor driver on Android has them on this tablet.
+	 */
+	rtwn_rf_write(sc, 0, 0x51, 0x6f10e);
+	rtwn_rf_write(sc, 0, 0x52, 0x007d3);
+	rtwn_rf_write(sc, 0, 0x71, 0x6f10e);
+	rtwn_rf_write(sc, 0, 0x72, 0x007d3);
+	device_printf(sc->sc_dev, "test: RF 0x51 %#x 0x52 %#x 0x71 %#x 0x72 %#x\n",
+	    rtwn_rf_read(sc, 0, 0x51), rtwn_rf_read(sc, 0, 0x52),
+	    rtwn_rf_read(sc, 0, 0x71), rtwn_rf_read(sc, 0, 0x72));
+
 	value = rtwn_sdio_local_read_4(uc, RTWN_SDIO_TX_CTRL);
 	rtwn_sdio_local_write_4(uc, RTWN_SDIO_TX_CTRL, value & 0x0000fff8);
 
