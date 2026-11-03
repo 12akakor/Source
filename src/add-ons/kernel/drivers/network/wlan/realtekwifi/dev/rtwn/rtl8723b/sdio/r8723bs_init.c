@@ -244,16 +244,36 @@ r8723bs_post_init(struct rtwn_softc *sc)
 	r8723bs_antenna_wlan_only(sc);
 
 	/*
-	 * Test only: the RF values of the package dependent branch of the RF
-	 * table, as the vendor driver on Android has them on this tablet.
+	 * Test only: copy the configuration registers in which the vendor
+	 * driver on Android (where OFDM works) differs from us: the RF values
+	 * of the package dependent table branch, the antenna and coexistence
+	 * pins (0x40, 0x4c, 0x60, 0x64, 0x948), and the BB registers that are
+	 * not counters, read back values or transmit power.
 	 */
-	rtwn_rf_write(sc, 0, 0x51, 0x6f10e);
-	rtwn_rf_write(sc, 0, 0x52, 0x007d3);
-	rtwn_rf_write(sc, 0, 0x71, 0x6f10e);
-	rtwn_rf_write(sc, 0, 0x72, 0x007d3);
-	device_printf(sc->sc_dev, "test: RF 0x51 %#x 0x52 %#x 0x71 %#x 0x72 %#x\n",
-	    rtwn_rf_read(sc, 0, 0x51), rtwn_rf_read(sc, 0, 0x52),
-	    rtwn_rf_read(sc, 0, 0x71), rtwn_rf_read(sc, 0, 0x72));
+	{
+		static const struct { uint16_t reg; uint32_t val; } copy[] = {
+			{ 0x040, 0x0000002c }, { 0x04c, 0x00e08282 },
+			{ 0x060, 0x02101032 }, { 0x064, 0x20073000 },
+			{ 0x818, 0x02200385 }, { 0x82c, 0x0c000000 },
+			{ 0x908, 0x00000208 }, { 0x948, 0x00000200 },
+			{ 0x9a0, 0xd1779001 }, { 0x9a4, 0xd1079001 },
+			{ 0x9a8, 0xd00086d1 }, { 0x9c0, 0x00000f37 },
+			{ 0x9cc, 0x00030003 }, { 0xc0c, 0x6c6c6cec },
+			{ 0xc14, 0x4000fcfb }, { 0xc58, 0x00013149 },
+			{ 0xc64, 0x7112848b }, { 0xc84, 0x20f60000 },
+			{ 0xca0, 0xf0000000 }, { 0xd2c, 0xcc979175 },
+		};
+		int i;
+
+		rtwn_rf_write(sc, 0, 0x51, 0x6f10e);
+		rtwn_rf_write(sc, 0, 0x52, 0x007d3);
+		for (i = 0; i < (int)nitems(copy); i++) {
+			rtwn_write_4(sc, copy[i].reg, copy[i].val);
+			device_printf(sc->sc_dev, "test: %#x = %#x (wrote %#x)\n",
+			    copy[i].reg, rtwn_read_4(sc, copy[i].reg),
+			    copy[i].val);
+		}
+	}
 
 	value = rtwn_sdio_local_read_4(uc, RTWN_SDIO_TX_CTRL);
 	rtwn_sdio_local_write_4(uc, RTWN_SDIO_TX_CTRL, value & 0x0000fff8);
