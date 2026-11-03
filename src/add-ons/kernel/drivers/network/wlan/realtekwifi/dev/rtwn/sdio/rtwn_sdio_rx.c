@@ -119,9 +119,11 @@ rtwn_sdio_rx_copy(struct rtwn_softc *sc, struct rtwn_rx_stat_common *stat,
 
 
 /*
- * Test only: counts the frames per channel and logs the first 300 data
- * frames: channel, frame control, rate, RSSI, transmitter, BSSID and, for
- * beacons and probe responses, the SSID.
+ * Test only: counts the frames per channel and logs the first 400 data
+ * frames, also those with a CRC error (RCR accepts them for this test):
+ * channel, frame control, rate, RSSI, the OFDM PHY status (power, carrier
+ * frequency offset, EVM, SNR), transmitter, BSSID and, for beacons and
+ * probe responses, the SSID.
  */
 static void
 rtwn_sdio_diag_frame(struct rtwn_softc *sc, uint8_t *buf, int totlen)
@@ -138,16 +140,18 @@ rtwn_sdio_diag_frame(struct rtwn_softc *sc, uint8_t *buf, int totlen)
 	int rate = rxdw3 & 0x7f;
 	int chan = ic->ic_curchan != NULL ? ic->ic_curchan->ic_ieee : 0;
 	int rssi = 0;
+	uint8_t *ph = NULL;
 	char ssid[33];
 
 	if (chan > 0 && chan < 15)
 		uc->sc_diag_chan_frames[chan]++;
-	if (uc->sc_diag_logged >= 300 || pktlen < 24)
+	if (uc->sc_diag_logged >= 400 || pktlen < 24)
 		return;
 	uc->sc_diag_logged++;
 
 	if (infosz != 0 && (rxdw0 & RTWN_RXDW0_PHYST) != 0) {
 		void *physt = buf + sizeof(*stat);
+		ph = physt;
 		rssi = rate < 4 ? rtwn_get_rssi_cck(sc, physt)
 		    : rtwn_get_rssi_ofdm(sc, physt);
 	}
@@ -166,11 +170,15 @@ rtwn_sdio_diag_frame(struct rtwn_softc *sc, uint8_t *buf, int totlen)
 		ssid[n] = '\0';
 	}
 
-	device_printf(sc->sc_dev, "rx: t %lld ms ch %d fc %02x%02x len %d "
-	    "rate %d rssi %d ta %02x:%02x:%02x:%02x:%02x:%02x bssid "
+	device_printf(sc->sc_dev, "rx: t %lld ms ch %d %s fc %02x%02x len %d "
+	    "rate %d rssi %d phy %d/%d/%d/%d/%d ta "
+	    "%02x:%02x:%02x:%02x:%02x:%02x bssid "
 	    "%02x:%02x:%02x:%02x:%02x:%02x \"%s\"\n",
-	    (long long)(system_time() / 1000), chan, wh[0], wh[1], pktlen,
-	    rate, rssi, wh[10], wh[11], wh[12], wh[13], wh[14], wh[15],
+	    (long long)(system_time() / 1000), chan,
+	    (rxdw0 & RTWN_RXDW0_CRCERR) != 0 ? "CRC" : "ok", wh[0], wh[1],
+	    pktlen, rate, rssi, ph != NULL ? ph[4] : 0,
+	    ph != NULL ? ph[5] : 0, ph != NULL ? (int8_t)ph[9] : 0,
+	    ph != NULL ? (int8_t)ph[13] : 0, ph != NULL ? ph[15] : 0, wh[10], wh[11], wh[12], wh[13], wh[14], wh[15],
 	    wh[16], wh[17], wh[18], wh[19], wh[20], wh[21], ssid);
 	(void)totlen;
 }

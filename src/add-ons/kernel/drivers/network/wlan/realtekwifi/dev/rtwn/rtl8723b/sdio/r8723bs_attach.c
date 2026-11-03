@@ -225,7 +225,7 @@ r8723bs_attach(struct rtwn_sdio_softc *uc)
 
 	sc->bcn_status_reg[0]		= R92C_TDECTRL;
 	sc->bcn_status_reg[1]		= R21A_DWBCN1_CTRL;
-	sc->rcr				= 0;
+	sc->rcr				= R92C_RCR_ACRC32;	/* test */
 
 	sc->ntxchains			= 1;
 	sc->nrxchains			= 1;
