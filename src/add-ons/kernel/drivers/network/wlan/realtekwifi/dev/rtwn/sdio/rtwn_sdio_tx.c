@@ -16,7 +16,8 @@
 
 	The queue to FIFO mapping follows the RQPN table of the rtw88 driver for
 	SDIO: VO, management and high to the high FIFO, VI to the normal one, BE
-	and BK to the low one.
+	and BK to the low one. The queue is taken from the descriptor, not from
+	the mbuf.
 */
 
 
@@ -53,19 +54,27 @@
 #define RTWN_SDIO_TX_WAIT_US	20000
 
 
+/*!	Picks the FIFO from the queue select field of the descriptor, the way
+	the chip maps it (R92C_TRXDMA_CTRL_QMAP_3EP). The access category of the
+	mbuf can differ: net80211 sends EAPOL frames as VO, while their QoS
+	header and so their queue select say TID 0. A frame written to a FIFO
+	that does not match its queue select is refused (TXDMA_STATUS 0x400).
+*/
 static int
-rtwn_sdio_tx_queue(uint8_t type, struct mbuf *m)
+rtwn_sdio_tx_queue(const struct rtwn_tx_desc_common *txd)
 {
-	if (type != IEEE80211_FC0_TYPE_DATA)
-		return (RTWN_SDIO_TXQ_HIGH);
-
-	switch (M_WME_GETAC(m)) {
-	case WME_AC_VO:
-		return (RTWN_SDIO_TXQ_HIGH);
-	case WME_AC_VI:
-		return (RTWN_SDIO_TXQ_NORMAL);
-	default:
+	/* Bits 12:8 of the second dword, the same on all chips. */
+	switch ((le32toh(txd->txdw1) >> 8) & 0x1f) {
+	case 0x00:	/* BE */
+	case 0x01:	/* BK */
+	case 0x02:	/* BK */
+	case 0x03:	/* BE */
 		return (RTWN_SDIO_TXQ_LOW);
+	case 0x04:	/* VI */
+	case 0x05:	/* VI */
+		return (RTWN_SDIO_TXQ_NORMAL);
+	default:	/* VO, beacon, high, management, command */
+		return (RTWN_SDIO_TXQ_HIGH);
 	}
 }
 
@@ -163,7 +172,8 @@ rtwn_sdio_tx_start(struct rtwn_softc *sc, struct ieee80211_node *ni,
 	if (size > RTWN_SDIO_TXBUFSZ)
 		return (EINVAL);
 
-	queue = rtwn_sdio_tx_queue(type, m);
+	queue = rtwn_sdio_tx_queue(
+	    (const struct rtwn_tx_desc_common *)tx_desc);
 	pages = howmany(roundup2(length, 4), sc->page_size);
 	error = rtwn_sdio_wait_pages(uc, queue, pages);
 	if (error != 0) {
