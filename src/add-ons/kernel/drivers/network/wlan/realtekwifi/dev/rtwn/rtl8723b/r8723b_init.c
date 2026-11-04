@@ -176,6 +176,20 @@ r8723b_lc_calib(struct rtwn_softc *sc)
 }
 
 
+/*!	RF write through the LSSI parameter register, as rtw88 does
+	(rtw_phy_write_rf_reg_sipi). The RTL8192E method that rtwn has toggles
+	bit 17 of 0x818 around each write, which is something else on the
+	RTL8723B and stays set afterwards; with it set, no OFDM frame decodes.
+*/
+void
+r8723b_rf_write(struct rtwn_softc *sc, int chain, uint8_t addr, uint32_t val)
+{
+	rtwn_bb_write(sc, R92C_LSSI_PARAM(chain),
+	    ((uint32_t)addr << 20) | (val & 0x000fffff));
+	rtwn_delay(sc, 13);
+}
+
+
 void
 r8723b_init_rf(struct rtwn_softc *sc)
 {

@@ -146,7 +146,7 @@ r8723bs_attach(struct rtwn_sdio_softc *uc)
 	sc->sc_handle_c2h_report	= r92e_handle_c2h_report;
 	sc->sc_check_frame		= rtwn_nop_int_softc_mbuf;
 	sc->sc_rf_read			= r92e_rf_read;
-	sc->sc_rf_write			= r92e_rf_write;
+	sc->sc_rf_write			= r8723b_rf_write;
 	sc->sc_check_condition		= r92c_check_condition;
 	sc->sc_efuse_postread		= rtwn_nop_softc;
 	sc->sc_parse_rom		= r8723b_parse_rom_sdio;
