@@ -933,6 +933,66 @@ XHCI::_LogBayTrailOtg()
 		}
 	}
 	put_module(B_ACPI_MODULE_NAME);
+
+	_BayTrailVbusTest();
+}
+
+
+/*
+ * Test only: the micro USB port goes through a USB3750 (VBUS protection,
+ * charger detection, high speed mux). It is powered from VBUS: without VBUS
+ * its mux is open and only full speed leaks through, which would explain
+ * why the hub links at full speed. Switch the 5 V boost (BST5, NCORE pad 1)
+ * on before the ports are reset, as the _E12 handler does for a host cable,
+ * give the USB3750 time for its charger detection, and log the pads.
+ */
+static uint32
+baytrail_pad_val(area_id area, uint8* base, uint32 pad)
+{
+	(void)area;
+	return *(volatile uint32*)(base + pad * 16 + 8);
+}
+
+
+void
+XHCI::_BayTrailVbusTest()
+{
+	static const struct {
+		const char*	name;
+		phys_addr_t	base;
+		uint32		pad;
+	} kPads[] = {
+		{ "BST5 (NCORE15)", 0xfed0d000, 1 },
+		{ "MOTG (SUS1)", 0xfed0e000, 33 },
+		{ "USID (SUS18)", 0xfed0e000, 19 },
+		{ "phy_cs (SCORE54)", 0xfed0c000, 103 },
+		{ "phy_reset (SUS14)", 0xfed0e000, 17 },
+	};
+
+	for (size_t i = 0; i < B_COUNT_OF(kPads); i++) {
+		uint8* base;
+		area_id area = map_physical_memory("bytgpio test", kPads[i].base,
+			B_PAGE_SIZE * 2, B_ANY_KERNEL_ADDRESS,
+			B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA, (void**)&base);
+		if (area < 0)
+			continue;
+		uint32 conf0 = *(volatile uint32*)(base + kPads[i].pad * 16);
+		uint32 val = baytrail_pad_val(area, base, kPads[i].pad);
+		TRACE_ALWAYS("usbdiag: pad %s CONF0 %#" B_PRIx32 " VAL %#" B_PRIx32
+			"\n", kPads[i].name, conf0, val);
+
+		if (i == 0 && (val & 1) == 0) {
+			// Output enabled (bit 1 clear), level high.
+			*(volatile uint32*)(base + kPads[i].pad * 16 + 8)
+				= (val & ~0x2) | 0x1;
+			snooze(600000);
+			TRACE_ALWAYS("usbdiag: BST5 switched on: VAL %#" B_PRIx32
+				", port 0 PORTSC %#" B_PRIx32 "\n",
+				baytrail_pad_val(area, base, kPads[i].pad),
+				ReadOpReg(XHCI_PORTSC(0)));
+		}
+		delete_area(area);
+	}
 }
 
 

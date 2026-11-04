@@ -268,6 +268,7 @@ private:
 
 			void				_SwitchIntelPorts();
 			void				_LogBayTrailOtg();
+			void				_BayTrailVbusTest();
 
 private:
 			area_id				fRegisterArea;
