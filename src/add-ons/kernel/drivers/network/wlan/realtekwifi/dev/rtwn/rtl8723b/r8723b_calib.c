@@ -291,6 +291,11 @@ r8723b_iqk_tx_ok(struct rtwn_softc *sc)
 	uint32_t x = R8723B_IQK_RES(rtwn_bb_read(sc, R8723B_IQK_RES_TX));
 	uint32_t y = R8723B_IQK_RES(rtwn_bb_read(sc, R8723B_IQK_RES_TY));
 
+	/* Test only: log every attempt. */
+	device_printf(sc->sc_dev, "iqk: tx 0xe94 %#x 0xe9c %#x 0xeac %#x "
+	    "(x %#x y %#x)\n", rtwn_bb_read(sc, R8723B_IQK_RES_TX),
+	    rtwn_bb_read(sc, R8723B_IQK_RES_TY), ry, x, y);
+
 	return (!(ry & R8723B_IQK_TX_FAIL) && x != IQK_TX_X_ERR
 	    && y != IQK_TX_Y_ERR) ? IQK_TX_OK : 0;
 }
@@ -303,6 +308,8 @@ r8723b_iqk_rx_ok(struct rtwn_softc *sc)
 	int32_t x = R8723B_IQK_RES(rtwn_bb_read(sc, R8723B_IQK_RES_RX));
 	int32_t y = R8723B_IQK_RES(ry);
 
+	device_printf(sc->sc_dev, "iqk: rx 0xea4 %#x 0xeac %#x (x %#x y %#x)\n",
+	    rtwn_bb_read(sc, R8723B_IQK_RES_RX), ry, x, y);
 	y = abs(iqkxy_to_s32(y));
 	return (!(ry & R8723B_IQK_RX_FAIL) && x != IQK_RX_X_ERR
 	    && y != IQK_RX_Y_ERR && x < IQK_RX_X_UPPER && x > IQK_RX_X_LOWER
