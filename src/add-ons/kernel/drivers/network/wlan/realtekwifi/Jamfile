@@ -16,6 +16,7 @@ UseHeaders [ FDirName $(SUBDIR) ] : true ;
 SEARCH_SOURCE += [ FDirName $(SUBDIR) dev rtwn ] ;
 SEARCH_SOURCE += [ FDirName $(SUBDIR) dev rtwn pci ] ;
 SEARCH_SOURCE += [ FDirName $(SUBDIR) dev rtwn usb ] ;
+SEARCH_SOURCE += [ FDirName $(SUBDIR) dev rtwn sdio ] ;
 SEARCH_SOURCE += [ FDirName $(SUBDIR) dev rtwn rtl8188e ] ;
 SEARCH_SOURCE += [ FDirName $(SUBDIR) dev rtwn rtl8188e pci ] ;
 SEARCH_SOURCE += [ FDirName $(SUBDIR) dev rtwn rtl8188e usb ] ;
@@ -55,6 +56,9 @@ KernelAddon realtekwifi :
 	rtwn_usb_reg.c
 	rtwn_usb_rx.c
 	rtwn_usb_tx.c
+
+	# sdio/
+	rtwn_sdio_reg.c
 
 	# rtl8188e/
 	r88e_beacon.c
@@ -160,6 +164,7 @@ KernelAddon realtekwifi :
 	:
 	freebsd_wlan.a
 	freebsd_usb.a
+	freebsd_sdio.a
 	libfreebsd_network.a
 	;
 
