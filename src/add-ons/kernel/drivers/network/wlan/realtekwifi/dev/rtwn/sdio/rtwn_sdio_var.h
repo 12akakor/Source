@@ -39,20 +39,10 @@ struct rtwn_sdio_softc {
 
 	uint8_t			sc_rx_id;	/* low bits of the RX FIFO address */
 
-	/* test: counters for the diagnostic thread */
-	uint32_t		sc_diag_intr;
-	uint32_t		sc_diag_polled;
-	uint32_t		sc_diag_rx_reads;
-	uint32_t		sc_diag_rx_bytes;
-	uint32_t		sc_diag_rx_frames;
-	uint32_t		sc_diag_rx_dropped;
-	uint32_t		sc_diag_rx_other;
-	uint32_t		sc_diag_tx;
-	uint32_t		sc_diag_tx_errors;
-	uint32_t		sc_diag_logged;
-	uint16_t		sc_diag_chan_frames[15];
-	thread_id		sc_diag_thread;
-	volatile bool		sc_diag_stop;
+	/* Looks for receive requests the card interrupt missed. */
+	thread_id		sc_poll_thread;
+	volatile bool		sc_poll_stop;
+
 	uint8_t			*sc_rx_buf;
 	uint8_t			*sc_tx_buf;
 
@@ -90,15 +80,14 @@ size_t		rtwn_sdio_align_size(size_t);
 /* rtwn_sdio_rx.c */
 void		rtwn_sdio_intr(void *);
 void		rtwn_sdio_enable_intr(struct rtwn_sdio_softc *, bool);
-void		rtwn_sdio_diag_start(struct rtwn_sdio_softc *);
-void		rtwn_sdio_diag_stop(struct rtwn_sdio_softc *);
+void		rtwn_sdio_poll_start(struct rtwn_sdio_softc *);
+void		rtwn_sdio_poll_stop(struct rtwn_sdio_softc *);
 
 /* rtwn_sdio_tx.c */
 int		rtwn_sdio_tx_start(struct rtwn_softc *, struct ieee80211_node *,
 		    struct mbuf *, uint8_t *, uint8_t, int);
 void		rtwn_sdio_tx_done_task(void *, int);
 void		rtwn_sdio_tx_drain(struct rtwn_sdio_softc *, int);
-int		rtwn_sdio_diag_eapol(struct mbuf *);	/* test */
 
 /* rtl8723b/sdio/r8723bs_attach.c */
 void		r8723bs_attach(struct rtwn_sdio_softc *);

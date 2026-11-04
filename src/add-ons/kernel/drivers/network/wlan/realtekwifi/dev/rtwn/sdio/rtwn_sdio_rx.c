@@ -53,6 +53,8 @@
 #define RTWN_SDIO_RX_BUDGET	(64 * 1024)
 /* Bytes per CMD53, whole blocks. */
 #define RTWN_SDIO_RX_CHUNK	4096
+/* How often rtwn_sdio_poll_thread() looks for a missed receive request. */
+#define RTWN_SDIO_POLL_INTERVAL	50000
 
 
 void
@@ -120,72 +122,6 @@ rtwn_sdio_rx_copy(struct rtwn_softc *sc, struct rtwn_rx_stat_common *stat,
 }
 
 
-/*
- * Test only: counts the frames per channel and logs the first 400 data
- * frames, also those with a CRC error (RCR accepts them for this test):
- * channel, frame control, rate, RSSI, the OFDM PHY status (power, carrier
- * frequency offset, EVM, SNR), transmitter, BSSID and, for beacons and
- * probe responses, the SSID.
- */
-static void
-rtwn_sdio_diag_frame(struct rtwn_softc *sc, uint8_t *buf, int totlen)
-{
-	struct rtwn_sdio_softc *uc = RTWN_SDIO_SOFTC(sc);
-	struct ieee80211com *ic = &sc->sc_ic;
-	struct rtwn_rx_stat_common *stat = (struct rtwn_rx_stat_common *)buf;
-	uint32_t rxdw0 = le32toh(stat->rxdw0);
-	uint32_t rxdw3 = le32toh(stat->rxdw3);
-	int infosz = MS(rxdw0, RTWN_RXDW0_INFOSZ) * 8;
-	int shift = MS(rxdw0, RTWN_RXDW0_SHIFT);
-	int pktlen = MS(rxdw0, RTWN_RXDW0_PKTLEN);
-	uint8_t *wh = buf + sizeof(*stat) + infosz + shift;
-	int rate = rxdw3 & 0x7f;
-	int chan = ic->ic_curchan != NULL ? ic->ic_curchan->ic_ieee : 0;
-	int rssi = 0;
-	uint8_t *ph = NULL;
-	char ssid[33];
-
-	if (chan > 0 && chan < 15)
-		uc->sc_diag_chan_frames[chan]++;
-	if (uc->sc_diag_logged >= 400 || pktlen < 24)
-		return;
-	uc->sc_diag_logged++;
-
-	if (infosz != 0 && (rxdw0 & RTWN_RXDW0_PHYST) != 0) {
-		void *physt = buf + sizeof(*stat);
-		ph = physt;
-		rssi = rate < 4 ? rtwn_get_rssi_cck(sc, physt)
-		    : rtwn_get_rssi_ofdm(sc, physt);
-	}
-
-	ssid[0] = '\0';
-	/* Beacon (0x80) or probe response (0x50): SSID element at 36. */
-	if ((wh[0] == 0x80 || wh[0] == 0x50) && pktlen >= 38 && wh[36] == 0) {
-		int n = MIN(wh[37], 32);
-		int i;
-
-		if (38 + n > pktlen)
-			n = pktlen - 38;
-		for (i = 0; i < n; i++)
-			ssid[i] = (wh[38 + i] >= 0x20 && wh[38 + i] < 0x7f)
-			    ? wh[38 + i] : '.';
-		ssid[n] = '\0';
-	}
-
-	device_printf(sc->sc_dev, "rx: t %lld ms ch %d %s fc %02x%02x len %d "
-	    "rate %d rssi %d phy %d/%d/%d/%d/%d ta "
-	    "%02x:%02x:%02x:%02x:%02x:%02x bssid "
-	    "%02x:%02x:%02x:%02x:%02x:%02x \"%s\"\n",
-	    (long long)(system_time() / 1000), chan,
-	    (rxdw0 & RTWN_RXDW0_CRCERR) != 0 ? "CRC" : "ok", wh[0], wh[1],
-	    pktlen, rate, rssi, ph != NULL ? ph[4] : 0,
-	    ph != NULL ? ph[5] : 0, ph != NULL ? (int8_t)ph[9] : 0,
-	    ph != NULL ? (int8_t)ph[13] : 0, ph != NULL ? ph[15] : 0, wh[10], wh[11], wh[12], wh[13], wh[14], wh[15],
-	    wh[16], wh[17], wh[18], wh[19], wh[20], wh[21], ssid);
-	(void)totlen;
-}
-
-
 /*!	Splits the buffer into frames. Reports of the firmware are handled
 	here, received frames are returned as a list.
 */
@@ -209,12 +145,7 @@ rtwn_sdio_rx_parse(struct rtwn_softc *sc, uint8_t *buf, int len)
 
 		switch (rtwn_classify_intr(sc, buf, totlen)) {
 		case RTWN_RX_DATA:
-			rtwn_sdio_diag_frame(sc, buf, totlen);
 			m = rtwn_sdio_rx_copy(sc, stat, totlen);
-			if (m != NULL)
-				RTWN_SDIO_SOFTC(sc)->sc_diag_rx_frames++;
-			else
-				RTWN_SDIO_SOFTC(sc)->sc_diag_rx_dropped++;
 			if (m != NULL) {
 				if (last == NULL)
 					m0 = m;
@@ -238,7 +169,6 @@ rtwn_sdio_rx_parse(struct rtwn_softc *sc, uint8_t *buf, int len)
 			}
 			break;
 		default:
-			RTWN_SDIO_SOFTC(sc)->sc_diag_rx_other++;
 			rtwn_handle_c2h_report(sc, buf, totlen);
 			break;
 		}
@@ -274,14 +204,6 @@ rtwn_sdio_rx_input(struct rtwn_softc *sc, struct mbuf *m)
 		next = m->m_nextpkt;
 		m->m_nextpkt = NULL;
 		m->m_pkthdr.PH_loc.ptr = NULL;
-		{
-			/* test */
-			int keyInfo = rtwn_sdio_diag_eapol(m);
-			if (keyInfo >= 0)
-				device_printf(sc->sc_dev, "rx eapol: len %d key "
-				    "info %#x node %d\n", m->m_pkthdr.len, keyInfo,
-				    ni != NULL);
-		}
 		if (ni != NULL) {
 			(void)ieee80211_input_mimo(ni, m);
 			ieee80211_free_node(ni);
@@ -317,8 +239,6 @@ rtwn_sdio_rx(struct rtwn_sdio_softc *uc)
 			break;
 		}
 		total += len;
-		uc->sc_diag_rx_reads++;
-		uc->sc_diag_rx_bytes += len;
 
 		m = rtwn_sdio_rx_parse(sc, uc->sc_rx_buf, MIN(len, size));
 		if (m != NULL)
@@ -342,7 +262,6 @@ rtwn_sdio_intr(void *arg)
 	uint32_t hisr;
 
 	RTWN_LOCK(sc);
-	uc->sc_diag_intr++;
 	if (!uc->sc_intr_enabled) {
 		RTWN_UNLOCK(sc);
 		return;
@@ -355,7 +274,7 @@ rtwn_sdio_intr(void *arg)
 	}
 
 	if (hisr & RTWN_SDIO_INT_TXERR) {
-		/* test: the cause is in REG_TXDMA_STATUS, write 1 to clear. */
+		/* The cause is in REG_TXDMA_STATUS; write 1 to clear. */
 		uint32_t status = rtwn_read_4(sc, R92C_TXDMA_STATUS);
 		rtwn_write_4(sc, R92C_TXDMA_STATUS, status);
 		device_printf(sc->sc_dev, "transmit error (HISR %#x, "
@@ -374,175 +293,28 @@ rtwn_sdio_intr(void *arg)
 }
 
 
-/*
- * Test only: the PHY counters of the RTL8723B over the last 5 s (rtw88
- * rtw8723x_false_alarm_statistics() registers): packets the baseband saw
- * (CCA), false alarms and CRC good and bad, then the channel, the RF
- * channel register, IGI, RCR, the coexistence table and the frames per
- * channel.
- */
-static void
-rtwn_sdio_diag_phy(struct rtwn_sdio_softc *uc)
-{
-	struct rtwn_softc *sc = &uc->sc_sc;
-	struct ieee80211com *ic = &sc->sc_ic;
-	uint32_t cck_fa, cck_cca, ofdm_fa, t1, t2, t3, t4, cck_err, cck_ok;
-	uint32_t ofdm_crc, ht_crc;
-	char perchan[15 * 8];
-	int i, n = 0;
-
-	/* Hold the counters. */
-	rtwn_bb_setbits(sc, 0xc00, 0, 1U << 31);
-	rtwn_bb_setbits(sc, 0xd00, 0, 1U << 31);
-	rtwn_bb_setbits(sc, 0xa2c, 0, (1U << 12) | (1U << 14));
-
-	cck_fa = (rtwn_bb_read(sc, 0xa5c) & 0xff)
-	    | ((rtwn_bb_read(sc, 0xa58) >> 24) << 8);
-	cck_cca = rtwn_bb_read(sc, 0xa60);
-	cck_cca = ((cck_cca & 0xff) << 8) | ((cck_cca >> 8) & 0xff);
-	t1 = rtwn_bb_read(sc, 0xcf0);
-	t2 = rtwn_bb_read(sc, 0xda0);
-	t3 = rtwn_bb_read(sc, 0xda4);
-	t4 = rtwn_bb_read(sc, 0xda8);
-	ofdm_fa = (t1 & 0xffff) + (t1 >> 16) + (t2 >> 16) + (t3 & 0xffff)
-	    + (t3 >> 16) + (t4 & 0xffff);
-	cck_err = rtwn_bb_read(sc, 0xf84);
-	cck_ok = rtwn_bb_read(sc, 0xf88);
-	ht_crc = rtwn_bb_read(sc, 0xf90);
-	ofdm_crc = rtwn_bb_read(sc, 0xf94);
-
-	/* Reset them. */
-	rtwn_bb_setbits(sc, 0xc0c, 0, 1U << 31);
-	rtwn_bb_setbits(sc, 0xc0c, 1U << 31, 0);
-	rtwn_bb_setbits(sc, 0xd00, 0, 1U << 27);
-	rtwn_bb_setbits(sc, 0xd00, 1U << 27, 0);
-	rtwn_bb_setbits(sc, 0xc00, 1U << 31, 0);
-	rtwn_bb_setbits(sc, 0xd00, 1U << 31, 0);
-	rtwn_bb_setbits(sc, 0xa2c, (3U << 12) | (3U << 14), 0);
-	rtwn_bb_setbits(sc, 0xa2c, 0, (1U << 13) | (1U << 15));
-	rtwn_bb_setbits(sc, 0xf14, 0, 1U << 16);
-	rtwn_bb_setbits(sc, 0xf14, 1U << 16, 0);
-
-	device_printf(sc->sc_dev, "phy: CCA cck %u ofdm %u, false alarm cck %u "
-	    "ofdm %u, CRC ok/err cck %u/%u ofdm %u/%u ht %u/%u\n",
-	    cck_cca, t2 & 0xffff, cck_fa, ofdm_fa, cck_ok, cck_err,
-	    ofdm_crc & 0xffff, ofdm_crc >> 16, ht_crc & 0xffff, ht_crc >> 16);
-
-	perchan[0] = '\0';
-	for (i = 1; i < 15; i++) {
-		if (uc->sc_diag_chan_frames[i] != 0) {
-			n += snprintf(perchan + n, sizeof(perchan) - n, " %d:%u",
-			    i, uc->sc_diag_chan_frames[i]);
-		}
-	}
-	device_printf(sc->sc_dev, "phy: ch %d RF18 %#x IGI %#x RCR %#x "
-	    "coex %#x %#x %#x GPIO_MUX %#x; frames per channel:%s\n",
-	    ic->ic_curchan != NULL ? ic->ic_curchan->ic_ieee : 0,
-	    rtwn_rf_read(sc, 0, 0x18), rtwn_bb_read(sc, 0xc50) & 0xff,
-	    rtwn_read_4(sc, 0x608), rtwn_read_4(sc, 0x6c0),
-	    rtwn_read_4(sc, 0x6c4), rtwn_read_4(sc, 0x6c8),
-	    rtwn_read_4(sc, 0x40), perchan);
-}
-
-
-/*
- * Test only: dump MAC 0x000 to 0x7ff, BB 0x800 to 0xfff and RF path A
- * 0x00 to 0xff, in the layout of the vendor driver's proc files
- * (mac_reg_dump, bb_reg_dump, rf_reg_dump).
- */
-static void
-rtwn_sdio_diag_dump(struct rtwn_sdio_softc *uc)
-{
-	struct rtwn_softc *sc = &uc->sc_sc;
-	int reg;
-
-	for (reg = 0; reg < 0x1000; reg += 16) {
-		device_printf(sc->sc_dev, "dump %s 0x%03x 0x%08x 0x%08x 0x%08x "
-		    "0x%08x\n", reg < 0x800 ? "mac" : "bb", reg,
-		    rtwn_read_4(sc, reg), rtwn_read_4(sc, reg + 4),
-		    rtwn_read_4(sc, reg + 8), rtwn_read_4(sc, reg + 12));
-	}
-	for (reg = 0; reg < 0x100; reg += 4) {
-		device_printf(sc->sc_dev, "dump rf 0x%02x 0x%05x 0x%05x 0x%05x "
-		    "0x%05x\n", reg, rtwn_rf_read(sc, 0, reg),
-		    rtwn_rf_read(sc, 0, reg + 1), rtwn_rf_read(sc, 0, reg + 2),
-		    rtwn_rf_read(sc, 0, reg + 3));
-	}
-}
-
-
-/*
- * Test only: every 5 s, log the interrupt and receive counters and the
- * SDIO interrupt registers. When a receive request is pending, service it
- * from here too, so that frames arrive even if the card interrupt does not.
- */
+/*!	Services a receive request that the card interrupt did not report.
+	About one in seventy receive requests of the RTL8723BS on a Bay Trail
+	SDIO host came without a card interrupt; their frames would wait in
+	the FIFO for the next one.
+*/
 static status_t
-rtwn_sdio_diag_thread(void *arg)
+rtwn_sdio_poll_thread(void *arg)
 {
 	struct rtwn_sdio_softc *uc = arg;
 	struct rtwn_softc *sc = &uc->sc_sc;
-	struct ieee80211com *ic = &sc->sc_ic;
-	/*
-	 * Test only: 60 s after attach dump the MAC, BB and RF registers (to
-	 * compare with the vendor driver on Android), then scan three times,
-	 * every 15 s.
-	 */
-	int rounds = 0, prints = 0, step = 0;
 
-	while (!uc->sc_diag_stop) {
-		bool scan = false;
-
-		snooze(50000);
+	while (!uc->sc_poll_stop) {
+		snooze(RTWN_SDIO_POLL_INTERVAL);
 
 		RTWN_LOCK(sc);
 		if (uc->sc_intr_enabled) {
 			uint32_t hisr = rtwn_sdio_local_read_4(uc, RTWN_SDIO_HISR);
 			if (hisr != 0xffffffff
-			    && (hisr & RTWN_SDIO_INT_RX_REQUEST) != 0) {
-				uc->sc_diag_polled++;
+			    && (hisr & RTWN_SDIO_INT_RX_REQUEST) != 0)
 				rtwn_sdio_rx(uc);
-			}
-		}
-
-		if (++rounds >= 100) {
-			rounds = 0;
-			device_printf(sc->sc_dev, "diag: intr %u, polled %u, "
-			    "rx reads %u (%u bytes), frames %u, dropped %u, "
-			    "other %u, tx %u, tx errors %u; HIMR %#x HISR %#x "
-			    "RX0_REQ_LEN %u, running %d\n",
-			    uc->sc_diag_intr, uc->sc_diag_polled,
-			    uc->sc_diag_rx_reads, uc->sc_diag_rx_bytes,
-			    uc->sc_diag_rx_frames, uc->sc_diag_rx_dropped,
-			    uc->sc_diag_rx_other, uc->sc_diag_tx,
-			    uc->sc_diag_tx_errors,
-			    rtwn_sdio_local_read_4(uc, RTWN_SDIO_HIMR),
-			    rtwn_sdio_local_read_4(uc, RTWN_SDIO_HISR),
-			    rtwn_sdio_local_read_2(uc, RTWN_SDIO_RX0_REQ_LEN),
-			    (sc->sc_flags & RTWN_RUNNING) != 0);
-			if (uc->sc_powered)
-				rtwn_sdio_diag_phy(uc);
-			if (++prints == 12 && uc->sc_powered)
-				rtwn_sdio_diag_dump(uc);
-			if (prints >= 12 && (prints - 12) % 3 == 0 && step < 3
-			    && uc->sc_powered
-			    && (sc->sc_flags & RTWN_RUNNING) != 0) {
-				device_printf(sc->sc_dev, "diag: scan %d\n", step);
-				step++;
-				uc->sc_diag_logged = 340;
-				scan = true;
-			}
 		}
 		RTWN_UNLOCK(sc);
-
-		if (scan) {
-			struct ieee80211vap *vap = TAILQ_FIRST(&ic->ic_vaps);
-
-			if (vap != NULL) {
-				ieee80211_start_scan(vap, IEEE80211_SCAN_ACTIVE
-				    | IEEE80211_SCAN_ONCE | IEEE80211_SCAN_NOPICK,
-				    IEEE80211_SCAN_FOREVER, 0, 0, 0, NULL);
-			}
-		}
 	}
 
 	return (B_OK);
@@ -550,24 +322,24 @@ rtwn_sdio_diag_thread(void *arg)
 
 
 void
-rtwn_sdio_diag_start(struct rtwn_sdio_softc *uc)
+rtwn_sdio_poll_start(struct rtwn_sdio_softc *uc)
 {
-	uc->sc_diag_stop = false;
-	uc->sc_diag_thread = spawn_kernel_thread(rtwn_sdio_diag_thread,
-	    "rtwn sdio diag", B_LOW_PRIORITY, uc);
-	if (uc->sc_diag_thread >= 0)
-		resume_thread(uc->sc_diag_thread);
+	uc->sc_poll_stop = false;
+	uc->sc_poll_thread = spawn_kernel_thread(rtwn_sdio_poll_thread,
+	    "rtwn sdio poll", B_LOW_PRIORITY, uc);
+	if (uc->sc_poll_thread >= 0)
+		resume_thread(uc->sc_poll_thread);
 }
 
 
 void
-rtwn_sdio_diag_stop(struct rtwn_sdio_softc *uc)
+rtwn_sdio_poll_stop(struct rtwn_sdio_softc *uc)
 {
 	status_t result;
 
-	if (uc->sc_diag_thread < 0)
+	if (uc->sc_poll_thread < 0)
 		return;
-	uc->sc_diag_stop = true;
-	wait_for_thread(uc->sc_diag_thread, &result);
-	uc->sc_diag_thread = -1;
+	uc->sc_poll_stop = true;
+	wait_for_thread(uc->sc_poll_thread, &result);
+	uc->sc_poll_thread = -1;
 }

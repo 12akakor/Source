@@ -168,6 +168,7 @@ rtwn_sdio_attach(device_t dev)
 	sc->sc_dev = dev;
 	ic->ic_name = device_get_nameunit(dev);
 	uc->sc_func = sdio_get_function(dev);
+	uc->sc_poll_thread = -1;
 
 	uc->sc_rx_buf = malloc(RTWN_SDIO_RXBUFSZ, M_DEVBUF, M_WAITOK);
 	uc->sc_tx_buf = malloc(RTWN_SDIO_TXBUFSZ, M_DEVBUF, M_WAITOK);
@@ -214,7 +215,7 @@ rtwn_sdio_attach(device_t dev)
 	if (error != 0)
 		goto fail_intr;
 
-	rtwn_sdio_diag_start(uc);
+	rtwn_sdio_poll_start(uc);
 	return (0);
 
 fail_intr:
@@ -236,7 +237,7 @@ rtwn_sdio_detach(device_t dev)
 	struct rtwn_sdio_softc *uc = device_get_softc(dev);
 	struct rtwn_softc *sc = &uc->sc_sc;
 
-	rtwn_sdio_diag_stop(uc);
+	rtwn_sdio_poll_stop(uc);
 	rtwn_detach(sc);
 
 	sdio_teardown_intr(uc->sc_func);

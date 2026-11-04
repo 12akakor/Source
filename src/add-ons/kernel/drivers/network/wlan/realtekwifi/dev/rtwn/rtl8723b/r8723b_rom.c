@@ -35,6 +35,7 @@
 
 #include <dev/rtwn/if_rtwnreg.h>
 #include <dev/rtwn/if_rtwnvar.h>
+#include <dev/rtwn/if_rtwn_debug.h>
 
 #include <dev/rtwn/rtl8192e/r92e.h>
 #include <dev/rtwn/rtl8192e/r92e_var.h>
@@ -66,7 +67,7 @@ r8723b_parse_rom_sdio(struct rtwn_softc *sc, uint8_t *buf)
 	IEEE80211_ADDR_COPY(sc->sc_ic.ic_macaddr,
 	    &buf[R8723B_ROM_SDIO_MACADDR]);
 
-	device_printf(sc->sc_dev, "efuse: crystal cap %#x, thermal meter "
+	RTWN_DPRINTF(sc, RTWN_DEBUG_ROM, "efuse: crystal cap %#x, thermal meter "
 	    "%#x, regulatory %d, BT setting %#x\n", rs->crystalcap,
 	    sc->thermal_meter, rs->regulatory, buf[R8723B_ROM_BT_SETTING]);
 }

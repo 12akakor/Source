@@ -131,30 +131,6 @@ rtwn_sdio_tx_checksum(struct rtwn_tx_desc_common *txd)
 }
 
 
-/* test: returns the EAPOL key info of an unprotected data frame, or -1. */
-int
-rtwn_sdio_diag_eapol(struct mbuf *m)
-{
-	struct ieee80211_frame *wh = mtod(m, struct ieee80211_frame *);
-	uint8_t buf[8 + 7];
-	int hdrlen;
-
-	if ((wh->i_fc[0] & IEEE80211_FC0_TYPE_MASK) != IEEE80211_FC0_TYPE_DATA
-	    || (wh->i_fc[1] & IEEE80211_FC1_PROTECTED) != 0)
-		return (-1);
-
-	hdrlen = ieee80211_anyhdrsize(wh);
-	if (m->m_pkthdr.len < hdrlen + (int)sizeof(buf))
-		return (-1);
-
-	/* LLC/SNAP, EAPOL header, descriptor type, key info. */
-	m_copydata(m, hdrlen, sizeof(buf), (caddr_t)buf);
-	if (buf[6] != 0x88 || buf[7] != 0x8e)
-		return (-1);
-	return ((buf[13] << 8) | buf[14]);
-}
-
-
 int
 rtwn_sdio_tx_start(struct rtwn_softc *sc, struct ieee80211_node *ni,
     struct mbuf *m, uint8_t *tx_desc, uint8_t type, int id)
@@ -177,7 +153,6 @@ rtwn_sdio_tx_start(struct rtwn_softc *sc, struct ieee80211_node *ni,
 	pages = howmany(roundup2(length, 4), sc->page_size);
 	error = rtwn_sdio_wait_pages(uc, queue, pages);
 	if (error != 0) {
-		uc->sc_diag_tx_errors++;
 		RTWN_DPRINTF(sc, RTWN_DEBUG_XMIT,
 		    "%s: no free pages in queue %d\n", __func__, queue);
 		return (error);
@@ -191,22 +166,27 @@ rtwn_sdio_tx_start(struct rtwn_softc *sc, struct ieee80211_node *ni,
 
 	rtwn_dump_tx_desc(sc, tx_desc);
 
-	/* test: log the first data frames and every EAPOL frame. */
-	if (type == IEEE80211_FC0_TYPE_DATA) {
-		static int logged;
-		int keyInfo = rtwn_sdio_diag_eapol(m);
-		if (keyInfo >= 0 || logged < 20) {
-			const uint32_t *w = (const uint32_t *)tx_desc;
-			logged++;
-			device_printf(sc->sc_dev, "tx data: len %d queue %d eapol "
-			    "%#x desc %08x %08x %08x %08x %08x %08x %08x %08x "
-			    "%08x %08x\n", m->m_pkthdr.len, queue, keyInfo,
-			    le32toh(w[0]), le32toh(w[1]), le32toh(w[2]),
-			    le32toh(w[3]), le32toh(w[4]), le32toh(w[5]),
-			    le32toh(w[6]), le32toh(w[7]), le32toh(w[8]),
-			    le32toh(w[9]));
-		}
+	memcpy(uc->sc_tx_buf, tx_desc, sc->txdesc_len);
+	m_copydata(m, 0, m->m_pkthdr.len,
+	    (caddr_t)(uc->sc_tx_buf + sc->txdesc_len));
+	memset(uc->sc_tx_buf + length, 0, size - length);
+
+	addr = RTWN_SDIO_ADDR(RTWN_SDIO_ADDR_TXFF_HIGH + queue,
+	    howmany(length, 4));
+	error = sdio_write_bytes(uc->sc_func, addr, uc->sc_tx_buf, size, true);
+	if (error != 0) {
+		RTWN_DPRINTF(sc, RTWN_DEBUG_XMIT,
+		    "%s: no free pages in queue %d\n", __func__, queue);
+		return (error);
 	}
+
+	txd = (struct rtwn_tx_desc_common *)tx_desc;
+	txd->pktlen = htole16(m->m_pkthdr.len);
+	txd->offset = sc->txdesc_len;
+	txd->flags0 |= RTWN_FLAGS0_OWN;
+	rtwn_sdio_tx_checksum(txd);
+
+	rtwn_dump_tx_desc(sc, tx_desc);
 
 	memcpy(uc->sc_tx_buf, tx_desc, sc->txdesc_len);
 	m_copydata(m, 0, m->m_pkthdr.len,
@@ -215,30 +195,8 @@ rtwn_sdio_tx_start(struct rtwn_softc *sc, struct ieee80211_node *ni,
 
 	addr = RTWN_SDIO_ADDR(RTWN_SDIO_ADDR_TXFF_HIGH + queue,
 	    howmany(length, 4));
-	/* test: does an EAPOL frame leave the FIFO? */
-	int diagEapol = rtwn_sdio_diag_eapol(m) >= 0;
-	uint32_t diagPages = 0;
-	if (diagEapol)
-		diagPages = rtwn_sdio_local_read_4(uc, RTWN_SDIO_FREE_TXPG);
-
 	error = sdio_write_bytes(uc->sc_func, addr, uc->sc_tx_buf, size, true);
-	uc->sc_diag_tx++;
-
-	if (diagEapol && error == 0) {
-		uint32_t at0, at2, at20;
-		at0 = rtwn_sdio_local_read_4(uc, RTWN_SDIO_FREE_TXPG);
-		DELAY(2000);
-		at2 = rtwn_sdio_local_read_4(uc, RTWN_SDIO_FREE_TXPG);
-		DELAY(18000);
-		at20 = rtwn_sdio_local_read_4(uc, RTWN_SDIO_FREE_TXPG);
-		device_printf(sc->sc_dev, "tx eapol: free pages before %08x "
-		    "after 0 ms %08x 2 ms %08x 20 ms %08x; TXPAUSE %#x "
-		    "MSR %#x RCR %#x\n", diagPages, at0, at2, at20,
-		    rtwn_read_1(sc, 0x522), rtwn_read_1(sc, 0x102),
-		    rtwn_read_4(sc, 0x608));
-	}
 	if (error != 0) {
-		uc->sc_diag_tx_errors++;
 		device_printf(sc->sc_dev, "%s: writing %zu bytes to queue %d "
 		    "failed: %d\n", __func__, size, queue, error);
 		return (EIO);

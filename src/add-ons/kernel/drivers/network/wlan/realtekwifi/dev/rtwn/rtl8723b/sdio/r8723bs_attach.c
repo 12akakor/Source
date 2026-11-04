@@ -92,26 +92,6 @@ r8723bs_detach_private(struct rtwn_softc *sc)
 }
 
 
-/*
- * Test only: logs the first 60 channel switches with the time and the RF
- * channel register read back, to see how long the scan stays on each
- * channel.
- */
-static void
-r8723bs_set_chan(struct rtwn_softc *sc, struct ieee80211_channel *c)
-{
-	static int logged;
-
-	r92e_set_chan(sc, c);
-	if (logged < 60) {
-		logged++;
-		device_printf(sc->sc_dev, "chan: t %lld ms ch %d RF18 %#x\n",
-		    (long long)(system_time() / 1000), c->ic_ieee,
-		    rtwn_rf_read(sc, 0, R92C_RF_CHNLBW));
-	}
-}
-
-
 static void
 r8723bs_adj_devcaps(struct rtwn_softc *sc)
 {
@@ -130,7 +110,7 @@ r8723bs_attach(struct rtwn_sdio_softc *uc)
 	/* Common part. */
 	sc->sc_flags			= RTWN_FLAG_EXT_HDR;
 
-	sc->sc_set_chan			= r8723bs_set_chan;
+	sc->sc_set_chan			= r92e_set_chan;
 	sc->sc_fill_tx_desc		= r12a_fill_tx_desc;
 	sc->sc_fill_tx_desc_raw		= r12a_fill_tx_desc_raw;
 	sc->sc_fill_tx_desc_null	= r12a_fill_tx_desc_null;
@@ -225,7 +205,6 @@ r8723bs_attach(struct rtwn_sdio_softc *uc)
 
 	sc->bcn_status_reg[0]		= R92C_TDECTRL;
 	sc->bcn_status_reg[1]		= R21A_DWBCN1_CTRL;
-	sc->rcr				= R92C_RCR_ACRC32;	/* test */
 
 	sc->ntxchains			= 1;
 	sc->nrxchains			= 1;

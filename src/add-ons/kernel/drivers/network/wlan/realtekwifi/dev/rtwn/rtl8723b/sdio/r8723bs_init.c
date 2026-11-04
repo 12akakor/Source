@@ -62,6 +62,7 @@
 
 #include <dev/rtwn/if_rtwnreg.h>
 #include <dev/rtwn/if_rtwnvar.h>
+#include <dev/rtwn/if_rtwn_debug.h>
 
 #include <dev/rtwn/sdio/rtwn_sdio_reg.h>
 #include <dev/rtwn/sdio/rtwn_sdio_var.h>
@@ -220,7 +221,8 @@ r8723bs_antenna_wlan_only(struct rtwn_softc *sc)
 	rtwn_write_4(sc, R8723BS_COEX_TABLE1, 0x55555555);
 	rtwn_write_4(sc, R8723BS_COEX_BRK_TABLE, 0xf0ffffff);
 
-	device_printf(sc->sc_dev, "antenna to WLAN (%s): BB_SEL_BTG %#x, "
+	RTWN_DPRINTF(sc, RTWN_DEBUG_RESET,
+	    "antenna to WLAN (%s): BB_SEL_BTG %#x, "
 	    "LED_CFG %#x, 0x67 %#x, GNT_BT %#x, 0x76e %#x\n",
 	    aux ? "S0, aux" : "S1, main",
 	    rtwn_bb_read(sc, R8723BS_BB_SEL_BTG),
