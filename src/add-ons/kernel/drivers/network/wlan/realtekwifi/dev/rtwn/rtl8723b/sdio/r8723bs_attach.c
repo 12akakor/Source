@@ -1,6 +1,7 @@
 /*-
  * Copyright (c) 2017 Kevin Lo <kevlo@FreeBSD.org>
  * Copyright 2026 Akakor. All rights reserved.
+ * SPDX-License-Identifier: ISC
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
