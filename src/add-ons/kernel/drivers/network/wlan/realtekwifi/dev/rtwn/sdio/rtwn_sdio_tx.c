@@ -215,8 +215,28 @@ rtwn_sdio_tx_start(struct rtwn_softc *sc, struct ieee80211_node *ni,
 
 	addr = RTWN_SDIO_ADDR(RTWN_SDIO_ADDR_TXFF_HIGH + queue,
 	    howmany(length, 4));
+	/* test: does an EAPOL frame leave the FIFO? */
+	int diagEapol = rtwn_sdio_diag_eapol(m) >= 0;
+	uint32_t diagPages = 0;
+	if (diagEapol)
+		diagPages = rtwn_sdio_local_read_4(uc, RTWN_SDIO_FREE_TXPG);
+
 	error = sdio_write_bytes(uc->sc_func, addr, uc->sc_tx_buf, size, true);
 	uc->sc_diag_tx++;
+
+	if (diagEapol && error == 0) {
+		uint32_t at0, at2, at20;
+		at0 = rtwn_sdio_local_read_4(uc, RTWN_SDIO_FREE_TXPG);
+		DELAY(2000);
+		at2 = rtwn_sdio_local_read_4(uc, RTWN_SDIO_FREE_TXPG);
+		DELAY(18000);
+		at20 = rtwn_sdio_local_read_4(uc, RTWN_SDIO_FREE_TXPG);
+		device_printf(sc->sc_dev, "tx eapol: free pages before %08x "
+		    "after 0 ms %08x 2 ms %08x 20 ms %08x; TXPAUSE %#x "
+		    "MSR %#x RCR %#x\n", diagPages, at0, at2, at20,
+		    rtwn_read_1(sc, 0x522), rtwn_read_1(sc, 0x102),
+		    rtwn_read_4(sc, 0x608));
+	}
 	if (error != 0) {
 		uc->sc_diag_tx_errors++;
 		device_printf(sc->sc_dev, "%s: writing %zu bytes to queue %d "
