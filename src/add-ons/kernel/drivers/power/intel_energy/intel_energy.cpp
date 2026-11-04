@@ -111,6 +111,34 @@ read_core(void* cookie, int cpu)
 }
 
 
+// test: log the P-state registers once, to compare them with the ACPI _PSS
+// table. 0x66a to 0x66d are not in the SDM; they hold the ratio and VID
+// limits on Bay Trail. Only read on 06_37H.
+static void
+dump_pstate_registers()
+{
+	cpu_ent* cpu = get_cpu_struct();
+	uint8 model = cpu->arch.model + (cpu->arch.extended_model << 4);
+
+	dprintf("intel_energy: test: bus %" B_PRIu32 " kHz, PLATFORM_INFO %#"
+		B_PRIx64 ", PERF_STATUS %#" B_PRIx64 ", PERF_CTL %#" B_PRIx64
+		", RAPL_UNIT %#" B_PRIx64 ", PKG_POWER_LIMIT %#" B_PRIx64
+		", CST_CONFIG %#" B_PRIx64 "\n", sBusKHz,
+		x86_read_msr(IA32_MSR_PLATFORM_INFO),
+		x86_read_msr(IA32_MSR_PERF_STATUS), x86_read_msr(IA32_MSR_PERF_CTL),
+		x86_read_msr(MSR_RAPL_POWER_UNIT), x86_read_msr(0x610),
+		x86_read_msr(0xe2));
+
+	if (model != 0x37)
+		return;
+
+	dprintf("intel_energy: test: 0x66a %#" B_PRIx64 ", 0x66b %#" B_PRIx64
+		", 0x66c %#" B_PRIx64 ", 0x66d %#" B_PRIx64 "\n",
+		x86_read_msr(0x66a), x86_read_msr(0x66b), x86_read_msr(0x66c),
+		x86_read_msr(0x66d));
+}
+
+
 //	#pragma mark - device hooks
 
 
@@ -205,6 +233,7 @@ init_driver()
 	}
 	sEnergyUnit = (1U << esu) * 1000;
 	sBusKHz = bus_khz();
+	dump_pstate_registers();	// test
 
 	return B_OK;
 }
