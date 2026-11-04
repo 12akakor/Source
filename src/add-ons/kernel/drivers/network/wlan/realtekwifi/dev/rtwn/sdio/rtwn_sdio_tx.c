@@ -114,10 +114,11 @@ rtwn_sdio_tx_checksum(struct rtwn_tx_desc_common *txd)
 	uint16_t sum = 0;
 	int i;
 
+	/* XOR of the first 32 bytes, not inverted (rtw88, rtwn_usb). */
 	txd->txdw7.usb_checksum = 0;
 	for (i = 0; i < 32 / 2; i++)
 		sum ^= ((uint16_t *)txd)[i];
-	txd->txdw7.usb_checksum = ~sum;
+	txd->txdw7.usb_checksum = sum;
 }
 
 
