@@ -241,6 +241,15 @@ r8723bs_post_init(struct rtwn_softc *sc)
 	uint32_t value;
 
 	r8723b_post_init(sc);
+
+	/*
+	 * Test only: take the antenna as being on S0 (aux), against the efuse
+	 * (0xc3 = 0x11). The RX IQ calibration never sees its own test
+	 * signal on S1 (result y = 0x36, the error value).
+	 */
+	((struct r8723b_softc *)sc->sc_priv)->bt_setting |=
+	    R8723B_BT_SETTING_AUX_ANT;
+
 	r8723bs_antenna_wlan_only(sc);
 
 	/* IQ calibration, as the vendor driver does at init. */

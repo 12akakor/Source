@@ -32,6 +32,12 @@ target desktop {
 		no_safemode
 	}
 
+	# Test only: log the power state to the syslog every 10 s for 10 min.
+	job power-log {
+		launch /bin/sh -c "sleep 30; (power; power -i 10 -n 60 -c) 2>&1 | logger -t power"
+		on initial_volumes_mounted
+	}
+
 	job user-bootscript {
 		launch /bin/sh ~/config/settings/boot/UserBootscript
 	}
