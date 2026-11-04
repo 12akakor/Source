@@ -43,6 +43,8 @@
 #include <dev/rtwn/if_rtwn_rx.h>
 #include <dev/rtwn/if_rtwn_tx.h>
 
+#include <dev/rtwn/rtl8192c/r92c_reg.h>
+
 #include <dev/rtwn/sdio/rtwn_sdio_reg.h>
 #include <dev/rtwn/sdio/rtwn_sdio_var.h>
 
@@ -272,6 +274,14 @@ rtwn_sdio_rx_input(struct rtwn_softc *sc, struct mbuf *m)
 		next = m->m_nextpkt;
 		m->m_nextpkt = NULL;
 		m->m_pkthdr.PH_loc.ptr = NULL;
+		{
+			/* test */
+			int keyInfo = rtwn_sdio_diag_eapol(m);
+			if (keyInfo >= 0)
+				device_printf(sc->sc_dev, "rx eapol: len %d key "
+				    "info %#x node %d\n", m->m_pkthdr.len, keyInfo,
+				    ni != NULL);
+		}
 		if (ni != NULL) {
 			(void)ieee80211_input_mimo(ni, m);
 			ieee80211_free_node(ni);
@@ -344,8 +354,13 @@ rtwn_sdio_intr(void *arg)
 		return;
 	}
 
-	if (hisr & RTWN_SDIO_INT_TXERR)
-		device_printf(sc->sc_dev, "transmit error (HISR %#x)\n", hisr);
+	if (hisr & RTWN_SDIO_INT_TXERR) {
+		/* test: the cause is in REG_TXDMA_STATUS, write 1 to clear. */
+		uint32_t status = rtwn_read_4(sc, R92C_TXDMA_STATUS);
+		rtwn_write_4(sc, R92C_TXDMA_STATUS, status);
+		device_printf(sc->sc_dev, "transmit error (HISR %#x, "
+		    "TXDMA_STATUS %#x)\n", hisr, status);
+	}
 	if (hisr & RTWN_SDIO_INT_RX_REQUEST)
 		rtwn_sdio_rx(uc);
 

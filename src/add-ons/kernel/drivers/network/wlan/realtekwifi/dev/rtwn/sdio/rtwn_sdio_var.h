@@ -98,6 +98,7 @@ int		rtwn_sdio_tx_start(struct rtwn_softc *, struct ieee80211_node *,
 		    struct mbuf *, uint8_t *, uint8_t, int);
 void		rtwn_sdio_tx_done_task(void *, int);
 void		rtwn_sdio_tx_drain(struct rtwn_sdio_softc *, int);
+int		rtwn_sdio_diag_eapol(struct mbuf *);	/* test */
 
 /* rtl8723b/sdio/r8723bs_attach.c */
 void		r8723bs_attach(struct rtwn_sdio_softc *);

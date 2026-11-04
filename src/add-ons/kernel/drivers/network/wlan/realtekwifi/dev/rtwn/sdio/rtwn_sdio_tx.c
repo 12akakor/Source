@@ -122,6 +122,30 @@ rtwn_sdio_tx_checksum(struct rtwn_tx_desc_common *txd)
 }
 
 
+/* test: returns the EAPOL key info of an unprotected data frame, or -1. */
+int
+rtwn_sdio_diag_eapol(struct mbuf *m)
+{
+	struct ieee80211_frame *wh = mtod(m, struct ieee80211_frame *);
+	uint8_t buf[8 + 7];
+	int hdrlen;
+
+	if ((wh->i_fc[0] & IEEE80211_FC0_TYPE_MASK) != IEEE80211_FC0_TYPE_DATA
+	    || (wh->i_fc[1] & IEEE80211_FC1_PROTECTED) != 0)
+		return (-1);
+
+	hdrlen = ieee80211_anyhdrsize(wh);
+	if (m->m_pkthdr.len < hdrlen + (int)sizeof(buf))
+		return (-1);
+
+	/* LLC/SNAP, EAPOL header, descriptor type, key info. */
+	m_copydata(m, hdrlen, sizeof(buf), (caddr_t)buf);
+	if (buf[6] != 0x88 || buf[7] != 0x8e)
+		return (-1);
+	return ((buf[13] << 8) | buf[14]);
+}
+
+
 int
 rtwn_sdio_tx_start(struct rtwn_softc *sc, struct ieee80211_node *ni,
     struct mbuf *m, uint8_t *tx_desc, uint8_t type, int id)
@@ -156,6 +180,23 @@ rtwn_sdio_tx_start(struct rtwn_softc *sc, struct ieee80211_node *ni,
 	rtwn_sdio_tx_checksum(txd);
 
 	rtwn_dump_tx_desc(sc, tx_desc);
+
+	/* test: log the first data frames and every EAPOL frame. */
+	if (type == IEEE80211_FC0_TYPE_DATA) {
+		static int logged;
+		int keyInfo = rtwn_sdio_diag_eapol(m);
+		if (keyInfo >= 0 || logged < 20) {
+			const uint32_t *w = (const uint32_t *)tx_desc;
+			logged++;
+			device_printf(sc->sc_dev, "tx data: len %d queue %d eapol "
+			    "%#x desc %08x %08x %08x %08x %08x %08x %08x %08x "
+			    "%08x %08x\n", m->m_pkthdr.len, queue, keyInfo,
+			    le32toh(w[0]), le32toh(w[1]), le32toh(w[2]),
+			    le32toh(w[3]), le32toh(w[4]), le32toh(w[5]),
+			    le32toh(w[6]), le32toh(w[7]), le32toh(w[8]),
+			    le32toh(w[9]));
+		}
+	}
 
 	memcpy(uc->sc_tx_buf, tx_desc, sc->txdesc_len);
 	m_copydata(m, 0, m->m_pkthdr.len,
