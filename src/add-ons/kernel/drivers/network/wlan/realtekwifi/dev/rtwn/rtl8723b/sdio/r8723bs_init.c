@@ -247,6 +247,35 @@ r8723bs_post_init(struct rtwn_softc *sc)
 	/* IQ calibration, as the vendor driver does at init. */
 	r8723b_iq_calib(sc);
 
+	/*
+	 * Test only: the RF registers in which the vendor driver on Android
+	 * differs from us (not the channel, mode and thermal ones), and the
+	 * byte 0x1e of the MAC.
+	 */
+	{
+		static const struct { uint8_t reg; uint32_t val; } rf[] = {
+			{ 0x08, 0xb16aa }, { 0x1f, 0x00000 }, { 0x2f, 0x01a30 },
+			{ 0x51, 0x6f10e }, { 0x52, 0x007d3 }, { 0x55, 0x6c502 },
+			{ 0x7f, 0x23c8f }, { 0x81, 0xce000 }, { 0x83, 0x98000 },
+			{ 0x84, 0x48d80 }, { 0x8c, 0x00012 }, { 0xa3, 0x98000 },
+			{ 0xb6, 0x925aa }, { 0xc4, 0x420a6 }, { 0xc5, 0x27600 },
+			{ 0xc6, 0x0008c },
+		};
+		int i;
+
+		for (i = 0; i < (int)nitems(rf); i++) {
+			uint32_t before = rtwn_rf_read(sc, 0, rf[i].reg);
+
+			rtwn_rf_write(sc, 0, rf[i].reg, rf[i].val);
+			device_printf(sc->sc_dev, "test: RF %#x %#x -> %#x (wrote "
+			    "%#x)\n", rf[i].reg, before,
+			    rtwn_rf_read(sc, 0, rf[i].reg), rf[i].val);
+		}
+		device_printf(sc->sc_dev, "test: 0x1e %#x -> 0x86\n",
+		    rtwn_read_1(sc, 0x1e));
+		rtwn_write_1(sc, 0x1e, 0x86);
+	}
+
 	value = rtwn_sdio_local_read_4(uc, RTWN_SDIO_TX_CTRL);
 	rtwn_sdio_local_write_4(uc, RTWN_SDIO_TX_CTRL, value & 0x0000fff8);
 
