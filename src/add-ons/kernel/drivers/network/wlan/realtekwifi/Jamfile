@@ -26,6 +26,7 @@ SEARCH_SOURCE += [ FDirName $(SUBDIR) dev rtwn rtl8192c usb ] ;
 SEARCH_SOURCE += [ FDirName $(SUBDIR) dev rtwn rtl8192e ] ;
 SEARCH_SOURCE += [ FDirName $(SUBDIR) dev rtwn rtl8192e usb ] ;
 SEARCH_SOURCE += [ FDirName $(SUBDIR) dev rtwn rtl8723b ] ;
+SEARCH_SOURCE += [ FDirName $(SUBDIR) dev rtwn rtl8723b sdio ] ;
 SEARCH_SOURCE += [ FDirName $(SUBDIR) dev rtwn rtl8812a ] ;
 SEARCH_SOURCE += [ FDirName $(SUBDIR) dev rtwn rtl8812a usb ] ;
 SEARCH_SOURCE += [ FDirName $(SUBDIR) dev rtwn rtl8821a ] ;
@@ -59,6 +60,8 @@ KernelAddon realtekwifi :
 
 	# sdio/
 	rtwn_sdio_reg.c
+	rtwn_sdio_rx.c
+	rtwn_sdio_tx.c
 
 	# rtl8188e/
 	r88e_beacon.c
@@ -127,6 +130,9 @@ KernelAddon realtekwifi :
 	r8723b_calib.c
 	r8723b_init.c
 	r8723b_rom.c
+
+	# rtl8723b/sdio/
+	r8723bs_init.c
 
 	# rtl8812a/
 	r12a_beacon.c
