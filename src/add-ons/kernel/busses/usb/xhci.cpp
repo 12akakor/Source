@@ -1344,6 +1344,17 @@ XHCI::SubmitNormalRequest(Transfer *transfer)
 	if (isochronousData != NULL && transfer->IsPhysical())
 		return B_NOT_SUPPORTED;
 
+	// FinishTransfers() recovers an interrupt endpoint after a transaction
+	// error at most three times a second. An endpoint left halted by a
+	// longer burst would never run the next transfer, and an interrupt
+	// transfer never times out: the keyboard was dead until it was plugged
+	// in again. Recover it here, before the new TD is linked, so that the
+	// dequeue pointer is set to where that TD goes.
+	if ((pipe->Type() & USB_OBJECT_INTERRUPT_PIPE) != 0
+			&& _GetEndpointState(endpoint) == ENDPOINT_STATE_HALTED) {
+		_RecoverHaltedEndpoint(endpoint);
+	}
+
 	status_t status = transfer->InitKernelAccess();
 	if (status != B_OK)
 		return status;
@@ -3896,9 +3907,10 @@ XHCI::ResetEndpoint(bool preserve, xhci_endpoint* endpoint)
 
 
 /*!	Takes an endpoint out of the Halted state right after the transfer that
-	halted it has completed. Called from the finisher thread, which may wait on
-	a command (the event thread may not: it is the one that processes the
-	command's completion).
+	halted it has completed. Called from the finisher thread, or from
+	SubmitNormalRequest() for an interrupt endpoint that is still halted;
+	both may wait on a command (the event thread may not: it is the one that
+	processes the command's completion).
 
 	A STALL -- or a babble or transaction error -- halts the endpoint, and only
 	a Reset Endpoint command leaves that state (XHCI 1.2 § 4.8.3 p163). The
