@@ -31,6 +31,7 @@
 #include <OS.h>
 #include <scheduler.h>
 
+#include <intel_energy.h>
 #include <power_managment.h>
 
 
@@ -51,8 +52,20 @@ static int sThermalFDs[kMaxThermalZones];
 static int sThermalCount = 0;
 static int sACFDs[kMaxACAdapters];
 static int sACCount = 0;
+static int sEnergyFD = -1;
 
 static volatile sig_atomic_t sInterrupted = 0;
+
+
+// Processor power and sleep time between two samples of the intel_energy
+// driver.
+struct EnergyDelta {
+	double	packageWatt;
+	double	coresWatt;
+	double	packageC6;		// percent of the time
+	double	coreC6[INTEL_ENERGY_MAX_CPUS];	// percent of the time
+	uint32	coreCount;
+};
 
 
 struct BatteryState {
@@ -74,7 +87,8 @@ static void
 usage()
 {
 	printf("Usage: power [options]\n"
-		"Reports battery, AC adapter, thermal and CPU idle state.\n"
+		"Reports battery, AC adapter, thermal and CPU idle state, and on\n"
+		"supported Intel Atom processors the processor power and sleep time.\n"
 		"\n"
 		"Options:\n"
 		"  -c          write samples as CSV (implies -i)\n"
@@ -138,6 +152,7 @@ open_devices()
 	open_devices_in(kThermalDirectory, sThermalFDs, kMaxThermalZones,
 		sThermalCount);
 	open_devices_in(kACDirectory, sACFDs, kMaxACAdapters, sACCount);
+	sEnergyFD = open(INTEL_ENERGY_DEVICE, O_RDONLY);
 }
 
 
@@ -150,6 +165,79 @@ close_devices()
 		close(sThermalFDs[index]);
 	for (int index = 0; index < sACCount; index++)
 		close(sACFDs[index]);
+	if (sEnergyFD >= 0)
+		close(sEnergyFD);
+}
+
+
+static bool
+read_energy(intel_energy_sample& sample)
+{
+	if (sEnergyFD < 0)
+		return false;
+
+	return ioctl(sEnergyFD, INTEL_ENERGY_GET_SAMPLE, &sample,
+		sizeof(sample)) == 0;
+}
+
+
+static double
+residency_percent(uint64 before, uint64 after, uint64 tscBefore,
+	uint64 tscAfter)
+{
+	if (tscAfter <= tscBefore || after < before)
+		return 0.0;
+
+	double percent = (after - before) * 100.0 / (tscAfter - tscBefore);
+	return percent > 100.0 ? 100.0 : percent;
+}
+
+
+static bool
+energy_delta(const intel_energy_sample& before,
+	const intel_energy_sample& after, bigtime_t elapsed, EnergyDelta& delta)
+{
+	if (elapsed <= 0 || after.cpu_count == 0)
+		return false;
+
+	// The energy counters are 32 bits wide and wrap; unsigned subtraction
+	// handles one wrap, which takes hours at these power levels.
+	double seconds = elapsed / 1000000.0;
+	double unit = after.energy_unit_nj / 1e9;
+	delta.packageWatt = (uint32)(after.package_energy - before.package_energy)
+		* unit / seconds;
+	delta.coresWatt = (uint32)(after.cores_energy - before.cores_energy)
+		* unit / seconds;
+
+	delta.packageC6 = residency_percent(before.package_c6, after.package_c6,
+		before.package_tsc, after.package_tsc);
+
+	delta.coreCount = after.cpu_count;
+	for (uint32 index = 0; index < delta.coreCount; index++) {
+		delta.coreC6[index] = residency_percent(before.core_c6[index],
+			after.core_c6[index], before.core_tsc[index],
+			after.core_tsc[index]);
+	}
+
+	return true;
+}
+
+
+static void
+print_energy(const EnergyDelta& delta, const intel_energy_sample& sample)
+{
+	printf("  CPU power:      package %.2f W  cores %.2f W\n",
+		delta.packageWatt, delta.coresWatt);
+
+	printf("  CPU sleep (C6): package %.0f%%  cores", delta.packageC6);
+	for (uint32 index = 0; index < delta.coreCount; index++)
+		printf(" %.0f%%", delta.coreC6[index]);
+	printf("\n");
+
+	printf("  CPU clock:     ");
+	for (uint32 index = 0; index < sample.cpu_count; index++)
+		printf(" %" B_PRIu32, sample.core_mhz[index]);
+	printf(" MHz\n");
 }
 
 
@@ -479,6 +567,9 @@ print_status()
 	uint32 countAfter = 0;
 	bigtime_t beforeTime = 0;
 	bigtime_t wallTime = 0;
+	intel_energy_sample energyBefore;
+	bool hasEnergy = read_energy(energyBefore);
+	bigtime_t energyStart = system_time();
 	if (read_cpus(before, count, beforeTime) == B_OK) {
 		snooze(1000000);
 		if (read_cpus(infos, countAfter, wallTime) == B_OK) {
@@ -503,6 +594,14 @@ print_status()
 		delete[] before;
 	}
 
+	intel_energy_sample energyAfter;
+	EnergyDelta delta;
+	if (hasEnergy && read_energy(energyAfter)
+		&& energy_delta(energyBefore, energyAfter,
+			system_time() - energyStart, delta)) {
+		print_energy(delta, energyAfter);
+	}
+
 	int32 mode = get_scheduler_mode();
 	const char* modeName = "unknown";
 	if (mode == SCHEDULER_MODE_LOW_LATENCY)
@@ -511,6 +610,17 @@ print_status()
 		modeName = "power saving";
 
 	printf("  Scheduler:      %s\n", modeName);
+}
+
+
+static void
+print_energy_csv(bool hasDelta, const EnergyDelta& delta)
+{
+	if (hasDelta) {
+		printf(",%.0f,%.0f,%.1f\n", delta.packageWatt * 1000,
+			delta.coresWatt * 1000, delta.packageC6);
+	} else
+		printf(",,,\n");
 }
 
 
@@ -525,9 +635,13 @@ print_monitor(int interval, int count, bool csv)
 		return;
 	}
 
+	intel_energy_sample previousEnergy;
+	bool hasEnergy = read_energy(previousEnergy);
+	bigtime_t previousEnergyTime = system_time();
+
 	if (csv) {
 		printf("time,ac,battery,percent,rate_mw,thermal_c,idle_percent,"
-			"avg_mhz\n");
+			"avg_mhz,cpu_package_mw,cpu_cores_mw,package_c6_percent\n");
 		fflush(stdout);
 	}
 
@@ -561,13 +675,25 @@ print_monitor(int interval, int count, bool csv)
 
 		double elapsed = (currentTime - start) / 1000000.0;
 
+		intel_energy_sample energy;
+		EnergyDelta delta;
+		bool hasDelta = false;
+		if (hasEnergy && read_energy(energy)) {
+			bigtime_t now = system_time();
+			hasDelta = energy_delta(previousEnergy, energy,
+				now - previousEnergyTime, delta);
+			previousEnergy = energy;
+			previousEnergyTime = now;
+		}
+
 		if (csv) {
 			if (sBatteryCount == 0) {
 				printf("%.1f,%d,,,,", elapsed, online);
 				if (hasTemperature)
 					printf("%.1f", temperature);
-				printf(",%.1f,%.0f\n", idleAverage,
+				printf(",%.1f,%.0f", idleAverage,
 					average_frequency(current, currentCount));
+				print_energy_csv(hasDelta, delta);
 			} else {
 				for (int index = 0; index < sBatteryCount; index++) {
 					BatteryState battery;
@@ -582,8 +708,9 @@ print_monitor(int interval, int count, bool csv)
 					printf(",");
 					if (hasTemperature)
 						printf("%.1f", temperature);
-					printf(",%.1f,%.0f\n", idleAverage,
+					printf(",%.1f,%.0f", idleAverage,
 						average_frequency(current, currentCount));
+					print_energy_csv(hasDelta, delta);
 				}
 			}
 			fflush(stdout);
@@ -609,8 +736,13 @@ print_monitor(int interval, int count, bool csv)
 			if (hasTemperature)
 				printf("  %.1fC", temperature);
 
-			printf("  idle=%.0f%%  %.0fMHz\n", idleAverage,
+			printf("  idle=%.0f%%  %.0fMHz", idleAverage,
 				average_frequency(current, currentCount));
+			if (hasDelta) {
+				printf("  cpu=%.2fW  c6=%.0f%%", delta.packageWatt,
+					delta.packageC6);
+			}
+			printf("\n");
 			fflush(stdout);
 		}
 
