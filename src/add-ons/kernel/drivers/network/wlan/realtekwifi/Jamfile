@@ -59,6 +59,7 @@ KernelAddon realtekwifi :
 	rtwn_usb_tx.c
 
 	# sdio/
+	rtwn_sdio_attach.c
 	rtwn_sdio_reg.c
 	rtwn_sdio_rx.c
 	rtwn_sdio_tx.c
@@ -132,6 +133,7 @@ KernelAddon realtekwifi :
 	r8723b_rom.c
 
 	# rtl8723b/sdio/
+	r8723bs_attach.c
 	r8723bs_init.c
 
 	# rtl8812a/
