@@ -23,7 +23,7 @@
 #include <kernel.h>
 #include <smp.h>
 
-#include <intel_energy.h>
+#include "intel_energy.h"
 
 
 #define ERROR(x...)	dprintf("intel_energy: " x)

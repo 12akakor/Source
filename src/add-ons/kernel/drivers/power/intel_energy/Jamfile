@@ -4,7 +4,6 @@ SubDir HAIKU_TOP src add-ons kernel drivers power intel_energy ;
 
 SubDirC++Flags -fno-rtti ;
 
-UsePrivateHeaders device ;
 UsePrivateKernelHeaders ;
 
 KernelAddon intel_energy :
