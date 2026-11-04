@@ -31,7 +31,7 @@
 #include <OS.h>
 #include <scheduler.h>
 
-#include <intel_energy.h>
+#include "intel_energy.h"
 #include <power_managment.h>
 
 
