@@ -1548,8 +1548,8 @@ ieee80211_encap(struct ieee80211vap *vap, struct ieee80211_node *ni,
 	addqos =
 	    (((is_mcast == 0) && (ni->ni_flags &
 	     (IEEE80211_NODE_QOS|IEEE80211_NODE_HT))) ||
-	    (vap->iv_opmode == IEEE80211_M_MBSS));
-	/* test: QoS-encapsulated EAPOL (TID of AC_VO), as Linux sends it */
+	    (vap->iv_opmode == IEEE80211_M_MBSS)) &&
+	    (m->m_flags & M_EAPOL) == 0;
 
 	if (addqos)
 		hdrsize = sizeof(struct ieee80211_qosframe);
