@@ -51,6 +51,9 @@ private:
 	static	void				_UnstallCallback(void *cookie,
 									status_t status, void *data,
 									size_t actualLength);
+	static	status_t			_GetDescriptor(usb_device device, uint8 type,
+									size_t interfaceIndex, void* buffer,
+									size_t* length);
 
 private:
 			status_t			fStatus;
