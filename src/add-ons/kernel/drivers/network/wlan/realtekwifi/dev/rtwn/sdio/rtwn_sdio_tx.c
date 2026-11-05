@@ -175,28 +175,6 @@ rtwn_sdio_tx_start(struct rtwn_softc *sc, struct ieee80211_node *ni,
 	    howmany(length, 4));
 	error = sdio_write_bytes(uc->sc_func, addr, uc->sc_tx_buf, size, true);
 	if (error != 0) {
-		RTWN_DPRINTF(sc, RTWN_DEBUG_XMIT,
-		    "%s: no free pages in queue %d\n", __func__, queue);
-		return (error);
-	}
-
-	txd = (struct rtwn_tx_desc_common *)tx_desc;
-	txd->pktlen = htole16(m->m_pkthdr.len);
-	txd->offset = sc->txdesc_len;
-	txd->flags0 |= RTWN_FLAGS0_OWN;
-	rtwn_sdio_tx_checksum(txd);
-
-	rtwn_dump_tx_desc(sc, tx_desc);
-
-	memcpy(uc->sc_tx_buf, tx_desc, sc->txdesc_len);
-	m_copydata(m, 0, m->m_pkthdr.len,
-	    (caddr_t)(uc->sc_tx_buf + sc->txdesc_len));
-	memset(uc->sc_tx_buf + length, 0, size - length);
-
-	addr = RTWN_SDIO_ADDR(RTWN_SDIO_ADDR_TXFF_HIGH + queue,
-	    howmany(length, 4));
-	error = sdio_write_bytes(uc->sc_func, addr, uc->sc_tx_buf, size, true);
-	if (error != 0) {
 		device_printf(sc->sc_dev, "%s: writing %zu bytes to queue %d "
 		    "failed: %d\n", __func__, size, queue, error);
 		return (EIO);
