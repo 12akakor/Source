@@ -93,6 +93,34 @@ r8723bs_detach_private(struct rtwn_softc *sc)
 }
 
 
+/*
+ * Test only: after every channel switch (which also writes the TX power),
+ * set the BB and RF registers where the vendor driver on Android differs
+ * from ours while connected: TX power index (+3), CCK and OFDM settings,
+ * RF 0x51/0x52. To see whether the link gets better.
+ */
+static void
+r8723bs_test_set_chan(struct rtwn_softc *sc, struct ieee80211_channel *c)
+{
+	r92e_set_chan(sc, c);
+
+	rtwn_bb_write(sc, 0x82c, 0x0c000000);
+	rtwn_bb_write(sc, 0x908, 0x00000208);
+	rtwn_bb_write(sc, 0xa08, 0x8ccd8300);
+	rtwn_bb_write(sc, 0xc64, 0x7112848b);
+	rtwn_bb_write(sc, 0xd2c, 0xcc979175);
+	rtwn_bb_setbits(sc, 0x8e8, 0, 0x00080000);
+	rtwn_bb_write(sc, 0xe00, 0x31313131);
+	rtwn_bb_write(sc, 0xe04, 0x31313131);
+	rtwn_bb_write(sc, 0xe08, 0x03902d2d);
+	rtwn_bb_write(sc, 0xe10, 0x2f2f2f2f);
+	rtwn_bb_write(sc, 0xe14, 0x2f2f2f2f);
+	rtwn_bb_setbits(sc, 0x86c, 0xffffff00, 0x2d2d2d00);
+	rtwn_rf_write(sc, 0, 0x51, 0x6f10e);
+	rtwn_rf_write(sc, 0, 0x52, 0x007d3);
+}
+
+
 static void
 r8723bs_adj_devcaps(struct rtwn_softc *sc)
 {
@@ -111,7 +139,7 @@ r8723bs_attach(struct rtwn_sdio_softc *uc)
 	/* Common part. */
 	sc->sc_flags			= RTWN_FLAG_EXT_HDR;
 
-	sc->sc_set_chan			= r92e_set_chan;
+	sc->sc_set_chan			= r8723bs_test_set_chan;	/* test */
 	sc->sc_fill_tx_desc		= r12a_fill_tx_desc;
 	sc->sc_fill_tx_desc_raw		= r12a_fill_tx_desc_raw;
 	sc->sc_fill_tx_desc_null	= r12a_fill_tx_desc_null;
