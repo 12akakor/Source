@@ -26,7 +26,8 @@
 /*!	Reads a class descriptor of the interface. A transfer error is retried
 	a few times: on a busy or marginal bus (a low speed device behind a
 	full speed hub) a single GET_DESCRIPTOR can fail with a transaction
-	error, and the device would be lost for good.
+	error, and the device would be lost for good. The errors come in
+	bursts, so the pauses grow, up to 1.4 s in all.
 */
 /*static*/ status_t
 HIDDevice::_GetDescriptor(usb_device device, uint8 type, size_t interfaceIndex,
@@ -34,11 +35,12 @@ HIDDevice::_GetDescriptor(usb_device device, uint8 type, size_t interfaceIndex,
 {
 	const size_t requested = *length;
 	status_t result = B_ERROR;
-	for (int32 attempt = 0; attempt < 4; attempt++) {
+	for (int32 attempt = 0; attempt < 8; attempt++) {
 		if (attempt > 0) {
 			TRACE_ALWAYS("get descriptor 0x%02x failed: %s, retrying\n",
 				type, strerror(result));
-			snooze(10000);
+			// Errors tend to come in bursts; wait longer each time.
+			snooze(50000 * attempt);
 		}
 
 		*length = requested;
