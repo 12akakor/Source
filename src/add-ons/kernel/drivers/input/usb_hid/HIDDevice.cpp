@@ -23,6 +23,37 @@
 #include <new>
 
 
+/*!	Reads a class descriptor of the interface. A transfer error is retried
+	a few times: on a busy or marginal bus (a low speed device behind a
+	full speed hub) a single GET_DESCRIPTOR can fail with a transaction
+	error, and the device would be lost for good.
+*/
+/*static*/ status_t
+HIDDevice::_GetDescriptor(usb_device device, uint8 type, size_t interfaceIndex,
+	void* buffer, size_t* length)
+{
+	const size_t requested = *length;
+	status_t result = B_ERROR;
+	for (int32 attempt = 0; attempt < 4; attempt++) {
+		if (attempt > 0) {
+			TRACE_ALWAYS("get descriptor 0x%02x failed: %s, retrying\n",
+				type, strerror(result));
+			snooze(10000);
+		}
+
+		*length = requested;
+		result = gUSBModule->send_request(device,
+			USB_REQTYPE_INTERFACE_IN | USB_REQTYPE_STANDARD,
+			USB_REQUEST_GET_DESCRIPTOR, type << 8, interfaceIndex, requested,
+			buffer, length);
+		if (result == B_OK)
+			break;
+	}
+
+	return result;
+}
+
+
 HIDDevice::HIDDevice(usb_device device, const usb_configuration_info *config,
 	size_t interfaceIndex, int32 quirkyIndex)
 	:	fStatus(B_NO_INIT),
@@ -89,11 +120,9 @@ HIDDevice::HIDDevice(usb_device device, const usb_configuration_info *config,
 				return;
 			}
 
-			status_t result = gUSBModule->send_request(device,
-				USB_REQTYPE_INTERFACE_IN | USB_REQTYPE_STANDARD,
-				USB_REQUEST_GET_DESCRIPTOR,
-				B_USB_HID_DESCRIPTOR_HID << 8, interfaceIndex, descriptorLength,
-				hidDescriptor, &descriptorLength);
+			status_t result = _GetDescriptor(device,
+				B_USB_HID_DESCRIPTOR_HID, interfaceIndex, hidDescriptor,
+				&descriptorLength);
 
 			TRACE("get hid descriptor: result: 0x%08" B_PRIx32 "; length: %lu"
 				"\n", result, descriptorLength);
@@ -117,11 +146,9 @@ HIDDevice::HIDDevice(usb_device device, const usb_configuration_info *config,
 			return;
 		}
 
-		status_t result = gUSBModule->send_request(device,
-			USB_REQTYPE_INTERFACE_IN | USB_REQTYPE_STANDARD,
-			USB_REQUEST_GET_DESCRIPTOR,
-			B_USB_HID_DESCRIPTOR_REPORT << 8, interfaceIndex, descriptorLength,
-			reportDescriptor, &descriptorLength);
+		status_t result = _GetDescriptor(device,
+			B_USB_HID_DESCRIPTOR_REPORT, interfaceIndex, reportDescriptor,
+			&descriptorLength);
 
 		TRACE("get report descriptor: result: 0x%08" B_PRIx32 "; length: %"
 			B_PRIuSIZE "\n", result, descriptorLength);
