@@ -1256,6 +1256,12 @@ XHCI::SubmitControlRequest(Transfer *transfer)
 		return B_NOT_SUPPORTED;
 	}
 
+	// A control endpoint halted by a transaction error that FinishTransfers()
+	// did not recover (rate limit) would make this request wait for its
+	// timeout; see SubmitNormalRequest().
+	if (_GetEndpointState(endpoint) == ENDPOINT_STATE_HALTED)
+		_RecoverHaltedEndpoint(endpoint);
+
 	status_t status = transfer->InitKernelAccess();
 	if (status != B_OK)
 		return status;
@@ -4158,19 +4164,23 @@ XHCI::FinishTransfers()
 			// all on this thread. They keep the old path (the next transfer's
 			// timeout resets the endpoint).
 			//
-			// An interrupt endpoint is the exception: nothing ever times out
-			// there, so a single transaction error left it halted for good.
-			// A low speed keyboard behind a high speed hub on a Bay Trail
-			// xHCI stopped working after its first one. Recover those, but
-			// at most three times a second, so that an unplug cannot keep
-			// this thread busy.
+			// Interrupt and control endpoints are the exception. Nothing ever
+			// times out on an interrupt endpoint, so a single transaction
+			// error left it halted for good: a low speed keyboard behind a
+			// hub on a Bay Trail xHCI stopped working after its first one.
+			// On the control endpoint the next request, often a retry by the
+			// driver, waited for its timeout and failed: usb_hid lost the
+			// keyboard when one GET_DESCRIPTOR got a transaction error.
+			// Recover those, but at most three times a second, so that an
+			// unplug cannot keep this thread busy.
 			bool recover = completionCode == COMP_STALL
 				&& transfer->IsochronousData() == NULL;
 			xhci_endpoint* endpoint = (xhci_endpoint*)
 				transfer->TransferPipe()->ControllerCookie();
 			if (completionCode == COMP_USB_TRANSACTION && endpoint != NULL
 				&& (transfer->TransferPipe()->Type()
-					& USB_OBJECT_INTERRUPT_PIPE) != 0) {
+					& (USB_OBJECT_INTERRUPT_PIPE | USB_OBJECT_CONTROL_PIPE))
+						!= 0) {
 				const bigtime_t now = system_time();
 				if (now - endpoint->transactionRecoveryWindow > 1000000) {
 					endpoint->transactionRecoveryWindow = now;
