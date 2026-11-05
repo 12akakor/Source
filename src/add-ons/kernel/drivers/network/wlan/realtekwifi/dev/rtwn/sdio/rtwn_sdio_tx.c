@@ -166,6 +166,11 @@ rtwn_sdio_tx_start(struct rtwn_softc *sc, struct ieee80211_node *ni,
 
 	rtwn_dump_tx_desc(sc, tx_desc);
 
+	if (type == IEEE80211_FC0_TYPE_DATA) {	/* test */
+		uc->sc_test_last_txdw3 = le32toh(((uint32_t *)tx_desc)[3]);
+		uc->sc_test_last_txdw4 = le32toh(((uint32_t *)tx_desc)[4]);
+	}
+	uc->sc_test_tx++;	/* test */
 	memcpy(uc->sc_tx_buf, tx_desc, sc->txdesc_len);
 	m_copydata(m, 0, m->m_pkthdr.len,
 	    (caddr_t)(uc->sc_tx_buf + sc->txdesc_len));

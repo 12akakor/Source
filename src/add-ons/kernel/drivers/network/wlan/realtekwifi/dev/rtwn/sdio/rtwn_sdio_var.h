@@ -43,6 +43,15 @@ struct rtwn_sdio_softc {
 	thread_id		sc_poll_thread;
 	volatile bool		sc_poll_stop;
 
+	/* test: link statistics, logged by the poll thread */
+	uint32_t		sc_test_tx;
+	uint32_t		sc_test_tx_reports;
+	uint32_t		sc_test_tx_reports2;
+	uint32_t		sc_test_c2h;
+	uint32_t		sc_test_rx;
+	uint32_t		sc_test_last_txdw4;
+	uint32_t		sc_test_last_txdw3;
+
 	uint8_t			*sc_rx_buf;
 	uint8_t			*sc_tx_buf;
 
