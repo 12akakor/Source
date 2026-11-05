@@ -347,7 +347,7 @@ cpu_idle(void)
 		panic("cpu_idle() called with interrupts disabled.");
 #endif
 
-	if (sCPUIdleModule != NULL && atomic_get(&sDeepIdleBlocks) == 0)
+	if (sCPUIdleModule != NULL && !cpu_deep_idle_blocked())
 		sCPUIdleModule->cpuidle_idle();
 	else
 		arch_cpu_idle();
@@ -358,7 +358,7 @@ static void
 wake_up_cpu(void* /*cookie*/, int /*cpu*/)
 {
 	// Nothing to do: receiving the call is what takes the CPU out of its
-	// idle state. On its next pass through cpu_idle() it sees the block.
+	// idle state, or out of the preparation for it.
 }
 
 
@@ -369,6 +369,12 @@ wake_up_cpu(void* /*cookie*/, int /*cpu*/)
 	Needed on Intel Bay Trail and Cherry Trail: the P-Unit talks to the PMIC
 	over a shared I2C bus to enter C6 or C7. While a driver holds the P-Unit
 	semaphore of that bus, a CPU entering such a state hangs the SoC.
+
+	The check in cpu_idle() runs with interrupts enabled, so it only saves
+	work. A CPU can pass it, take the interrupt of call_all_cpus_sync() and
+	still enter a deep state; the cpuidle module therefore has to call
+	cpu_deep_idle_blocked() again where nothing can interrupt it any more,
+	right before it enters the state.
 
 	Returns when every CPU has left any state it was in.
 */
@@ -384,6 +390,19 @@ void
 cpu_unblock_deep_idle(void)
 {
 	atomic_add(&sDeepIdleBlocks, -1);
+}
+
+
+/*!	For the cpuidle modules: whether they must stay out of deep C-states.
+	The count is incremented before cpu_block_deep_idle() interrupts the
+	CPUs, so a module that calls this with interrupts disabled, or after it
+	has made sure that an interrupt takes it out of its preparation, sees
+	every block that cpu_block_deep_idle() waits for.
+*/
+bool
+cpu_deep_idle_blocked(void)
+{
+	return atomic_get(&sDeepIdleBlocks) != 0;
 }
 
 
