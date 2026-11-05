@@ -308,12 +308,12 @@ rtwn_sdio_poll_thread(void *arg)
 	struct rtwn_sdio_softc *uc = arg;
 	struct rtwn_softc *sc = &uc->sc_sc;
 
-	int ticks = 0;	/* test */
+	int statTicks = 0;	/* test */
 	while (!uc->sc_poll_stop) {
 		snooze(RTWN_SDIO_POLL_INTERVAL);
 
 		/* test: link statistics every 10 s */
-		if (++ticks % 200 == 0) {
+		if (++statTicks % 200 == 0) {
 			RTWN_LOCK(sc);
 			if (uc->sc_intr_enabled) {
 				device_printf(sc->sc_dev, "test: tx %u reports %u/%u "
