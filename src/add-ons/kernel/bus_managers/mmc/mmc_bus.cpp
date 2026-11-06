@@ -524,6 +524,30 @@ MMCBus::_ProbeSDIO()
 		"capabilities %02x, vendor %04x, device %04x\n", rca, revision,
 		specRevision, capability, vendor, device);
 
+	// A full speed card (LSC clear) supports the 4 bit bus, a low speed card
+	// only if it says so with 4BLS (6.9, Card Capability). The pull-up on
+	// CD/DAT3 must be off for the 4 bit bus and before CMD53 (6.9, Bus
+	// Interface Control).
+	const uint8_t kCapabilityLowSpeed = 1 << 6;
+	const uint8_t kCapabilityLowSpeed4Bit = 1 << 7;
+	if ((capability & kCapabilityLowSpeed) == 0
+		|| (capability & kCapabilityLowSpeed4Bit) != 0) {
+		const uint32_t kBusInterfaceControl = 0x07;
+		const uint8_t kCardDetectDisable = 1 << 7;
+		const uint8_t kBusWidth4 = 0x02;
+		uint8_t control = 0;
+		uint8_t result = 0;
+		if (_ReadDirect(rca, 0, kBusInterfaceControl, &control) == B_OK
+			&& DirectIO(rca, true, 0, kBusInterfaceControl,
+				(control & ~0x03) | kCardDetectDisable | kBusWidth4,
+				&result) == B_OK
+			&& (result & 0x03) == kBusWidth4) {
+			SetBusWidth(4);
+			TRACE_ALWAYS("SDIO card: 4 bit bus\n");
+		} else
+			ERROR("SDIO card: switching to the 4 bit bus failed\n");
+	}
+
 	for (uint8_t function = 1; function <= functions; function++) {
 		// FBR (6.10): the standard interface code is in the low nibble of
 		// the first byte, 0xF means it is in the extended code byte
