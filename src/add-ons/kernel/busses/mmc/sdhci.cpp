@@ -70,6 +70,7 @@ SdhciBus::SdhciBus(struct registers* registers, uint8_t irq, bool poll)
 	fBouncePhysical(0),
 	fTransferModeSelected(false),
 	fDataMode(kDataModePio),
+	fLastSdioFunction(1),
 	fStopMode(kStopModeSingle),
 	fReference(NULL),
 	fUseDataTransferMode(false),
@@ -754,7 +755,19 @@ SdhciBus::_AbortTransfer(const char* reason)
 	uint32 response = 0;
 	status_t status;
 	bool needStop = true;
-	if (fSelectedRca != 0) {
+	if (fCardType == CARD_TYPE_SDIO) {
+		// An SDIO card has no CMD13 or CMD12: the I/O abort is a CMD52
+		// write of the function number to the ASx bits of CCCR 06h (SDIO
+		// Simplified Specification 3.00, 4.9 and 6.9). The card accepts it
+		// after an error whatever its SDC capability says.
+		const uint32 kIoAbort = 0x06;
+		uint32 argument = (1u << 31) | (kIoAbort << 9)
+			| (fLastSdioFunction & 0x7);
+		status = ExecuteCommand(SDIO_IO_RW_DIRECT, argument, &response);
+		if (status != B_OK)
+			ERROR("abort: SDIO I/O abort failed: %s\n", strerror(status));
+		needStop = false;
+	} else if (fSelectedRca != 0) {
 		status = ExecuteCommand(SEND_STATUS, (uint32)fSelectedRca << 16,
 			&response);
 		if (status == B_OK) {
@@ -1582,9 +1595,20 @@ SdhciBus::TransferIO(uint32 argument, bool isWrite, void* buffer,
 	if (isWrite)
 		memcpy(fBounceBuffer, buffer, length);
 
+	fLastSdioFunction = (argument >> 28) & 0x7;
+
+	// Block mode transfers of more than one block use ADMA2. With PIO, a
+	// reader that comes late lets the controller stop SDCLK between the
+	// blocks; the RTL8723BS then answered with data CRC and end bit errors
+	// (int status 0x00608000) under load, and lost its receive state.
+	int dataMode = kDataModePio;
+	if (blockCount > 1 && fRegisters->capabilities.AdvancedDMA())
+		dataMode = kDataModeAdma2;
+
 	status_t status = _TransferChunk(SDIO_IO_RW_EXTENDED, argument,
-		blockCount, blockSize, isWrite, kDataModePio, kStopModeSingle,
-		fBouncePhysical, fBounceBuffer, kTransferTimeout);
+		blockCount, blockSize, isWrite, dataMode, kStopModeSingle,
+		fBouncePhysical, dataMode == kDataModePio ? fBounceBuffer : NULL,
+		kTransferTimeout);
 	if (status != B_OK) {
 		TRACE("CMD53 %08" B_PRIx32 " (%" B_PRIu32 " x %" B_PRIu32 ") failed: "
 			"%s\n", argument, blockCount, blockSize, strerror(status));
