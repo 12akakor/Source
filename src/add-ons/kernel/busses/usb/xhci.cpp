@@ -3249,8 +3249,12 @@ XHCI::HandleTransferComplete(xhci_trb* trb)
 		// enough to livelock the machine. Log a given completion code at most
 		// once per 100 ms, and say how many were folded in.
 		const bigtime_t now = system_time();
-		if (completionCode != fLastTransferErrorCode
+		static int32 sTransferErrorLogCount = 0;	// test: keep the log readable
+		if (atomic_get(&sTransferErrorLogCount) >= 100)
+			fSuppressedTransferErrors = 0;
+		else if (completionCode != fLastTransferErrorCode
 				|| now - fLastTransferErrorLog >= 100000) {
+			atomic_add(&sTransferErrorLogCount, 1);
 			if (fSuppressedTransferErrors > 0) {
 				TRACE_ALWAYS("(%" B_PRIu32 " further transfer errors "
 					"suppressed)\n", fSuppressedTransferErrors);
@@ -3958,8 +3962,11 @@ XHCI::_RecoverHaltedEndpoint(xhci_endpoint* endpoint)
 		return;
 	}
 
-	TRACE_ALWAYS("recovered halted endpoint %" B_PRIu32 " on slot %" B_PRIu8
-		"\n", (uint32)endpoint->id + 1, slot);
+	static int32 sRecoveredLogCount = 0;	// test: keep the log readable
+	if (atomic_add(&sRecoveredLogCount, 1) < 100) {
+		TRACE_ALWAYS("recovered halted endpoint %" B_PRIu32 " on slot %"
+			B_PRIu8 "\n", (uint32)endpoint->id + 1, slot);
+	}
 	Ring(slot, endpoint->id + 1);
 }
 

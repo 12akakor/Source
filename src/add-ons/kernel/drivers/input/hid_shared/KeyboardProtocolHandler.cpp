@@ -522,7 +522,9 @@ KeyboardProtocolHandler::_ReadReport(bigtime_t timeout, uint32 *cookie)
 		if (result != B_TIMED_OUT && result != B_BUSY) {
 			// we expect timeouts as we do repeat key handling this way,
 			// "busy" happens when other reports come in on the same endpoint
-			TRACE_ALWAYS("error waiting for report: %s\n", strerror(result));
+			static int32 sReportErrorLogCount = 0;	// test: keep the log readable
+			if (atomic_add(&sReportErrorLogCount, 1) < 100)
+				TRACE_ALWAYS("error waiting for report: %s\n", strerror(result));
 		}
 
 		// signal that we simply want to try again
