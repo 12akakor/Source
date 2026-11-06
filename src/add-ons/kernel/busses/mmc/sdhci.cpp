@@ -760,6 +760,20 @@ SdhciBus::_AbortTransfer(const char* reason)
 	status_t status;
 	bool needStop = true;
 	if (fCardType == CARD_TYPE_SDIO) {
+		// The card does not know about an error the host saw (a data CRC
+		// error, for example) and goes on sending the remaining blocks of a
+		// read. A command sent meanwhile is not seen correctly, and the card
+		// and host lose step. Wait until the card let go of DAT[3:0]
+		// (present state bits 23:20) first.
+		const uint32 kDataLevelsMask = 0xF << 20;
+		bigtime_t deadline = system_time() + 5000;
+		while ((fRegisters->present_state.Bits() & kDataLevelsMask)
+				!= kDataLevelsMask && system_time() < deadline) {
+			spin(10);
+		}
+		fRegisters->software_reset.ResetCommandAndDataLines();
+		fRegisters->interrupt_status = kClearableStatusBits;
+
 		// An SDIO card has no CMD13 or CMD12: the I/O abort is a CMD52
 		// write of the function number to the ASx bits of CCCR 06h (SDIO
 		// Simplified Specification 3.00, 4.9 and 6.9). The card accepts it
