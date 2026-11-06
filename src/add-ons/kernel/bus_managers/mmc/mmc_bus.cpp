@@ -24,6 +24,8 @@ MMCBus::MMCBus(device_node* node)
 	fInitialScanSignaled(false),
 	fInitialScanWaited(false),
 	fDeferRegistration(true),
+	fSdioRca(0),
+	fSdioHighSpeedSupported(false),
 	fPendingCount(0),
 	fActiveDevice(0),
 	fCardType(CARD_TYPE_UNKNOWN)
@@ -446,6 +448,44 @@ MMCBus::_ReadCISManufacturer(uint16_t rca, uint32_t cisPointer,
 	\c false if the card does not answer CMD5, so that it is probed as a
 	memory card.
 */
+/*!	Switches an SDIO card that supports it (SHS) to high speed: EHS in the
+	CCCR, then the host to high speed timing and 50MHz (SDIO Simplified
+	Specification 3.00, 6.9 and 12.1), as Linux does (mmc_sdio_switch_hs).
+*/
+void
+MMCBus::_SwitchSdioHighSpeed()
+{
+	if (!fSdioHighSpeedSupported)
+		return;
+	if (SetTiming(fSdioRca, MMC_TIMING_HS,
+			MMC_TIMING_QUERY | MMC_TIMING_NO_VERIFY) != B_OK) {
+		TRACE_ALWAYS("SDIO card: the host has no high speed\n");
+		return;
+	}
+
+	const uint32_t kBusSpeedSelect = 0x13;
+	const uint8_t kEnableHighSpeed = 1 << 1;
+	uint8_t speed = 0;
+	uint8_t result = 0;
+	if (_ReadDirect(fSdioRca, 0, kBusSpeedSelect, &speed) != B_OK
+		|| DirectIO(fSdioRca, true, 0, kBusSpeedSelect,
+			speed | kEnableHighSpeed, &result) != B_OK
+		|| (result & kEnableHighSpeed) == 0) {
+		ERROR("SDIO card: enabling high speed failed\n");
+		return;
+	}
+
+	if (SetTiming(fSdioRca, MMC_TIMING_HS, MMC_TIMING_NO_VERIFY) != B_OK) {
+		ERROR("SDIO card: host high speed timing failed, back to 25MHz\n");
+		DirectIO(fSdioRca, true, 0, kBusSpeedSelect,
+			speed & ~kEnableHighSpeed, &result);
+		SetClock(25000);
+		return;
+	}
+	TRACE_ALWAYS("SDIO card: high speed, 50MHz\n");
+}
+
+
 bool
 MMCBus::_ProbeSDIO()
 {
@@ -547,6 +587,14 @@ MMCBus::_ProbeSDIO()
 		} else
 			ERROR("SDIO card: switching to the 4 bit bus failed\n");
 	}
+
+	// SHS, bit 0 of the Bus Speed Select register (6.9)
+	const uint32_t kBusSpeedSelect = 0x13;
+	uint8_t speed = 0;
+	fSdioRca = rca;
+	fSdioHighSpeedSupported
+		= _ReadDirect(rca, 0, kBusSpeedSelect, &speed) == B_OK
+			&& (speed & 0x01) != 0;
 
 	for (uint8_t function = 1; function <= functions; function++) {
 		// FBR (6.10): the standard interface code is in the low nibble of
@@ -724,6 +772,7 @@ MMCBus::_WorkerThread(void* cookie)
 		// (SDIO Simplified Specification 3.00, figure 3-2)
 		if (bus->_ProbeSDIO()) {
 			bus->SetClock(25000);
+			bus->_SwitchSdioHighSpeed();
 			bus->_InitialScanDone();
 			bus->_AcquireScanSemaphore();
 			continue;

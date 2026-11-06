@@ -145,6 +145,8 @@ class SdhciBus {
 			bool				fTransferModeSelected;
 			int					fDataMode;
 			uint32				fLastSdioFunction;
+			bool				fSdioAdmaFailed;
+			uint32				fLastAdmaError;
 			int					fStopMode;
 			uint8*				fReference;
 				// First two blocks of the device as read by the self test,
