@@ -454,7 +454,9 @@ SdhciBus::ExecuteCommand(uint8_t command, uint32_t argument, uint32_t* response)
 		// meantime, without anybody having seen them.
 		fRegisters->interrupt_status = fCommandResult & kClearableStatusBits;
 		if (fCommandResult & SDHCI_INT_COMMAND_TIMEOUT) {
-			ERROR("Command execution timed out\n");
+			static int32 sTimeoutLogCount = 0;	// test: keep the log readable
+			if (atomic_add(&sTimeoutLogCount, 1) < 100)
+				ERROR("Command execution timed out\n");
 			// At this point, the "command inhibit" bit is not set yet, it will be set only after
 			// another command is sent while the controller is in the timeout state.
 			// But resetting the controller state pre-emptively will allow to send another command.
@@ -739,6 +741,8 @@ SdhciBus::_LogCardStatus(const char* when, uint32 status)
 void
 SdhciBus::_AbortTransfer(const char* reason)
 {
+	static int32 sAbortLogCount = 0;	// test: keep the log readable
+	if (atomic_add(&sAbortLogCount, 1) < 100)
 	ERROR("abort (%s): state %08" B_PRIx32 ", int status %08" B_PRIx32
 		", adma error %02x, auto cmd error %04x, host control %02x\n", reason,
 		fRegisters->present_state.Bits(), fRegisters->interrupt_status,
@@ -929,8 +933,17 @@ SdhciBus::_TransferChunk(uint8 command, uint32 argument, uint32 blockCount,
 		// cannot be lost by a status acknowledge, so check both.
 		const uint32 bufferEnableBit = isWrite ? (1 << 10) : (1 << 11);
 
+		// A multi-block CMD53 is read as fast as the blocks come: a reader
+		// that comes late lets the controller stop SDCLK between the blocks,
+		// and under load the RTL8723BS then answered with data CRC and end
+		// bit errors (int status 0x00608000). A block of 512 bytes takes
+		// about 160us on a single data line at 25MHz, so spin up to 2ms.
+		const bool spinForBlocks = command == SDIO_IO_RW_EXTENDED
+			&& blockCount > 1;
+
 		for (uint32 block = 0; block < blockCount; block++) {
 			bigtime_t deadline = system_time() + timeout;
+			bigtime_t spinUntil = spinForBlocks ? system_time() + 2000 : 0;
 			bigtime_t delay = 5;
 			while (true) {
 				uint32 live = fRegisters->interrupt_status;
@@ -943,9 +956,14 @@ SdhciBus::_TransferChunk(uint8 command, uint32 argument, uint32 blockCount,
 				if ((live & readyBit) != 0
 					|| (fRegisters->present_state.Bits() & bufferEnableBit) != 0)
 					break;
-				if (system_time() >= deadline) {
+				bigtime_t now = system_time();
+				if (now >= deadline) {
 					status = B_TIMED_OUT;
 					break;
+				}
+				if (now < spinUntil) {
+					spin(1);
+					continue;
 				}
 				snooze(delay);
 				if (delay < 1000)
@@ -1597,18 +1615,9 @@ SdhciBus::TransferIO(uint32 argument, bool isWrite, void* buffer,
 
 	fLastSdioFunction = (argument >> 28) & 0x7;
 
-	// Block mode transfers of more than one block use ADMA2. With PIO, a
-	// reader that comes late lets the controller stop SDCLK between the
-	// blocks; the RTL8723BS then answered with data CRC and end bit errors
-	// (int status 0x00608000) under load, and lost its receive state.
-	int dataMode = kDataModePio;
-	if (blockCount > 1 && fRegisters->capabilities.AdvancedDMA())
-		dataMode = kDataModeAdma2;
-
 	status_t status = _TransferChunk(SDIO_IO_RW_EXTENDED, argument,
-		blockCount, blockSize, isWrite, dataMode, kStopModeSingle,
-		fBouncePhysical, dataMode == kDataModePio ? fBounceBuffer : NULL,
-		kTransferTimeout);
+		blockCount, blockSize, isWrite, kDataModePio, kStopModeSingle,
+		fBouncePhysical, fBounceBuffer, kTransferTimeout);
 	if (status != B_OK) {
 		TRACE("CMD53 %08" B_PRIx32 " (%" B_PRIu32 " x %" B_PRIu32 ") failed: "
 			"%s\n", argument, blockCount, blockSize, strerror(status));
