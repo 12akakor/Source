@@ -768,7 +768,8 @@ SdhciBus::_AbortTransfer(const char* reason)
 		uint32 argument = (1u << 31) | (kIoAbort << 9)
 			| (fLastSdioFunction & 0x7);
 		status = ExecuteCommand(SDIO_IO_RW_DIRECT, argument, &response);
-		if (status != B_OK)
+		static int32 sIoAbortLogCount = 0;	// test: keep the log readable
+		if (status != B_OK && atomic_add(&sIoAbortLogCount, 1) < 100)
 			ERROR("abort: SDIO I/O abort failed: %s\n", strerror(status));
 		needStop = false;
 	} else if (fSelectedRca != 0) {
