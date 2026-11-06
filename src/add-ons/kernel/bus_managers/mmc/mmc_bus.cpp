@@ -699,7 +699,7 @@ MMCBus::_WorkerThread(void* cookie)
 		// An SDIO card answers CMD5; memory cards and eMMC devices do not
 		// (SDIO Simplified Specification 3.00, figure 3-2)
 		if (bus->_ProbeSDIO()) {
-			bus->SetClock(25000);
+			bus->SetClock(12500);
 			bus->_InitialScanDone();
 			bus->_AcquireScanSemaphore();
 			continue;
