@@ -52,7 +52,12 @@
 /* Stop reading after this many bytes to let other work in. */
 #define RTWN_SDIO_RX_BUDGET	(64 * 1024)
 /* Bytes per CMD53, whole blocks. */
-#define RTWN_SDIO_RX_CHUNK	4096
+/*
+ * Test: one block per CMD53. Multi-block reads of the RX FIFO gave data
+ * CRC and end bit errors (about one in a hundred, 1 and 4 bit bus alike),
+ * single block reads none.
+ */
+#define RTWN_SDIO_RX_CHUNK	RTWN_SDIO_BLOCK_SIZE
 /* How often rtwn_sdio_poll_thread() looks for a missed receive request. */
 #define RTWN_SDIO_POLL_INTERVAL	50000
 
