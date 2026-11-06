@@ -110,12 +110,6 @@ r8723bs_test_set_chan(struct rtwn_softc *sc, struct ieee80211_channel *c)
 	rtwn_bb_write(sc, 0xc64, 0x7112848b);
 	rtwn_bb_write(sc, 0xd2c, 0xcc979175);
 	rtwn_bb_setbits(sc, 0x8e8, 0, 0x00080000);
-	rtwn_bb_write(sc, 0xe00, 0x31313131);
-	rtwn_bb_write(sc, 0xe04, 0x31313131);
-	rtwn_bb_write(sc, 0xe08, 0x03902d2d);
-	rtwn_bb_write(sc, 0xe10, 0x2f2f2f2f);
-	rtwn_bb_write(sc, 0xe14, 0x2f2f2f2f);
-	rtwn_bb_setbits(sc, 0x86c, 0xffffff00, 0x2d2d2d00);
 	rtwn_rf_write(sc, 0, 0x51, 0x6f10e);
 	rtwn_rf_write(sc, 0, 0x52, 0x007d3);
 }
