@@ -23,6 +23,7 @@
 #include "acpi.h"
 
 #include <KernelExport.h>
+#include <cpu.h>
 
 #include "IOSchedulerSimple.h"
 #include "mmc.h"
@@ -1726,6 +1727,16 @@ void
 SdhciBus::SetCardType(card_type type)
 {
 	fCardType = type;
+
+	// Test: keep all CPUs out of C6/C7 for the whole session once an SDIO
+	// card is found, to see whether the CRC errors on the SDIO bus (about
+	// one CMD53 in 40) come from the package C-states.
+	static bool sDeepIdleBlocked = false;
+	if (type == CARD_TYPE_SDIO && !sDeepIdleBlocked) {
+		sDeepIdleBlocked = true;
+		cpu_block_deep_idle();
+		ERROR("test: deep idle blocked for the SDIO card\n");
+	}
 }
 
 
