@@ -49,6 +49,7 @@ struct rtwn_sdio_softc {
 	uint32_t		sc_test_tx_reports2;
 	uint32_t		sc_test_c2h;
 	uint32_t		sc_test_rx;
+	uint32_t		sc_test_rx_err;	/* test */
 	uint32_t		sc_test_last_txdw4;
 	uint32_t		sc_test_last_txdw3;
 

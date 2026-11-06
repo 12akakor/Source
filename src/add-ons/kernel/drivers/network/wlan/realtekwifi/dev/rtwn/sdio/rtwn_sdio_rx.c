@@ -239,6 +239,7 @@ rtwn_sdio_rx(struct rtwn_sdio_softc *uc)
 			size = RTWN_SDIO_RXBUFSZ;
 		}
 		if (rtwn_sdio_read_port(uc, uc->sc_rx_buf, size) != 0) {
+			uc->sc_test_rx_err++;	/* test */
 			counter_u64_add(sc->sc_ic.ic_ierrors, 1);
 			break;
 		}
@@ -319,14 +320,18 @@ rtwn_sdio_poll_thread(void *arg)
 				device_printf(sc->sc_dev, "test: tx %u reports %u/%u "
 				    "c2h %u rx %u, last data txdw3 %08x txdw4 %08x, "
 				    "RRSR %08x ARFR 0x444 %08x 0x448 %08x 0x44c %08x "
-				    "TXPAUSE %02x IGI %02x\n", uc->sc_test_tx,
+				    "TXPAUSE %02x IGI %02x rxerr %u HISR %08x RX0_REQ_LEN %u\n",
+				    uc->sc_test_tx,
 				    uc->sc_test_tx_reports, uc->sc_test_tx_reports2,
 				    uc->sc_test_c2h, uc->sc_test_rx,
 				    uc->sc_test_last_txdw3, uc->sc_test_last_txdw4,
 				    rtwn_read_4(sc, 0x440), rtwn_read_4(sc, 0x444),
 				    rtwn_read_4(sc, 0x448), rtwn_read_4(sc, 0x44c),
 				    rtwn_read_1(sc, 0x522),
-				    rtwn_bb_read(sc, 0xc50) & 0x7f);
+				    rtwn_bb_read(sc, 0xc50) & 0x7f,
+				    uc->sc_test_rx_err,
+				    rtwn_sdio_local_read_4(uc, RTWN_SDIO_HISR),
+				    rtwn_sdio_local_read_2(uc, RTWN_SDIO_RX0_REQ_LEN));
 			}
 			RTWN_UNLOCK(sc);
 		}
