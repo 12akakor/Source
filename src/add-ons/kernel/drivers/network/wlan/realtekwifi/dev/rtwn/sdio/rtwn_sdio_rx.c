@@ -319,13 +319,14 @@ rtwn_sdio_poll_thread(void *arg)
 				device_printf(sc->sc_dev, "test: tx %u reports %u/%u "
 				    "c2h %u rx %u, last data txdw3 %08x txdw4 %08x, "
 				    "RRSR %08x ARFR 0x444 %08x 0x448 %08x 0x44c %08x "
-				    "TXPAUSE %02x\n", uc->sc_test_tx,
+				    "TXPAUSE %02x IGI %02x\n", uc->sc_test_tx,
 				    uc->sc_test_tx_reports, uc->sc_test_tx_reports2,
 				    uc->sc_test_c2h, uc->sc_test_rx,
 				    uc->sc_test_last_txdw3, uc->sc_test_last_txdw4,
 				    rtwn_read_4(sc, 0x440), rtwn_read_4(sc, 0x444),
 				    rtwn_read_4(sc, 0x448), rtwn_read_4(sc, 0x44c),
-				    rtwn_read_1(sc, 0x522));
+				    rtwn_read_1(sc, 0x522),
+				    rtwn_bb_read(sc, 0xc50) & 0x7f);
 			}
 			RTWN_UNLOCK(sc);
 		}
