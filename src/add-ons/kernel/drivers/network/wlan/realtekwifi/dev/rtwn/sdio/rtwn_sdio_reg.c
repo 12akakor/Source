@@ -90,7 +90,8 @@ rtwn_sdio_read(struct rtwn_sdio_softc *uc, uint32_t addr, int len)
 	else
 		value = rtwn_sdio_read_bytewise(uc, addr, len, &err);
 
-	if (err != 0) {
+	static int sFailLogread = 0;	/* test: keep the log readable */
+	if (err != 0 && sFailLogread++ < 100) {
 		device_printf(uc->sc_sc.sc_dev, "read%d at %#x failed: %d\n",
 		    len * 8, addr, err);
 		return (0xffffffff);
@@ -112,7 +113,8 @@ rtwn_sdio_write(struct rtwn_sdio_softc *uc, uint32_t addr, uint32_t value,
 	else
 		err = rtwn_sdio_write_bytewise(uc, addr, value, len);
 
-	if (err != 0) {
+	static int sFailLogwrite = 0;	/* test: keep the log readable */
+	if (err != 0 && sFailLogwrite++ < 100) {
 		device_printf(uc->sc_sc.sc_dev, "write%d at %#x failed: %d\n",
 		    len * 8, addr, err);
 	}
