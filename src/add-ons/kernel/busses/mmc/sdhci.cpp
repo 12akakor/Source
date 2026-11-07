@@ -450,6 +450,28 @@ SdhciBus::ExecuteCommand(uint8_t command, uint32_t argument, uint32_t* response)
 
 	TRACE("Command response available\n");
 
+	// A data error that comes in while a command without a data phase runs
+	// belongs to a transfer that was given up on after an error (the card
+	// goes on sending for a moment). It says nothing about this command,
+	// which completed: Linux ignores such an interrupt too ("got data
+	// interrupt even though no data operation was in progress"). Failing
+	// the command made the driver lose the answer of a good CMD52.
+	const uint32 kCommandErrorBits = SDHCI_INT_COMMAND_TIMEOUT
+		| SDHCI_INT_COMMAND_CRC | SDHCI_INT_COMMAND_END_BIT
+		| SDHCI_INT_COMMAND_INDEX;
+	if (!dataCommand && (fCommandResult & SDHCI_INT_ERROR) != 0
+		&& (fCommandResult & SDHCI_INT_CMD_CMP) != 0
+		&& (fCommandResult & kCommandErrorBits) == 0) {
+		static int32 sStaleLogCount = 0;	// test: keep the log readable
+		if (atomic_add(&sStaleLogCount, 1) < 20) {
+			ERROR("command %d: ignoring stale data error %08" B_PRIx32 "\n",
+				command, fCommandResult);
+		}
+		fRegisters->interrupt_status = fCommandResult & kClearableStatusBits;
+		fRegisters->software_reset.ResetDataLine();
+		fCommandResult &= ~(SDHCI_INT_ERROR | kDataErrorBits);
+	}
+
 	if (fCommandResult & SDHCI_INT_ERROR) {
 		// TODO is it a good idea to clear interrupts here from outside the interrupt handler?
 		// Write-1-to-clear register: write only the bits to acknowledge. A
