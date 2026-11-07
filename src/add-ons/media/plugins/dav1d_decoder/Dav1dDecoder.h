@@ -48,9 +48,13 @@ private:
 									void* outBuffer, media_header* mh);
 	color_space					_Dav1dToColorspace(Dav1dPixelLayout layout,
 									int bitDepth) const;
-	void						_CopyPlane(uint8* dst, int dstStride,
+	void						_CopyPlane8(uint8* dst, int dstStride,
 									const uint8* src, int srcStride,
 									int width, int height);
+	void						_CopyPlane16(uint16* dst, int dstStride,
+									const uint16* src, int srcStride,
+									int width, int height);
+	void						_Log(const char* fmt, ...) const;
 
 	Dav1dContext*				fContext;
 	Dav1dSettings				fSettings;
@@ -58,11 +62,9 @@ private:
 	media_format				fInputFormat;
 	media_format				fOutputFormat;
 
-	// Current picture waiting to be consumed
 	Dav1dPicture				fPendingPicture;
 	bool						fHasPendingPicture;
 
-	// Input buffer management
 	const void*					fChunkData;
 	size_t						fChunkSize;
 	media_header				fChunkHeader;
@@ -70,9 +72,10 @@ private:
 	std::mutex					fLock;
 	std::atomic<bool>			fInitialized;
 
-	// Performance / diagnostics
 	uint64						fFramesDecoded;
+	uint64						fBytesFed;
 	bigtime_t					fLastDecodeTime;
+	bool						fDebug;
 };
 
 #endif // DAV1D_DECODER_H
