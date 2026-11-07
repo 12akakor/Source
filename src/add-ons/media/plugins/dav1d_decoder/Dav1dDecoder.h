@@ -26,7 +26,6 @@ public:
 								Dav1dDecoder();
 	virtual						~Dav1dDecoder();
 
-	// Decoder interface
 	virtual void				GetCodecInfo(media_codec_info* info);
 	virtual status_t			Setup(media_format* inputFormat,
 									const void* info, size_t infoSize);
@@ -35,24 +34,23 @@ public:
 									media_header* mh, media_decode_info* info);
 	virtual status_t			Seek(uint32 seekTo, int64 seekFrame,
 									int64* frame, bigtime_t* time);
-	virtual status_t			GetNextChunk(const void** chunkData,
-									size_t* chunkSize, media_header* mediaHeader);
 
 private:
 	status_t					_InitDav1d();
 	void						_ShutdownDav1d();
-	status_t					_FeedData(const void* data, size_t size,
-									int64 startTime, int64 duration);
-	status_t					_GetPicture(Dav1dPicture* picture);
-	void						_PictureToBuffer(const Dav1dPicture& picture,
+	void						_FlushInput();
+	status_t					_FeedInput(const void* data, size_t size,
+									int64 startTime);
+	status_t					_DrainPicture(Dav1dPicture* outPicture);
+	status_t					_PictureToBuffer(const Dav1dPicture& picture,
 									void* outBuffer, media_header* mh);
-	color_space					_Dav1dToColorspace(Dav1dPixelLayout layout,
+	color_space					_ColorspaceFor(Dav1dPixelLayout layout,
 									int bitDepth) const;
-	void						_CopyPlane8(uint8* dst, int dstStride,
-									const uint8* src, int srcStride,
+	static void					_CopyPlane8(uint8* dst, ptrdiff_t dstStride,
+									const uint8* src, ptrdiff_t srcStride,
 									int width, int height);
-	void						_CopyPlane16(uint16* dst, int dstStride,
-									const uint16* src, int srcStride,
+	static void					_CopyPlane16(uint16* dst, ptrdiff_t dstStride,
+									const uint16* src, ptrdiff_t srcStride,
 									int width, int height);
 	void						_Log(const char* fmt, ...) const;
 
@@ -61,20 +59,19 @@ private:
 
 	media_format				fInputFormat;
 	media_format				fOutputFormat;
+	bool						fOutputFormatKnown;
 
 	Dav1dPicture				fPendingPicture;
 	bool						fHasPendingPicture;
 
-	const void*					fChunkData;
-	size_t						fChunkSize;
-	media_header				fChunkHeader;
+	Dav1dData					fPendingInput;
+	bool						fHasPendingInput;
 
 	std::mutex					fLock;
 	std::atomic<bool>			fInitialized;
 
 	uint64						fFramesDecoded;
 	uint64						fBytesFed;
-	bigtime_t					fLastDecodeTime;
 	bool						fDebug;
 };
 
