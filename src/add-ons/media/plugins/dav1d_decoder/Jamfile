@@ -1,0 +1,29 @@
+## Haiku / RenkuOS Jamfile for dav1d Media Kit decoder add-on
+##
+## Place this directory under:
+##   src/add-ons/media/plugins/dav1d_decoder/
+##
+## Requires libdav1d (from RenkuOSPorts / HaikuPorts).
+
+SubDir HAIKU_TOP src add-ons media plugins dav1d_decoder ;
+
+UseLibraryHeaders dav1d ;
+UseHeaders [ FDirName $(HAIKU_TOP) headers private media ] : true ;
+
+local architectureObject ;
+for architectureObject in [ MultiArchSubDirSetup ] {
+	on $(architectureObject) {
+
+		local commonObjectList = Dav1dDecoder.cpp dav1d_decoder.cpp ;
+
+		Addon dav1d_decoder
+			: $(commonObjectList)
+			: be media dav1d
+			;
+
+		# Install into the media plugins directory
+		MakeLocate dav1d_decoder
+			: [ FDirName $(HAIKU_ADD_ONS_DIR) media plugins ]
+			;
+	}
+}
