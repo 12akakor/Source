@@ -787,14 +787,39 @@ SdhciBus::_AbortTransfer(const char* reason)
 		// read. A command sent meanwhile is not seen correctly, and the card
 		// and host lose step. Wait until the card let go of DAT[3:0]
 		// (present state bits 23:20) first.
-		const uint32 kDataLevelsMask = 0xF << 20;
+		// Only DAT0 (present state bit 20) tells that the card stopped
+		// sending: DAT1 is also the card interrupt line in 4 bit mode and is
+		// low whenever the card has something to report. Intel erratum
+		// VLT7 asks for 128us between an error interrupt and a software
+		// reset.
+		const uint32 kData0Level = 1 << 20;
 		bigtime_t deadline = system_time() + 5000;
-		while ((fRegisters->present_state.Bits() & kDataLevelsMask)
-				!= kDataLevelsMask && system_time() < deadline) {
+		spin(150);
+		while ((fRegisters->present_state.Bits() & kData0Level) == 0
+				&& system_time() < deadline) {
 			spin(10);
 		}
 		fRegisters->software_reset.ResetCommandAndDataLines();
 		fRegisters->interrupt_status = kClearableStatusBits;
+
+		// The controller must be out of the transfer: after the abort a
+		// next command (a CMD52) was seen to fail with the data inhibit and
+		// read transfer active bits (0x202) still set. Reset again until
+		// they are clear.
+		const uint32 kTransferBits = (1 << 1) | (1 << 2) | (1 << 9) | (1 << 8);
+		for (int attempt = 0; attempt < 3
+				&& (fRegisters->present_state.Bits() & kTransferBits) != 0;
+				attempt++) {
+			spin(150);
+			fRegisters->software_reset.ResetCommandAndDataLines();
+			fRegisters->interrupt_status = kClearableStatusBits;
+		}
+		static int32 sDirtyLogCount = 0;
+		if ((fRegisters->present_state.Bits() & kTransferBits) != 0
+				&& atomic_add(&sDirtyLogCount, 1) < 20) {
+			ERROR("abort: transfer state %08" B_PRIx32 " after reset\n",
+				fRegisters->present_state.Bits());
+		}
 
 		// No command to the card: like Linux, only the host lines are
 		// reset. An I/O abort (CCCR 06h) stopped the RTL8723BS in the
