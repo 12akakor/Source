@@ -164,6 +164,7 @@ class SdhciBus {
 			// SDIO card interrupt
 			void				(*fCardInterruptHandler)(void*);
 			void*				fCardInterruptCookie;
+			spinlock			fCardInterruptLock;
 };
 
 
