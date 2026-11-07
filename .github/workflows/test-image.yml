@@ -1,0 +1,191 @@
+name: test-image
+
+# Manual test builds for feature branches.
+# Produces a bootable anyboot ISO as a downloadable artifact.
+# Does NOT publish a release and does NOT run on pull_request.
+on:
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: 'Architecture to build'
+        type: choice
+        options:
+          - x86_64
+          - x86_gcc2h
+        default: x86_64
+
+permissions:
+  contents: read
+  packages: read
+  actions: read
+
+concurrency:
+  group: test-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build ${{ inputs.arch || 'x86_64' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Resolve matrix values
+        id: m
+        run: |
+          set -euo pipefail
+          ARCH="${{ inputs.arch || 'x86_64' }}"
+          case "${ARCH}" in
+            x86_64)
+              echo "arch=x86_64" >> "$GITHUB_OUTPUT"
+              echo "packaging=x86_64" >> "$GITHUB_OUTPUT"
+              echo "triple=x86_64-unknown-haiku" >> "$GITHUB_OUTPUT"
+              echo "secondary=" >> "$GITHUB_OUTPUT"
+              echo "secondary_triple=" >> "$GITHUB_OUTPUT"
+              ;;
+            x86_gcc2h)
+              echo "arch=x86_gcc2h" >> "$GITHUB_OUTPUT"
+              echo "packaging=x86_gcc2" >> "$GITHUB_OUTPUT"
+              echo "triple=i586-pc-haiku" >> "$GITHUB_OUTPUT"
+              echo "secondary=x86" >> "$GITHUB_OUTPUT"
+              echo "secondary_triple=i586-pc-haiku" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::unknown arch ${ARCH}"
+              exit 1
+              ;;
+          esac
+
+      - name: Resolve toolchain image
+        id: img
+        run: |
+          set -euo pipefail
+          if [ -f .github/toolchain.pin ]; then . .github/toolchain.pin; fi
+          # Prefer the official RenkuOS cross-compiler image when available.
+          # Fall back to the fork owner's GHCR namespace.
+          OWNER="$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
+          TAG="${{ steps.m.outputs.arch }}-${BUILDTOOLS_REV:-master}"
+          PRIMARY="ghcr.io/renkuos/cross-compiler:${TAG}"
+          FALLBACK="ghcr.io/${OWNER}/cross-compiler:${TAG}"
+          if docker manifest inspect "${PRIMARY}" >/dev/null 2>&1; then
+            echo "image=${PRIMARY}" >> "$GITHUB_OUTPUT"
+            echo "Using official RenkuOS toolchain: ${PRIMARY}"
+          else
+            echo "image=${FALLBACK}" >> "$GITHUB_OUTPUT"
+            echo "Using fallback toolchain: ${FALLBACK}"
+          fi
+
+      - name: Cache dependency packages
+        uses: actions/cache@v4
+        with:
+          path: generated.${{ steps.m.outputs.arch }}/download
+          key: hpkg-${{ steps.m.outputs.arch }}-${{ hashFiles(format('build/jam/repositories/HaikuPorts/{0}', steps.m.outputs.packaging)) }}
+          restore-keys: |
+            hpkg-${{ steps.m.outputs.arch }}-
+
+      - name: Brand the build
+        id: brand
+        run: |
+          set -euo pipefail
+          BUILD="test$(printf '%05d' "${{ github.run_number }}")"
+          BRANCH="${GITHUB_REF_NAME}"
+          SHORT_SHA="$(git rev-parse --short=7 HEAD)"
+          REV="$(git describe --dirty --tags --match='hrev*' --abbrev=1 2>/dev/null \
+                 | sed 's/-g[0-9a-z]\+//' | sed 's/-/+/g' || true)"
+          if [ -z "${REV}" ]; then
+            REV="hrev-test+${SHORT_SHA}"
+          fi
+          cat > build/jam/UserBuildConfig <<EOF
+          HAIKU_IMAGE_LABEL = "RenkuOS-test" ;
+          HAIKU_REVISION = "${REV}" ;
+          RENKUOS_BUILD = "${BUILD}" ;
+          EOF
+          echo "HAIKU_REVISION=${REV}" >> "$GITHUB_ENV"
+          echo "HAIKU_IMAGE_LABEL=RenkuOS-test" >> "$GITHUB_ENV"
+          echo "RENKUOS_BUILD=${BUILD}" >> "$GITHUB_ENV"
+          echo "build=${BUILD}" >> "$GITHUB_OUTPUT"
+          echo "revision=${REV}" >> "$GITHUB_OUTPUT"
+          echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+          echo "Build ${BUILD} on branch ${BRANCH} (${SHORT_SHA}), revision ${REV}"
+          cat build/jam/UserBuildConfig
+
+      - name: Configure and build
+        env:
+          IMAGE: ${{ steps.img.outputs.image }}
+          ARCH: ${{ steps.m.outputs.arch }}
+          PACKAGING: ${{ steps.m.outputs.packaging }}
+          TRIPLE: ${{ steps.m.outputs.triple }}
+          SECONDARY: ${{ steps.m.outputs.secondary }}
+          SECONDARY_TRIPLE: ${{ steps.m.outputs.secondary_triple }}
+        run: |
+          set -euo pipefail
+          docker run --rm -v "${PWD}:/src" -w /src \
+            -e ARCH -e PACKAGING -e TRIPLE -e SECONDARY -e SECONDARY_TRIPLE \
+            -e HOME=/tmp -e TERM=dumb \
+            -e HAIKU_REVISION -e HAIKU_IMAGE_LABEL -e RENKUOS_BUILD \
+            "${IMAGE}" \
+            bash -euo pipefail -c '
+              git config --global --add safe.directory /src
+              printf "tries = 10\nwaitretry = 5\ntimeout = 60\nretry_connrefused = on\n" > /tmp/.wgetrc
+              mkdir -p "generated.${ARCH}"
+              cd "generated.${ARCH}"
+              set -- --cross-tools-prefix "/tools/cross-tools-${PACKAGING}/bin/${TRIPLE}-"
+              if [ -n "${SECONDARY}" ]; then
+                set -- "$@" --cross-tools-prefix \
+                  "/tools/cross-tools-${SECONDARY}/bin/${SECONDARY_TRIPLE}-"
+              fi
+              ../configure "$@" --distro-compatibility default
+              jam -q -j"$(nproc)" @nightly-anyboot
+            '
+
+      - name: Restore ownership
+        if: always()
+        run: sudo chown -R "$(id -u):$(id -g)" . || true
+
+      - name: Name and checksum the image
+        id: iso
+        run: |
+          set -euo pipefail
+          SRC="$(find "generated.${{ steps.m.outputs.arch }}" -maxdepth 1 -name '*anyboot*.iso' | head -1)"
+          if [ -z "${SRC}" ]; then
+            echo "::error::No anyboot ISO produced"
+            find "generated.${{ steps.m.outputs.arch }}" -maxdepth 2 -type f | head -50
+            exit 1
+          fi
+          NAME="RenkuOS-${{ steps.m.outputs.arch }}-${{ steps.brand.outputs.date }}-${{ steps.brand.outputs.build }}-${{ steps.brand.outputs.sha }}.iso"
+          mkdir -p out
+          mv "${SRC}" "out/${NAME}"
+          ( cd out && sha256sum "${NAME}" > "${NAME}.sha256" )
+          echo "name=${NAME}" >> "$GITHUB_OUTPUT"
+          echo "size=$(du -h "out/${NAME}" | cut -f1)" >> "$GITHUB_OUTPUT"
+          ls -lh out/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: test-image-${{ steps.m.outputs.arch }}-${{ steps.brand.outputs.build }}
+          path: out/
+          retention-days: 7
+          compression-level: 0
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Test image"
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Branch | \`${{ steps.brand.outputs.branch }}\` |"
+            echo "| Commit | \`${{ steps.brand.outputs.sha }}\` |"
+            echo "| Build | \`${{ steps.brand.outputs.build }}\` |"
+            echo "| Revision | \`${{ steps.brand.outputs.revision }}\` |"
+            echo "| Image | ${{ steps.iso.outputs.name || 'not produced' }} (${{ steps.iso.outputs.size || '-' }}) |"
+            echo ""
+            echo "Download the artifact, write it to a USB stick (dd / Etcher / Rufus), and boot."
+            echo "This is a **test image only** — not for distribution."
+          } >> "$GITHUB_STEP_SUMMARY"
