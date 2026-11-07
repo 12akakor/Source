@@ -804,23 +804,17 @@ SdhciBus::_AbortTransfer(const char* reason)
 	status_t status;
 	bool needStop = true;
 	if (fCardType == CARD_TYPE_SDIO) {
-		// The card does not know about an error the host saw (a data CRC
-		// error, for example) and goes on sending the remaining blocks of a
-		// read. A command sent meanwhile is not seen correctly, and the card
-		// and host lose step. Wait until the card let go of DAT[3:0]
-		// (present state bits 23:20) first.
-		// Only DAT0 (present state bit 20) tells that the card stopped
-		// sending: DAT1 is also the card interrupt line in 4 bit mode and is
-		// low whenever the card has something to report. Intel erratum
-		// VLT7 asks for 128us between an error interrupt and a software
-		// reset.
-		const uint32 kData0Level = 1 << 20;
-		bigtime_t deadline = system_time() + 5000;
-		spin(150);
-		while ((fRegisters->present_state.Bits() & kData0Level) == 0
-				&& system_time() < deadline) {
-			spin(10);
-		}
+		// The card does not know that the host gave up and goes on sending
+		// the remaining blocks of the read, with gaps between them (DAT0 is
+		// high in those gaps, so it cannot tell when the card is done: DAT1
+		// is also the card interrupt line). A command sent meanwhile gets
+		// the tail of the old transfer as its data and fails with a stale
+		// data end bit error (seen 80 times in a session, always on the
+		// command after an aborted multi-block read). Let the card finish:
+		// 6 blocks of 512 bytes take about 130us on the bus. Intel erratum
+		// VLT7 also asks for 128us between an error interrupt and a
+		// software reset.
+		snooze(2000);
 		fRegisters->software_reset.ResetCommandAndDataLines();
 		fRegisters->interrupt_status = kClearableStatusBits;
 
