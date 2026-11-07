@@ -115,6 +115,7 @@ class SdhciBus {
 									uint32 blockCount, int dataMode,
 									int stopMode, phys_addr_t physical,
 									uint8* buffer, bigtime_t timeout);
+			void				_DumpRegisters(const char* when);
 			void				_AbortTransfer(const char* reason);
 			void				_LogCardStatus(const char* when,
 									uint32 status);

@@ -741,10 +741,29 @@ SdhciBus::_LogCardStatus(const char* when, uint32 status)
 	example still streaming an open ended multiple block read), DAT0 stays
 	low, and every following command fails.
 */
+/*!	Diagnostics (TEST): logs all standard SDHCI registers, 32 bits at a time,
+	to compare the controller setup with what Linux sdhci-acpi ends up with.
+*/
+void
+SdhciBus::_DumpRegisters(const char* when)
+{
+	volatile uint32* base = (volatile uint32*)fRegisters;
+	dprintf("sdhci regs (%s):\n", when);
+	for (uint32 offset = 0; offset < 0x100; offset += 0x10) {
+		dprintf("sdhci %02x: %08" B_PRIx32 " %08" B_PRIx32 " %08" B_PRIx32
+			" %08" B_PRIx32 "\n", (unsigned)offset, base[offset / 4],
+			base[offset / 4 + 1], base[offset / 4 + 2], base[offset / 4 + 3]);
+	}
+}
+
+
 void
 SdhciBus::_AbortTransfer(const char* reason)
 {
 	static int32 sAbortLogCount = 0;	// test: keep the log readable
+	static int32 sAbortDumpCount = 0;
+	if (fCardType == CARD_TYPE_SDIO && atomic_add(&sAbortDumpCount, 1) < 2)
+		_DumpRegisters("at first transfer error");
 	if (atomic_add(&sAbortLogCount, 1) < 100)
 	ERROR("abort (%s): state %08" B_PRIx32 ", int status %08" B_PRIx32
 		", adma error %02x, auto cmd error %04x, host control %02x\n", reason,
@@ -1528,6 +1547,9 @@ SdhciBus::SetTiming(int timing, uint32 flags)
 		if (status != B_OK)
 			return status;
 	}
+
+	if (fCardType == CARD_TYPE_SDIO)
+		_DumpRegisters(name);
 
 	if ((flags & MMC_TIMING_NO_VERIFY) != 0)
 		return B_OK;
