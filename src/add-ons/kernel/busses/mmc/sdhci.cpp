@@ -765,22 +765,41 @@ SdhciBus::_AbortTransfer(const char* reason)
 	if (fCardType == CARD_TYPE_SDIO) {
 		// The card does not know about an error the host saw (a data CRC
 		// error, for example) and goes on sending the remaining blocks of a
-		// read. A command sent meanwhile is not seen correctly, and the card
-		// and host lose step. Wait until the card let go of DAT[3:0]
-		// (present state bits 23:20) first.
+		// read, holding DAT[3:0] (present state bits 23:20). Every command
+		// sent meanwhile fails, and the RTL8723BS ended up receiving
+		// nothing. Normally it finishes within a few blocks; if it does
+		// not, stop it with the I/O abort (CCCR 06h, the function number in
+		// ASx), which the card accepts during a transfer (SDIO Simplified
+		// Specification 3.00, 4.9.1). An abort sent to an idle card left
+		// the RTL8723BS in the middle of a receive request, so only then.
 		const uint32 kDataLevelsMask = 0xF << 20;
-		bigtime_t deadline = system_time() + 5000;
+		bigtime_t deadline = system_time() + 500;
 		while ((fRegisters->present_state.Bits() & kDataLevelsMask)
 				!= kDataLevelsMask && system_time() < deadline) {
 			spin(10);
 		}
+		if ((fRegisters->present_state.Bits() & kDataLevelsMask)
+				!= kDataLevelsMask) {
+			const uint32 kIoAbort = 0x06;
+			uint32 argument = (1u << 31) | (kIoAbort << 9)
+				| (fLastSdioFunction & 0x7);
+			status = ExecuteCommand(SDIO_IO_RW_DIRECT, argument, &response);
+			deadline = system_time() + 5000;
+			while ((fRegisters->present_state.Bits() & kDataLevelsMask)
+					!= kDataLevelsMask && system_time() < deadline) {
+				spin(10);
+			}
+			static int32 sIoAbortCount = 0;
+			int32 count = atomic_add(&sIoAbortCount, 1) + 1;
+			if (count <= 100) {
+				ERROR("SDIO: card held DAT after the error, I/O abort %s, "
+					"DAT now %" B_PRIx32 " (%" B_PRId32 " so far)\n",
+					status == B_OK ? "sent" : "failed",
+					(fRegisters->present_state.Bits() >> 20) & 0xF, count);
+			}
+		}
 		fRegisters->software_reset.ResetCommandAndDataLines();
 		fRegisters->interrupt_status = kClearableStatusBits;
-
-		// No command to the card: like Linux, only the host lines are
-		// reset. An I/O abort (CCCR 06h) stopped the RTL8723BS in the
-		// middle of a receive request, after which it received nothing
-		// any more.
 		needStop = false;
 	} else if (fSelectedRca != 0) {
 		status = ExecuteCommand(SEND_STATUS, (uint32)fSelectedRca << 16,
