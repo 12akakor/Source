@@ -234,7 +234,8 @@ r8723bs_antenna_wlan_only(struct rtwn_softc *sc)
 
 
 /*!	Receive DMA timer masking: clear bits 2:0 of TX_CTRL and the timeout
-	in its upper half, as rtw88 does after the PHY setup.
+	in its upper half and set ALWAYS_RECOGNIZE, as rtw88 does after the PHY
+	setup.
 */
 void
 r8723bs_post_init(struct rtwn_softc *sc)
@@ -249,8 +250,13 @@ r8723bs_post_init(struct rtwn_softc *sc)
 	/* IQ calibration, as the vendor driver does at init. */
 	r8723b_iq_calib(sc);
 
+	/*
+	 * rtw88 also sets bit 4 (ALWAYS_RECOGNIZE) of TX_CTRL, for the
+	 * RTL8723BS only (rtw_sdio_enable_interrupt()).
+	 */
 	value = rtwn_sdio_local_read_4(uc, RTWN_SDIO_TX_CTRL);
-	rtwn_sdio_local_write_4(uc, RTWN_SDIO_TX_CTRL, value & 0x0000fff8);
+	rtwn_sdio_local_write_4(uc, RTWN_SDIO_TX_CTRL,
+	    (value & 0x0000fff8) | (1 << 4));
 
 	/* MAC Tx/Rx, security and the 32K calibration timer. */
 	rtwn_setbits_2(sc, R92C_CR, 0, 0x06ff);
