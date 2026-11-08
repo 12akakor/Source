@@ -61,7 +61,8 @@ enum sdhci_stop_mode {
 
 class SdhciBus {
 	public:
-								SdhciBus(struct registers* registers, uint8_t irq, bool poll);
+								SdhciBus(struct registers* registers, uint8_t irq, bool poll,
+									bool intelSdioSlot = false);
 								~SdhciBus();
 
 			void				EnableInterrupts(uint32_t mask);
@@ -132,6 +133,7 @@ class SdhciBus {
 			status_t			fStatus;
 			thread_id			fWorkerThread;
 			card_type			fCardType;
+			bool					fIntelSdioSlot;
 
 			// Page 0 holds the ADMA2 descriptor table, page 1 is a bounce
 			// buffer for the self test and for ReadData(). Both are

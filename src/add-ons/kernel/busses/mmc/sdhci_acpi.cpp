@@ -73,6 +73,20 @@ init_bus_acpi(device_node* node, void** bus_cookie)
 	device_node* acpiParent = gDeviceManager->get_parent_node(parent);
 	gDeviceManager->get_driver(acpiParent, (driver_module_info**)&acpi,
 			(void**)&device);
+	// The SDIO slot of the Bay Trail tablets (ACPI INT33BB, UID 2)
+	const char* hid = NULL;
+	const char* uid = NULL;
+	bool intelSdioSlot = false;
+	device_node* candidates[] = { parent, acpiParent };
+	for (size_t i = 0; i < 2 && !intelSdioSlot; i++) {
+		if (gDeviceManager->get_attr_string(candidates[i], ACPI_DEVICE_HID_ITEM,
+				&hid, false) == B_OK
+			&& gDeviceManager->get_attr_string(candidates[i],
+				ACPI_DEVICE_UID_ITEM, &uid, false) == B_OK) {
+			intelSdioSlot = strcmp(hid, "INT33BB") == 0
+				&& strcmp(uid, "2") == 0;
+		}
+	}
 	gDeviceManager->put_node(acpiParent);
 	gDeviceManager->put_node(parent);
 
@@ -120,7 +134,8 @@ init_bus_acpi(device_node* node, void** bus_cookie)
 	uint8_t irq = crs.irq;
 	TRACE("irq interrupt line: %d\n", irq);
 
-	SdhciBus* bus = new(std::nothrow) SdhciBus(_regs, irq, true);
+	SdhciBus* bus = new(std::nothrow) SdhciBus(_regs, irq, true,
+		intelSdioSlot);
 
 	status_t status = B_NO_MEMORY;
 	if (bus != NULL)

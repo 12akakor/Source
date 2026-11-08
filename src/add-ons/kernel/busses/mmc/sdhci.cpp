@@ -57,12 +57,14 @@ sdhci_generic_interrupt(void* data)
 }
 
 
-SdhciBus::SdhciBus(struct registers* registers, uint8_t irq, bool poll)
+SdhciBus::SdhciBus(struct registers* registers, uint8_t irq, bool poll,
+	bool intelSdioSlot)
 	:
 	fRegisters(registers),
 	fIrq(irq),
 	fWorkerThread(0),
 	fCardType(CARD_TYPE_UNKNOWN),
+	fIntelSdioSlot(intelSdioSlot),
 	fDmaArea(-1),
 	fDmaDescriptors(NULL),
 	fDmaDescriptorsPhysical(0),
@@ -1823,7 +1825,14 @@ SdhciBus::PowerOn()
 	}
 
 	uint8_t supportedVoltages = fRegisters->capabilities.SupportedVoltages();
-	if ((supportedVoltages & Capabilities::k3v3) != 0)
+	if (fIntelSdioSlot && (supportedVoltages & Capabilities::k1v8) != 0) {
+		// TEST: the Intel Android kernel (sdhci-acpi, SDHCI_QUIRK2_FAKE_VDD)
+		// runs the Bay Trail SDIO slot with the 1.8V bus power setting:
+		// the Wi-Fi module sits on a 1.8V rail. The pads of the controller
+		// follow this setting.
+		fRegisters->power_control.SetVoltage(PowerControl::k1v8);
+		ERROR("SDIO slot: bus power set to 1.8V\n");
+	} else if ((supportedVoltages & Capabilities::k3v3) != 0)
 		fRegisters->power_control.SetVoltage(PowerControl::k3v3);
 	else if ((supportedVoltages & Capabilities::k3v0) != 0)
 		fRegisters->power_control.SetVoltage(PowerControl::k3v0);
