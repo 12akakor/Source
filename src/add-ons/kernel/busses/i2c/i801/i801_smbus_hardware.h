@@ -42,6 +42,11 @@
 
 #define SMB_SBA_MASK			0xffe0		// SBA bits 15:5
 
+// Device Status (PCI_status, 0x06) bit 3, INTS: this function asserts its
+// interrupt (7.1.4). Lets the shared interrupt handler leave HSTS alone
+// when the interrupt is not ours.
+#define SMB_PCI_STATUS_INTS		(1 << 3)
+
 
 // I/O (and MMIO) registers, offsets from SBA (table 7-2)
 #define SMB_HSTS				0x00	// Host Status

@@ -123,6 +123,13 @@ i801_interrupt_handler(void* data)
 	i801_smbus* bus = (i801_smbus*)data;
 	int32 result = B_UNHANDLED_INTERRUPT;
 
+	// The line is shared. When the interrupt is not ours, HSTS may hold the
+	// result of a polled transaction by the firmware (it owns IUS then),
+	// which must not be cleared under it.
+	if ((bus->pci->read_pci_config(bus->device, PCI_status, 2)
+			& SMB_PCI_STATUS_INTS) == 0)
+		return B_UNHANDLED_INTERRUPT;
+
 	// Host Notify first: the PCH NACKs further notifications until the
 	// status bit is cleared.
 	if ((smb_read(bus, SMB_SSTS) & SMB_SSTS_HOST_NOTIFY) != 0) {
@@ -295,12 +302,9 @@ run_transaction(i801_smbus* bus, uint8 command, uint8* _status)
 static void
 set_block_buffer(i801_smbus* bus, bool enable)
 {
-	uint8 auxc = smb_read(bus, SMB_AUXC);
-	if (enable)
-		auxc |= SMB_AUXC_E32B;
-	else
-		auxc &= ~SMB_AUXC_E32B;
-	smb_write(bus, SMB_AUXC, auxc);
+	// AAC stays off: this driver never uses PEC, and a block write needs
+	// PEC_EN and AAC both clear (332995 volume 1, "Block Read/Write").
+	smb_write(bus, SMB_AUXC, enable ? SMB_AUXC_E32B : 0);
 }
 
 
@@ -529,8 +533,9 @@ init_bus(device_node* node, void** _cookie)
 	bus->transactionDone.Init(bus, "i801 smbus transaction");
 	B_INITIALIZE_SPINLOCK(&bus->notifyLock);
 
-	// no Host Notify until someone asks for it
+	// no Host Notify until someone asks for it, no PEC
 	smb_write_scmd(bus, bus->savedScmd & ~SMB_SCMD_HNI);
+	smb_write(bus, SMB_AUXC, 0);
 	smb_clear_host_notify(bus);
 	smb_write(bus, SMB_HSTS, SMB_HSTS_CLEAR);
 
