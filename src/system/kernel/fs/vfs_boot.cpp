@@ -10,7 +10,11 @@
 
 #include "vfs_boot.h"
 
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <strings.h>
 
 #include <fs_info.h>
@@ -29,6 +33,9 @@
 #include <util/KMessage.h>
 #include <util/Stack.h>
 #include <vfs.h>
+#include <lock.h>
+#include <condition_variable.h>
+#include <thread.h>
 
 #include "vfs_net_boot.h"
 
@@ -490,6 +497,203 @@ vfs_bootstrap_file_systems(void)
 }
 
 
+extern size_t debug_copy_syslog_tail(char* buffer, size_t size);
+
+// Test only, see syslog_to_esp_thread().
+static const char kSyslogMarker[] = "RENKUOS-SYSLOG-AREA-v1\n";
+static const size_t kSyslogAreaSize = 512 * 1024;
+
+
+/*!	Finds the SYSLOG.TXT area that the test image build put on the EFI
+	partition: a FAT partition with a block that starts with the marker.
+*/
+// Test only: lists every team with its threads and what they wait on.
+
+static void
+dump_teams_for_diag(int32 round)
+{
+	dprintf("hangdiag: ==== snapshot %" B_PRId32 " at %" B_PRIdBIGTIME
+		" s, real time clock %" B_PRIu32 " ====\n", round,
+		system_time() / 1000000, (uint32)real_time_clock());
+	team_info team;
+	int32 teamCookie = 0;
+	while (get_next_team_info(&teamCookie, &team) == B_OK) {
+		dprintf("hangdiag: team %" B_PRId32 " %s (%" B_PRId32 " threads)\n",
+			team.team, team.args, team.thread_count);
+		if (team.team == B_SYSTEM_TEAM)
+			continue;
+		thread_info info;
+		int32 threadCookie = 0;
+		while (get_next_thread_info(team.team, &threadCookie, &info) == B_OK) {
+			char wait[64] = "-";
+			Thread* thread = Thread::GetAndLock(info.thread);
+			if (thread != NULL) {
+				if (thread->state == B_THREAD_WAITING) {
+					switch (thread->wait.type) {
+						case THREAD_BLOCK_TYPE_SEMAPHORE:
+						{
+							sem_info sem;
+							sem_id id = (sem_id)(addr_t)thread->wait.object;
+							snprintf(wait, sizeof(wait), "sem %" B_PRId32 " %s",
+								id, get_sem_info(id, &sem) == B_OK
+									? sem.name : "?");
+							break;
+						}
+						case THREAD_BLOCK_TYPE_CONDITION_VARIABLE:
+						{
+							char name[5] = "";
+							ConditionVariable::DebugGetType(
+								(ConditionVariable*)thread->wait.object, name,
+								sizeof(name));
+							snprintf(wait, sizeof(wait), "cvar %s %p", name,
+								thread->wait.object);
+							break;
+						}
+						case THREAD_BLOCK_TYPE_SNOOZE:
+							strlcpy(wait, "snooze", sizeof(wait));
+							break;
+						case THREAD_BLOCK_TYPE_SIGNAL:
+							strlcpy(wait, "signal", sizeof(wait));
+							break;
+						case THREAD_BLOCK_TYPE_MUTEX:
+							snprintf(wait, sizeof(wait), "mutex %s",
+								((mutex*)thread->wait.object)->name);
+							break;
+						case THREAD_BLOCK_TYPE_USER:
+							strlcpy(wait, "user", sizeof(wait));
+							break;
+						case THREAD_BLOCK_TYPE_OTHER:
+							snprintf(wait, sizeof(wait), "other %s",
+								(const char*)thread->wait.object);
+							break;
+						default:
+							snprintf(wait, sizeof(wait), "type %" B_PRIu32 " %p",
+								thread->wait.type, thread->wait.object);
+							break;
+					}
+				}
+				thread->UnlockAndReleaseReference();
+			}
+			dprintf("hangdiag:   thread %" B_PRId32 " %-24s state %d %s\n",
+				info.thread, info.name, (int)info.state, wait);
+		}
+	}
+}
+
+
+static int
+open_syslog_area(off_t* _offset)
+{
+	const size_t kChunk = 64 * 1024;
+	char* chunk = (char*)malloc(kChunk);
+	if (chunk == NULL)
+		return -1;
+
+	KDiskDeviceManager* manager = KDiskDeviceManager::Default();
+	KDiskDevice* device;
+	int32 cookie = 0;
+	while ((device = manager->NextDevice(&cookie)) != NULL) {
+		for (int32 i = 0; i < device->CountChildren(); i++) {
+			KPartition* partition = device->ChildAt(i);
+			if (partition->ContentType() == NULL
+				|| strstr(partition->ContentType(), "FAT") == NULL) {
+				continue;
+			}
+			KPath path;
+			if (partition->GetPath(&path) != B_OK)
+				continue;
+			int fd = _kern_open(-1, path.Path(), O_RDWR, 0);
+			if (fd < 0)
+				continue;
+			for (off_t pos = 0; pos < partition->Size(); pos += kChunk) {
+				ssize_t bytes = _kern_read(fd, pos, chunk, kChunk);
+				if (bytes <= 0)
+					break;
+				for (ssize_t at = 0; at + 512 <= bytes; at += 512) {
+					if (memcmp(chunk + at, kSyslogMarker,
+							sizeof(kSyslogMarker) - 1) == 0) {
+						free(chunk);
+						*_offset = pos + at;
+						dprintf("syslog-to-esp: area in %s at %" B_PRIdOFF
+							"\n", path.Path(), *_offset);
+						return fd;
+					}
+				}
+			}
+			_kern_close(fd);
+		}
+	}
+
+	free(chunk);
+	return -1;
+}
+
+
+
+static status_t
+syslog_to_esp_thread(void*)
+{
+	off_t offset = 0;
+	int fd = -1;
+	for (int32 attempt = 0; attempt < 150 && fd < 0; attempt++) {
+		fd = open_syslog_area(&offset);
+		if (fd < 0)
+			snooze(2000000);
+	}
+	if (fd < 0) {
+		dprintf("syslog-to-esp: no SYSLOG.TXT area found\n");
+		return B_ENTRY_NOT_FOUND;
+	}
+
+	char* area = (char*)malloc(kSyslogAreaSize);
+	if (area == NULL)
+		return B_NO_MEMORY;
+
+	// The first half gets the kernel syslog, the second half the end of
+	// the syslog file that syslog_daemon writes (with the messages of
+	// the userland servers and the crash reports of debug_server).
+	const size_t kHalf = kSyslogAreaSize / 2;
+	while (true) {
+		memset(area, ' ', kSyslogAreaSize);
+		size_t header = snprintf(area, kHalf,
+			"%s(written %" B_PRIdBIGTIME " s after boot)\n"
+			"==== kernel syslog ====\n", kSyslogMarker,
+			system_time() / 1000000);
+		debug_copy_syslog_tail(area + header, kHalf - header);
+
+		char* user = area + kHalf;
+		size_t userHeader = snprintf(user, kHalf,
+			"\n==== /boot/system/var/log/syslog (end) ====\n");
+		int logFD = _kern_open(-1, "/boot/system/var/log/syslog", O_RDONLY, 0);
+		if (logFD >= 0) {
+			struct stat st;
+			off_t start = 0;
+			if (_kern_read_stat(logFD, NULL, false, &st, sizeof(st)) == B_OK
+				&& st.st_size > (off_t)(kHalf - userHeader)) {
+				start = st.st_size - (kHalf - userHeader);
+			}
+			ssize_t bytes = _kern_read(logFD, start, user + userHeader,
+				kHalf - userHeader);
+			if (bytes < 0) {
+				snprintf(user + userHeader, kHalf - userHeader,
+					"(read failed)\n");
+			}
+			_kern_close(logFD);
+		} else
+			snprintf(user + userHeader, kHalf - userHeader, "(no file yet)\n");
+		for (size_t i = 0; i < kSyslogAreaSize; i++) {
+			if (area[i] == '\0')
+				area[i] = ' ';
+		}
+		_kern_write(fd, offset, area, kSyslogAreaSize);
+		_kern_fsync(fd, false);
+		snooze(10000000);
+	}
+
+	return B_OK;
+}
+
+
 void
 vfs_mount_boot_file_system(kernel_args* args)
 {
@@ -625,5 +829,24 @@ vfs_mount_boot_file_system(kernel_args* args)
 	KDiskDeviceManager *manager = KDiskDeviceManager::Default();
 	manager->RescanDiskSystems();
 	manager->StartMonitoring();
+
+	// Test only: copy the syslog into SYSLOG.TXT of the EFI partition every
+	// 10 seconds, so it can be read on another computer.
+	thread_id syslogThread = spawn_kernel_thread(&syslog_to_esp_thread,
+		"syslog to ESP", B_LOW_PRIORITY, NULL);
+	if (syslogThread >= 0)
+		resume_thread(syslogThread);
+
+	// Test only: list all threads with what they wait for, 60 and 120
+	// seconds after boot, so a hang can be read from SYSLOG.TXT.
+	thread_id threadDump = spawn_kernel_thread([](void*) -> status_t {
+		for (int32 round = 0; round < 2; round++) {
+			snooze(60000000);
+			dump_teams_for_diag(round);
+		}
+		return B_OK;
+	}, "thread dump", B_LOW_PRIORITY, NULL);
+	if (threadDump >= 0)
+		resume_thread(threadDump);
 }
 
