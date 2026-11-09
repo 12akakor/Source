@@ -1,0 +1,10 @@
+SubDir HAIKU_TOP src add-ons kernel drivers input rmi4_smbus ;
+
+SubDirC++Flags -fno-rtti ;
+
+UsePrivateHeaders i2c ;
+UsePrivateKernelHeaders ;
+
+KernelAddon rmi4_smbus :
+	rmi4_smbus.cpp
+	;
