@@ -37,11 +37,13 @@
 // Device directories published by the power drivers. Each one contains one
 // node per instance, e.g. /dev/power/acpi_battery/0.
 static const char* const kBatteryDirectory = "/dev/power/acpi_battery";
-static const char* const kThermalDirectory = "/dev/power/acpi_thermal";
+static const char* const kPowerDirectory = "/dev/power";
+	// every subdirectory with "thermal" in its name is a thermal driver
+	// (acpi_thermal, pch_thermal, amd_thermal, ...)
 static const char* const kACDirectory = "/dev/power/acpi_ac";
 
 static const int kMaxBatteries = 4;
-static const int kMaxThermalZones = 4;
+static const int kMaxThermalZones = 8;
 static const int kMaxACAdapters = 2;
 static const int kMaxDevices = 8;
 
@@ -49,6 +51,8 @@ static int sBatteryFDs[kMaxBatteries];
 static int sBatteryCount = 0;
 static int sThermalFDs[kMaxThermalZones];
 static int sThermalCount = 0;
+static BString sThermalNames[kMaxThermalZones];
+	// the driver directory of each zone, for example "pch_thermal"
 static int sACFDs[kMaxACAdapters];
 static int sACCount = 0;
 
@@ -108,6 +112,11 @@ open_devices_in(const char* directoryPath, int* fds, int maxCount, int& count)
 		if (entry.GetName(name) != B_OK)
 			continue;
 
+		// Instances are numbered; skip other nodes, like the "status" node
+		// some thermal drivers publish next to them.
+		if (name[0] == '\0' || strspn(name, "0123456789") != strlen(name))
+			continue;
+
 		names[nameCount] = name;
 		nameCount++;
 	}
@@ -134,12 +143,58 @@ open_devices_in(const char* directoryPath, int* fds, int maxCount, int& count)
 
 
 static void
+open_thermal_devices()
+{
+	sThermalCount = 0;
+
+	BDirectory directory(kPowerDirectory);
+	if (directory.InitCheck() != B_OK)
+		return;
+
+	BString drivers[kMaxDevices];
+	int driverCount = 0;
+	BEntry entry;
+	while (driverCount < kMaxDevices
+		&& directory.GetNextEntry(&entry) == B_OK) {
+		char name[B_FILE_NAME_LENGTH];
+		if (!entry.IsDirectory() || entry.GetName(name) != B_OK
+			|| strstr(name, "thermal") == NULL) {
+			continue;
+		}
+		drivers[driverCount++] = name;
+	}
+
+	// Sorted, so that the numbering stays the same between runs and the
+	// ACPI zones (acpi_thermal) come first: the CSV output uses zone 0.
+	for (int index = 1; index < driverCount; index++) {
+		BString value = drivers[index];
+		int position = index - 1;
+		while (position >= 0 && drivers[position] > value) {
+			drivers[position + 1] = drivers[position];
+			position--;
+		}
+		drivers[position + 1] = value;
+	}
+
+	for (int index = 0; index < driverCount
+			&& sThermalCount < kMaxThermalZones; index++) {
+		BPath path(kPowerDirectory, drivers[index].String());
+		int count = 0;
+		open_devices_in(path.Path(), sThermalFDs + sThermalCount,
+			kMaxThermalZones - sThermalCount, count);
+		for (int zone = 0; zone < count; zone++)
+			sThermalNames[sThermalCount + zone] = drivers[index];
+		sThermalCount += count;
+	}
+}
+
+
+static void
 open_devices()
 {
 	open_devices_in(kBatteryDirectory, sBatteryFDs, kMaxBatteries,
 		sBatteryCount);
-	open_devices_in(kThermalDirectory, sThermalFDs, kMaxThermalZones,
-		sThermalCount);
+	open_thermal_devices();
 	open_devices_in(kACDirectory, sACFDs, kMaxACAdapters, sACCount);
 }
 
@@ -217,9 +272,12 @@ read_thermal(int fd, float& current, float& critical)
 
 	buffer[bytesRead] = '\0';
 
-	if (!parse_temperature(buffer, "Current Temperature:", current)
-		|| !parse_temperature(buffer, "Critical Temperature:", critical))
+	if (!parse_temperature(buffer, "Current Temperature:", current))
 		return false;
+
+	// Not every driver knows a critical temperature (amd_thermal does not).
+	if (!parse_temperature(buffer, "Critical Temperature:", critical))
+		critical = -1;
 
 	// A zone without a working _TMP reports a wrapped negative value.
 	return current > -50.0f && current < 200.0f;
@@ -492,12 +550,15 @@ print_status()
 		float current = 0.0;
 		float critical = 0.0;
 		if (!read_thermal(sThermalFDs[index], current, critical)) {
-			printf("  Thermal %d:      unavailable\n", index);
+			printf("  Thermal %d:      unavailable  %s\n", index,
+				sThermalNames[index].String());
 			continue;
 		}
 
-		printf("  Thermal %d:      %.1f C (critical %.1f C)\n", index,
-			current, critical);
+		printf("  Thermal %d:      %.1f C", index, current);
+		if (critical > 0)
+			printf(" (critical %.1f C)", critical);
+		printf("  %s\n", sThermalNames[index].String());
 	}
 
 	// Idle time over the next second, not since boot.
