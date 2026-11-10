@@ -41,13 +41,15 @@ static int32 sIgnoreInterrupts = 0;
 
 
 struct ps2_trace_entry {
-	uint32	time;	// microseconds since boot
+	uint32	time;	// microseconds since boot, wraps after 71 minutes
 	char	kind;
 	uint8	data;
 };
 
-static const int32 kTraceEntries = 16384;
-static const bigtime_t kTraceWindow = 90000000;
+// A ring of the most recent bytes. It is dumped once 95 seconds after boot
+// (the boot sequence) and by ps2_trace_dump() when a driver loses sync.
+static const int32 kTraceEntries = 8192;
+static const int32 kTraceDumpMax = 3000;
 static ps2_trace_entry sTrace[kTraceEntries];
 static int32 sTraceCount;
 
@@ -55,52 +57,56 @@ static int32 sTraceCount;
 void
 ps2_trace(char kind, uint8 data)
 {
-	bigtime_t now = system_time();
-	if (now > kTraceWindow)
-		return;
-	int32 index = atomic_add(&sTraceCount, 1);
-	if (index >= kTraceEntries)
-		return;
-	sTrace[index].time = (uint32)now;
+	int32 index = atomic_add(&sTraceCount, 1) % kTraceEntries;
+	sTrace[index].time = (uint32)system_time();
 	sTrace[index].kind = kind;
 	sTrace[index].data = data;
+}
+
+
+void
+ps2_trace_dump(const char* reason)
+{
+	int32 count = atomic_get(&sTraceCount);
+	int32 first = count - min_c(min_c(count, kTraceEntries), kTraceDumpMax);
+	dprintf("ps2trace: dump (%s): entries %" B_PRId32 " to %" B_PRId32
+		". Kinds: k = keyboard byte in, 0-3 = aux byte in (mux port), "
+		"a = aux byte in, ! = byte in with error, c = controller command out, "
+		"w = data out, f = flushed byte, T = command timeout (data = command), "
+		"P = pass-through command start, p = its end (data = status != 0), "
+		"g = guest byte from pass-through packet\n", reason, first,
+		count - 1);
+
+	char line[256];
+	int32 i = first;
+	int lines = 0;
+	while (i < count) {
+		uint32 lineStart = sTrace[i % kTraceEntries].time;
+		int length = snprintf(line, sizeof(line), "ps2trace: %4" B_PRIu32
+			".%06" B_PRIu32, lineStart / 1000000, lineStart % 1000000);
+		uint32 previous = lineStart;
+		for (int n = 0; n < 12 && i < count; n++, i++) {
+			const ps2_trace_entry& entry = sTrace[i % kTraceEntries];
+			length += snprintf(line + length, sizeof(line) - length,
+				" +%" B_PRIu32 "%c%02x", entry.time - previous, entry.kind,
+				entry.data);
+			previous = entry.time;
+		}
+		dprintf("%s\n", line);
+		if (++lines % 50 == 0)
+			snooze(20000);
+	}
+	dprintf("ps2trace: end\n");
 }
 
 
 static status_t
 ps2_trace_dump_thread(void*)
 {
-	bigtime_t wait = kTraceWindow + 5000000 - system_time();
+	bigtime_t wait = 95000000 - system_time();
 	if (wait > 0)
 		snooze(wait);
-
-	int32 count = min_c(atomic_get(&sTraceCount), kTraceEntries);
-	dprintf("ps2trace: %" B_PRId32 " entries (%" B_PRId32 " recorded). Kinds: "
-		"k = keyboard byte in, 0-3 = aux byte in (mux port), a = aux byte in, "
-		"! = byte in with error, c = controller command out, w = data out, "
-		"f = flushed byte, T = command timeout (data = command), "
-		"P = pass-through command start, p = its end (data = status != 0), "
-		"g = guest byte from pass-through packet\n", count,
-		atomic_get(&sTraceCount));
-
-	char line[256];
-	int32 i = 0;
-	while (i < count) {
-		uint32 lineStart = sTrace[i].time;
-		int length = snprintf(line, sizeof(line), "ps2trace: %3" B_PRIu32 ".%06"
-			B_PRIu32, lineStart / 1000000, lineStart % 1000000);
-		uint32 previous = lineStart;
-		for (int n = 0; n < 12 && i < count; n++, i++) {
-			length += snprintf(line + length, sizeof(line) - length,
-				" +%" B_PRIu32 "%c%02x", sTrace[i].time - previous,
-				sTrace[i].kind, sTrace[i].data);
-			previous = sTrace[i].time;
-		}
-		dprintf("%s\n", line);
-		if ((i / 12) % 50 == 0)
-			snooze(20000);
-	}
-	dprintf("ps2trace: end\n");
+	ps2_trace_dump("95 s after boot");
 	return B_OK;
 }
 
@@ -468,8 +474,11 @@ ps2_interrupt(void* cookie)
 
 	if (error)
 		ps2_trace('!', data);
-	else if (dev == &ps2_device[PS2_DEVICE_KEYB])
-		ps2_trace('k', data);
+	else if (dev == &ps2_device[PS2_DEVICE_KEYB]) {
+		// After the boot sequence, keep only the timing of key presses:
+		// the trace must not record what is typed.
+		ps2_trace('k', system_time() < 90000000 ? data : 0);
+	}
 	else if (gActiveMultiplexingEnabled)
 		ps2_trace('0' + (dev - &ps2_device[PS2_DEVICE_MOUSE]), data);
 	else
