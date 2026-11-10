@@ -178,6 +178,7 @@ guest_reply_push(uint8 data)
 {
 	if (sGuestReplySem < 0)
 		return;
+	ps2_trace('g', data);
 	int32 write = atomic_get(&sGuestReplyWrite);
 	int32 next = (write + 1) % (int32)sizeof(sGuestReplyBuffer);
 	if (next == atomic_get(&sGuestReplyRead))
@@ -725,6 +726,8 @@ passthrough_command_once(ps2_dev *dev, uint8 cmd, const uint8 *out,
 	uint8 stale;
 	int i;
 
+	ps2_trace('P', cmd);
+
 	// flush stale guest bytes
 	while (guest_reply_pop(&stale, 0) == B_OK)
 		;
@@ -768,6 +771,7 @@ passthrough_command_once(ps2_dev *dev, uint8 cmd, const uint8 *out,
 
 	enableStatus = ps2_dev_command_timeout(padDev, PS2_CMD_ENABLE, NULL, 0,
 		NULL, 0, padTimeout);
+	ps2_trace('p', status != B_OK || enableStatus != B_OK ? 1 : 0);
 	return status != B_OK ? status : enableStatus;
 }
 

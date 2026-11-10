@@ -11,6 +11,7 @@
 /*! PS/2 bus manager */
 
 
+#include <stdio.h>
 #include <string.h>
 
 #include "ps2_common.h"
@@ -36,6 +37,87 @@ mutex gControllerLock;
 static int32 sIgnoreInterrupts = 0;
 
 
+// #pragma mark - byte trace (test only)
+
+
+struct ps2_trace_entry {
+	uint32	time;	// microseconds since boot
+	char	kind;
+	uint8	data;
+};
+
+static const int32 kTraceEntries = 16384;
+static const bigtime_t kTraceWindow = 90000000;
+static ps2_trace_entry sTrace[kTraceEntries];
+static int32 sTraceCount;
+
+
+void
+ps2_trace(char kind, uint8 data)
+{
+	bigtime_t now = system_time();
+	if (now > kTraceWindow)
+		return;
+	int32 index = atomic_add(&sTraceCount, 1);
+	if (index >= kTraceEntries)
+		return;
+	sTrace[index].time = (uint32)now;
+	sTrace[index].kind = kind;
+	sTrace[index].data = data;
+}
+
+
+static status_t
+ps2_trace_dump_thread(void*)
+{
+	bigtime_t wait = kTraceWindow + 5000000 - system_time();
+	if (wait > 0)
+		snooze(wait);
+
+	int32 count = min_c(atomic_get(&sTraceCount), kTraceEntries);
+	dprintf("ps2trace: %" B_PRId32 " entries (%" B_PRId32 " recorded). Kinds: "
+		"k = keyboard byte in, 0-3 = aux byte in (mux port), a = aux byte in, "
+		"! = byte in with error, c = controller command out, w = data out, "
+		"f = flushed byte, T = command timeout (data = command), "
+		"P = pass-through command start, p = its end (data = status != 0), "
+		"g = guest byte from pass-through packet\n", count,
+		atomic_get(&sTraceCount));
+
+	char line[256];
+	int32 i = 0;
+	while (i < count) {
+		uint32 lineStart = sTrace[i].time;
+		int length = snprintf(line, sizeof(line), "ps2trace: %3" B_PRIu32 ".%06"
+			B_PRIu32, lineStart / 1000000, lineStart % 1000000);
+		uint32 previous = lineStart;
+		for (int n = 0; n < 12 && i < count; n++, i++) {
+			length += snprintf(line + length, sizeof(line) - length,
+				" +%" B_PRIu32 "%c%02x", sTrace[i].time - previous,
+				sTrace[i].kind, sTrace[i].data);
+			previous = sTrace[i].time;
+		}
+		dprintf("%s\n", line);
+		if ((i / 12) % 50 == 0)
+			snooze(20000);
+	}
+	dprintf("ps2trace: end\n");
+	return B_OK;
+}
+
+
+void
+ps2_trace_init(void)
+{
+	thread_id thread = spawn_kernel_thread(&ps2_trace_dump_thread,
+		"ps2 trace dump", B_LOW_PRIORITY, NULL);
+	if (thread >= 0)
+		resume_thread(thread);
+}
+
+
+//	#pragma mark -
+
+
 uint8
 ps2_read_ctrl(void)
 {
@@ -55,6 +137,7 @@ ps2_write_ctrl(uint8 ctrl)
 {
 	TRACE("ps2: ps2_write_ctrl 0x%02x\n", ctrl);
 
+	ps2_trace('c', ctrl);
 	gIsa->write_io_8(PS2_PORT_CTRL, ctrl);
 }
 
@@ -64,6 +147,7 @@ ps2_write_data(uint8 data)
 {
 	TRACE("ps2: ps2_write_data 0x%02x\n", data);
 
+	ps2_trace('w', data);
 	gIsa->write_io_8(PS2_PORT_DATA, data);
 }
 
@@ -107,11 +191,12 @@ ps2_flush(void)
 
 	for (i = 0; i < 64; i++) {
 		uint8 ctrl;
-		uint8 data TRACE_ONLY;
+		uint8 data;
 		ctrl = ps2_read_ctrl();
 		if (!(ctrl & PS2_STATUS_OUTPUT_BUFFER_FULL))
 			break;
 		data = ps2_read_data();
+		ps2_trace('f', data);
 		TRACE("ps2: ps2_flush: ctrl 0x%02x, data 0x%02x (%s)\n", ctrl, data, (ctrl & PS2_STATUS_AUX_DATA) ? "aux" : "keyb");
 		snooze(100);
 	}
@@ -381,6 +466,15 @@ ps2_interrupt(void* cookie)
 		error = (ctrl & 0xC0) != 0;
 	}
 
+	if (error)
+		ps2_trace('!', data);
+	else if (dev == &ps2_device[PS2_DEVICE_KEYB])
+		ps2_trace('k', data);
+	else if (gActiveMultiplexingEnabled)
+		ps2_trace('0' + (dev - &ps2_device[PS2_DEVICE_MOUSE]), data);
+	else
+		ps2_trace('a', data);
+
 	dev->history[1] = dev->history[0];
 	dev->history[0].time = system_time();
 	dev->history[0].data = data;
@@ -406,6 +500,7 @@ ps2_init(void)
 
 	mutex_init(&gControllerLock, "ps/2 keyb ctrl");
 
+	ps2_trace_init();
 	ps2_flush();
 
 	status = ps2_dev_init();

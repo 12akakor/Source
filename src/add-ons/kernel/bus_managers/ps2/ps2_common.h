@@ -72,6 +72,11 @@ status_t		ps2_wait_write(void);
 
 void			ps2_flush(void);
 
+// Test only (X270 diagnosis): byte level trace of the controller traffic
+// during the first seconds after boot, dumped to the syslog afterwards.
+void			ps2_trace(char kind, uint8 data);
+void			ps2_trace_init(void);
+
 extern status_t ps2_command(uint8 cmd, const uint8 *out, int out_count,
 	uint8 *in, int in_count);
 

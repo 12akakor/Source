@@ -452,8 +452,10 @@ standard_command_timeout(ps2_dev* dev, uint8 cmd, const uint8* out,
 #endif
 		res = acquire_sem_etc(dev->result_sem, 1, B_RELATIVE_TIMEOUT, timeout);
 
-		if (res != B_OK)
+		if (res != B_OK) {
 			atomic_and(&dev->flags, ~PS2_FLAG_CMD);
+			ps2_trace('T', i == -1 ? cmd : out[i]);
+		}
 
 #ifdef TRACE_PS2_DEV
 		TRACE("ps2: ps2_dev_command wait for ack res 0x%08" B_PRIx32 ", "
