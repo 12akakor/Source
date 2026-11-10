@@ -1,6 +1,6 @@
 # ThinkPad X270 test builds for this fork (not for upstream).
 #
-# Every push to the x270 branch builds an x86_64 USB image (.img) with the
+# Every push to the x270 branch or a test/ branch builds an x86_64 USB image (.img) with the
 # same layout as the tablet's hybrid-usb.img, which is known to boot on the
 # X270: an MBR with
 #   partition 1  EFI system partition (FAT, type 0xef) holding
@@ -17,7 +17,7 @@ name: x270-build
 on:
   workflow_dispatch:
   push:
-    branches: [x270]
+    branches: [x270, 'test/**']
 
 permissions:
   contents: read
