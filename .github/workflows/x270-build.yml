@@ -86,6 +86,13 @@ jobs:
           HAIKU_REVISION = "${REV}" ;
           RENKUOS_BUILD = "${BUILD}" ;
           EOF
+          # Test programs a test/ branch lists (one jam target per line) go
+          # into /boot/home/tests, so they can be run on the machine itself.
+          if [ -s .github/x270-test-programs ]; then
+            TESTS="$(grep -v '^#' .github/x270-test-programs | tr '\n' ' ')"
+            echo "AddFilesToHaikuImage home tests : ${TESTS} ;" \
+              >> build/jam/UserBuildConfig
+          fi
           echo "HAIKU_REVISION=${REV}" >> "$GITHUB_ENV"
           echo "HAIKU_IMAGE_LABEL=RenkuOS" >> "$GITHUB_ENV"
           echo "RENKUOS_BUILD=${BUILD}" >> "$GITHUB_ENV"
