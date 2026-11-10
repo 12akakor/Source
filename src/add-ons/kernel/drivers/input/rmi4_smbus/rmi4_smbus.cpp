@@ -9,14 +9,14 @@
  * writes it to the syslog; it does not drive the pointer yet. The PS/2
  * driver keeps owning the touchpad.
  *
- * - Always: an SMBus Quick Write to the touchpad address, which shows
- *   whether the pad answers on SMBus while it is in PS/2 mode.
- * - Only with "probe_rmi true" in the driver settings file
- *   (~/config/settings/kernel/drivers/rmi4_smbus): read the RMI-on-SMBus
- *   protocol version, scan the Page Description Table, read the F01 device
- *   information and count Host Notify messages for 30 seconds. Reading the
- *   version may switch the pad from PS/2 to SMBus reporting, so the PS/2
- *   touchpad and TrackPoint may stop until the PS/2 driver resets the pad.
+ * By default it does not touch the bus: on a ThinkPad X270 any access to
+ * the pad, even an unacknowledged Quick Write, broke its PS/2 side.
+ * Only with "probe_rmi true" in the driver settings file
+ * (~/config/settings/kernel/drivers/rmi4_smbus) it sends a Quick Write,
+ * reads the RMI-on-SMBus protocol version, scans the Page Description
+ * Table, reads the F01 device information and counts Host Notify messages
+ * for 30 seconds. This breaks the PS/2 touchpad and TrackPoint until the
+ * next boot.
  *
  * Sources: Synaptics RMI4 Interfacing Guide 511-000136-01 rev. E
  * (2.3.5 Page Description Table, 3.1 F01 queries, 12.2 RMI on SMBus).
@@ -332,10 +332,6 @@ probe_thread(void* data)
 {
 	rmi4_probe* probe = (rmi4_probe*)data;
 
-	status_t status = smbus_quick(probe);
-	TRACE_ALWAYS("quick write to 0x2c: %s\n", status == B_OK
-		? "acknowledged, the pad listens on SMBus" : strerror(status));
-
 	bool probeRmi = false;
 	void* settings = load_driver_settings("rmi4_smbus");
 	if (settings != NULL) {
@@ -344,10 +340,18 @@ probe_thread(void* data)
 		unload_driver_settings(settings);
 	}
 	if (!probeRmi) {
-		TRACE_ALWAYS("RMI probe off (probe_rmi in the rmi4_smbus driver "
-			"settings turns it on)\n");
+		// Any SMBus access to the pad, even a Quick Write it does not
+		// acknowledge, disturbs its PS/2 side on a ThinkPad X270: the
+		// TrackPoint pass-through stops and the PS/2 driver loses the pad.
+		// Stay off the bus until the PS/2 driver has handed the pad over.
+		TRACE_ALWAYS("no SMBus access to the pad (probe_rmi in the "
+			"rmi4_smbus driver settings turns the probe on)\n");
 		return B_OK;
 	}
+
+	status_t status = smbus_quick(probe);
+	TRACE_ALWAYS("quick write to 0x2c: %s\n", status == B_OK
+		? "acknowledged, the pad listens on SMBus" : strerror(status));
 
 	uint8 version;
 	status = smbus_read_byte(probe, kVersionCommand, &version);
