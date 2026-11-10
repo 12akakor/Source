@@ -1,0 +1,5 @@
+# Test programs copied to /boot/home/tests in the X270 test image.
+signal_fpu_test
+signal_suspend_resume_test
+syscall_restart_test
+sigsuspend_test
