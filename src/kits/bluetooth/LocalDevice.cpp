@@ -21,6 +21,7 @@
 #include <CommandManager.h>
 
 #include <new>
+#include <string.h>
 
 #include "KitSupport.h"
 
@@ -422,9 +423,10 @@ LocalDevice::_ReadLocalVersion()
 
 
 status_t
-LocalDevice::_ReadLocalSupportedCommands()
+LocalDevice::_ReadLocalSupportedCommands(bool* _canReadStoredLinkKeys)
 {
 	uint8 bt_status = BT_ERROR;
+	*_canReadStoredLinkKeys = false;
 
 	BluetoothCommand<> localSupportedCommands(OGF_INFORMATIONAL_PARAM,
 		OCF_READ_LOCAL_SUPPORTED_COMMANDS);
@@ -441,6 +443,17 @@ LocalDevice::_ReadLocalSupportedCommands()
 
 	if (fMessenger->SendMessage(&request, &reply) == B_OK)
 		reply.FindUInt8("status", &bt_status);
+
+	// Supported Commands octet 6 bit 5: Read Stored Link Key. A server that
+	// does not send the bit map leaves the command unsupported.
+	const uint8* commands;
+	ssize_t size;
+	if (bt_status == BT_OK
+		&& reply.FindData("supported_commands", B_ANY_TYPE,
+			(const void**)&commands, &size) == B_OK
+		&& size > 6) {
+		*_canReadStoredLinkKeys = (commands[6] & 0x20) != 0;
+	}
 
 	return bt_status;
 }
@@ -502,8 +515,11 @@ LocalDevice::_ReadLinkKeys()
 {
 	uint8 bt_status = BT_ERROR;
 
-	BluetoothCommand<> LocalFeatures(OGF_CONTROL_BASEBAND,
-		OCF_READ_STORED_LINK_KEY);
+	// All keys: the address is ignored then, but must still be sent.
+	BluetoothCommand<typed_command(hci_read_stored_link_key)> LocalFeatures(
+		OGF_CONTROL_BASEBAND, OCF_READ_STORED_LINK_KEY);
+	memset(&LocalFeatures->bdaddr, 0, sizeof(LocalFeatures->bdaddr));
+	LocalFeatures->all_keys_flag = 1;
 
 	BMessage request(BT_MSG_HANDLE_SIMPLE_REQUEST);
 	BMessage reply;
@@ -597,9 +613,13 @@ LocalDevice::LocalDevice(hci_id hid)
 	_ReadBufferSize();
 	_ReadLocalFeatures();
 	_ReadLocalVersion();
-	_ReadLocalSupportedCommands();
+	bool canReadStoredLinkKeys;
+	_ReadLocalSupportedCommands(&canReadStoredLinkKeys);
 	_ReadTimeouts();
-	_ReadLinkKeys();
+	// Controllers without this command can leave the request unanswered,
+	// which blocks here.
+	if (canReadStoredLinkKeys)
+		_ReadLinkKeys();
 
 	// Uncomment this if you want your device to have a nicer default name
 	// BString name("HaikuBluetooth");

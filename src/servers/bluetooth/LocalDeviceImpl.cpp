@@ -653,6 +653,10 @@ LocalDeviceImpl::CommandComplete(struct hci_ev_cmd_complete* event,
 				supported_commands->status);
 
 			reply.AddUInt8("status", supported_commands->status);
+			if (supported_commands->status == BT_OK) {
+				reply.AddData("supported_commands", B_ANY_TYPE,
+					&supported_commands->supported_commands, 64);
+			}
 			status = request->SendReply(&reply);
 			// printf("Sending reply... %d\n", status);
 			// debug reply.PrintToStream();
