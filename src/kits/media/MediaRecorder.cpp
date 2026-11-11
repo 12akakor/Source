@@ -265,10 +265,13 @@ BMediaRecorder::Start(bool force)
 	// start node here
 	status_t err = B_OK;
 
-	if ((fOutputNode.kind & B_TIME_SOURCE) != 0)
+	if ((fOutputNode.kind & B_TIME_SOURCE) != 0) {
 		err = BMediaRoster::CurrentRoster()->StartTimeSource(
 			fOutputNode, BTimeSource::RealTime());
-	else
+		if (err == B_OK)
+			err = BMediaRoster::CurrentRoster()->StartNode(fOutputNode,
+				fNode->TimeSource()->Now());
+	} else
 		err = BMediaRoster::CurrentRoster()->StartNode(
 			fOutputNode, fNode->TimeSource()->Now());
 
@@ -302,7 +305,14 @@ BMediaRecorder::Stop(bool force)
 
 	fRunning = false;
 
-	return BMediaRoster::CurrentRoster()->StopNode(fNode->Node(), 0);
+	status_t err = BMediaRoster::CurrentRoster()->StopNode(fNode->Node(), 0);
+	if ((fOutputNode.kind & B_TIME_SOURCE) != 0) {
+		status_t sourceError = BMediaRoster::CurrentRoster()->StopNode(
+			fOutputNode, 0);
+		if (err == B_OK)
+			err = sourceError;
+	}
+	return err;
 }
 
 
