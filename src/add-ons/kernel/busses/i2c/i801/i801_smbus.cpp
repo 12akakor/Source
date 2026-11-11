@@ -147,9 +147,14 @@ i801_interrupt_handler(void* data)
 		result = B_HANDLED_INTERRUPT;
 	}
 
-	// Host transaction completion. Only in interrupt mode: in polling mode
-	// the waiting thread reads HSTS itself, and a shared interrupt from
-	// another device must not clear the bits under it.
+	// Host transaction completion. Reading HSTS takes the IUS semaphore
+	// (332995 volume 2, HSTS bit 6: a read returns the old value and sets
+	// it), so HSTS is only read while this driver holds the semaphore.
+	// Otherwise a Host Notify interrupt took it, nobody released it, and
+	// every later transaction found the bus "in use by firmware".
+	if (atomic_get(&bus->ownsHardware) == 0)
+		return result;
+
 	uint8 status = smb_read(bus, SMB_HSTS);
 	if ((status & SMB_HSTS_DONE) != 0) {
 		smb_write(bus, SMB_HSTS, status & SMB_HSTS_CLEAR);
@@ -172,6 +177,9 @@ i801_interrupt_handler(void* data)
 //	#pragma mark - host transactions
 
 
+static void release_hardware(i801_smbus* bus);
+
+
 static status_t
 acquire_hardware(i801_smbus* bus)
 {
@@ -184,12 +192,13 @@ acquire_hardware(i801_smbus* bus)
 		}
 		snooze(100);
 	}
+	atomic_set(&bus->ownsHardware, 1);
 
 	// wait for a transaction started by someone else to finish
 	end = system_time() + kTransactionTimeout;
 	while ((smb_read(bus, SMB_HSTS) & SMB_HSTS_HBSY) != 0) {
 		if (system_time() > end) {
-			smb_write(bus, SMB_HSTS, SMB_HSTS_IUS);
+			release_hardware(bus);
 			return B_BUSY;
 		}
 		snooze(50);
@@ -201,6 +210,7 @@ acquire_hardware(i801_smbus* bus)
 static void
 release_hardware(i801_smbus* bus)
 {
+	atomic_set(&bus->ownsHardware, 0);
 	// writing 1 to IUS makes the next read return 0
 	smb_write(bus, SMB_HSTS, SMB_HSTS_IUS);
 }

@@ -69,6 +69,7 @@ typedef struct {
 	mutex					hwLock;
 	ConditionVariable		transactionDone;
 	int32					transactionPending;
+	int32					ownsHardware;	// this driver holds HSTS.IUS
 	uint8					transactionStatus;
 
 	// Host Notify
