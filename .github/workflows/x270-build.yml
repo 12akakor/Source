@@ -125,8 +125,14 @@ jobs:
         id: img
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq mtools dosfstools fdisk
+          # security.ubuntu.com is sometimes not reachable from the
+          # runners; then fall back to the release pocket on the mirror
+          sudo apt-get update -qq -o Acquire::Retries=3 || true
+          if ! sudo apt-get install -y -qq -o Acquire::Retries=3 mtools dosfstools fdisk; then
+            CODENAME="$(. /etc/os-release; echo "$VERSION_CODENAME")"
+            sudo apt-get install -y -qq --allow-downgrades \
+              $(for p in mtools dosfstools fdisk; do echo "$p/$CODENAME"; done)
+          fi
           GEN=generated.x86_64
           SYS="$(find "${GEN}" -maxdepth 1 -name '*.image' | head -1)"
           LOADER="$(find "${GEN}" -name haiku_loader.efi | head -1)"
@@ -195,8 +201,14 @@ jobs:
 
       - name: Install QEMU and OVMF
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq qemu-system-x86 ovmf mtools
+          # security.ubuntu.com is sometimes not reachable from the
+          # runners; then fall back to the release pocket on the mirror
+          sudo apt-get update -qq -o Acquire::Retries=3 || true
+          if ! sudo apt-get install -y -qq -o Acquire::Retries=3 qemu-system-x86 ovmf mtools; then
+            CODENAME="$(. /etc/os-release; echo "$VERSION_CODENAME")"
+            sudo apt-get install -y -qq --allow-downgrades \
+              $(for p in qemu-system-x86 ovmf mtools; do echo "$p/$CODENAME"; done)
+          fi
           dpkg -L ovmf > ovmf-files.txt
 
       - name: Boot and check SYSLOG.TXT
