@@ -85,6 +85,10 @@ jobs:
           HAIKU_IMAGE_LABEL = "RenkuOS" ;
           HAIKU_REVISION = "${REV}" ;
           RENKUOS_BUILD = "${BUILD}" ;
+          SEARCH on <x270-settings>rmi4_smbus
+              = [ FDirName \$(HAIKU_TOP) .github x270 ] ;
+          AddFilesToHaikuImage home config settings kernel drivers
+              : <x270-settings>rmi4_smbus : rmi4_smbus ;
           EOF
           echo "HAIKU_REVISION=${REV}" >> "$GITHUB_ENV"
           echo "HAIKU_IMAGE_LABEL=RenkuOS" >> "$GITHUB_ENV"

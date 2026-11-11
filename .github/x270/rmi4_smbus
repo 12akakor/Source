@@ -1,0 +1,4 @@
+# Test images only: hand the ThinkPad X270 touchpad from PS/2 to the RMI4
+# SMBus driver (InterTouch). Remove this file, or set "intertouch false",
+# to keep the touchpad on PS/2.
+intertouch true
