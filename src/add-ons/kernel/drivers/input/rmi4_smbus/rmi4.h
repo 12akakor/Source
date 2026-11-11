@@ -146,6 +146,7 @@ struct rmi4_device {
 	int8					gpioPadButton[8];		// gpio -> button bit, or -1
 	int8					gpioStickButton[8];
 	uint8					padButtons;
+	uint8					clickButton;	// chosen when the pad went down
 	uint8					stickButtons;
 
 	// TrackPoint clicks

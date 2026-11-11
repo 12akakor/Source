@@ -730,10 +730,32 @@ sensor_report(rmi4_device* device)
 	memcpy(device->lastFingers, device->fingers, sizeof(device->fingers));
 	device->lastFingerMask = device->fingerMask;
 
+	// The clickpad is one button. Like movement_maker's finger click, a
+	// click with two fingers on the pad is a right click and one with three
+	// a middle click, but the button is chosen when the pad goes down and
+	// kept until it comes up: the fingers then change while dragging.
+	if (device->padButtons != 0) {
+		if (device->clickButton == 0) {
+			device->clickButton = count >= 3 ? kButtonMiddle
+				: count == 2 ? kButtonRight : kButtonLeft;
+		}
+	} else
+		device->clickButton = 0;
+
 	touchpad_movement event;
 	memset(&event, 0, sizeof(event));
-	event.buttons = device->padButtons;
+	event.buttons = device->clickButton;
 	event.fingers = device->fingerMask;
+	if (device->clickButton != 0 && count >= 2) {
+		// While the pad is held down, a thumb pressing it and a finger
+		// moving are one drag to movement_maker: with two fingers it would
+		// scroll instead, or turn the held button into another one. The
+		// position already follows the finger that moves.
+		event.fingers = device->fingerMask & -device->fingerMask;
+		sumZ /= count;
+		sumWidth = 4;
+		count = 1;
+	}
 	if (count == 0) {
 		// x and y 0 is no contact; a width of 0 or 1 would mean 2 or 3
 		// fingers
