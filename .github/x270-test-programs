@@ -1,0 +1,3 @@
+# Test programs copied to /boot/home/tests in the X270 test image.
+rw_lock_signal_test
+sigsuspend_test
