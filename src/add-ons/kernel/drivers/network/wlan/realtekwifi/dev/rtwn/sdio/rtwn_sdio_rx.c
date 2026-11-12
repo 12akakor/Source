@@ -147,6 +147,7 @@ rtwn_sdio_rx_parse(struct rtwn_softc *sc, uint8_t *buf, int len)
 		case RTWN_RX_DATA:
 			m = rtwn_sdio_rx_copy(sc, stat, totlen);
 			RTWN_SDIO_SOFTC(sc)->sc_test_rx++;	/* test */
+			sc->sc_rx_transfers++;
 			if (m != NULL) {
 				if (last == NULL)
 					m0 = m;

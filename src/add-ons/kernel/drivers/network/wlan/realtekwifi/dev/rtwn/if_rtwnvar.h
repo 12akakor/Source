@@ -224,6 +224,11 @@ struct rtwn_softc {
 #ifndef D4054
 	struct callout		sc_watchdog_to;
 	int			sc_tx_timer;
+	uint32_t		sc_rx_transfers;	/* received frames */
+	uint32_t		sc_rx_seen;
+	int			sc_rx_silence;		/* seconds */
+	int			sc_rx_flowing;
+	int			rx_silence_limit;	/* seconds; 0: not watched */
 #endif
 
 	struct mtx		sc_mtx;

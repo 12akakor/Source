@@ -1474,6 +1474,34 @@ rtwn_watchdog(void *arg)
 		ieee80211_restart_all(ic);
 		return;
 	}
+
+	/*
+	 * A chip that has stopped receiving (see rx_silence_limit): after frames
+	 * came and then none for the limit, or every 2 minutes if a restart
+	 * didn't bring any, as there may simply be nothing around. Only a link
+	 * that is up has frames to expect: a scan spends seconds on empty
+	 * channels, the radio waits on one for the supplicant's choice after it,
+	 * and a restart would only start all that again. The 2 minutes there too.
+	 */
+	if (sc->rx_silence_limit != 0) {
+		struct ieee80211vap *vap = TAILQ_FIRST(&ic->ic_vaps);
+		int linked = vap != NULL && vap->iv_state == IEEE80211_S_RUN
+		    && (ic->ic_flags & IEEE80211_F_SCAN) == 0;
+
+		if (sc->sc_rx_transfers != sc->sc_rx_seen) {
+			sc->sc_rx_seen = sc->sc_rx_transfers;
+			sc->sc_rx_silence = 0;
+			sc->sc_rx_flowing = 1;
+		} else if (++sc->sc_rx_silence
+		    >= (sc->sc_rx_flowing && linked ? sc->rx_silence_limit : 120)) {
+			ic_printf(ic, "nothing received for %d s, restarting\n",
+			    sc->sc_rx_silence);
+			sc->sc_rx_silence = 0;
+			sc->sc_rx_flowing = 0;
+			ieee80211_restart_all(ic);
+			return;
+		}
+	}
 	callout_reset(&sc->sc_watchdog_to, hz, rtwn_watchdog, sc);
 }
 #endif
