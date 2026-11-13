@@ -205,21 +205,18 @@ rtwn_sdio_attach(device_t dev)
 		goto fail;
 	}
 
-	error = sdio_setup_intr(uc->sc_func, rtwn_sdio_intr, uc);
-	if (error != 0) {
-		device_printf(dev, "cannot set up the interrupt: %d\n", error);
-		goto fail;
-	}
-
+	/*
+	 * test: the card interrupt is off, so that it cannot corrupt a block
+	 * that is being received (it uses DAT1 in 4 bit mode); the poll thread
+	 * does its work instead. Turn it back on with sdio_setup_intr() here.
+	 */
 	error = rtwn_attach(sc);
 	if (error != 0)
-		goto fail_intr;
+		goto fail;
 
 	rtwn_sdio_poll_start(uc);
 	return (0);
 
-fail_intr:
-	sdio_teardown_intr(uc->sc_func);
 fail:
 	if (sc->sc_detach_private != NULL)
 		rtwn_detach_private(sc);
@@ -240,7 +237,6 @@ rtwn_sdio_detach(device_t dev)
 	rtwn_sdio_poll_stop(uc);
 	rtwn_detach(sc);
 
-	sdio_teardown_intr(uc->sc_func);
 	taskqueue_drain(taskqueue_thread, &uc->sc_tx_task);
 	rtwn_sdio_tx_drain(uc, 1);
 

@@ -7,7 +7,9 @@
 
 /*!	Interrupt and receive path of rtwn over SDIO.
 
-	The card interrupt runs rtwn_sdio_intr() in a thread. REG_SDIO_HISR says
+	rtwn_sdio_service() does the work of a chip interrupt: the card
+	interrupt runs it in a thread, and while the card interrupt is off
+	(see rtwn_sdio_attach()) the poll thread calls it. REG_SDIO_HISR says
 	why; for received data REG_SDIO_RX0_REQ_LEN gives the number of bytes
 	waiting in the receive FIFO, which are read with one CMD53 per page from
 	the RX0 FIFO address. The buffer holds one or more frames, each with a
@@ -53,8 +55,10 @@
 #define RTWN_SDIO_RX_BUDGET	(64 * 1024)
 /* Bytes per CMD53, whole blocks. */
 #define RTWN_SDIO_RX_CHUNK	4096
-/* How often rtwn_sdio_poll_thread() looks for a missed receive request. */
-#define RTWN_SDIO_POLL_INTERVAL	50000
+/* How often rtwn_sdio_poll_thread() looks for a receive request. */
+#define RTWN_SDIO_POLL_INTERVAL	10000
+/* How many polls make the 10 s of the test statistics. */
+#define RTWN_SDIO_STAT_TICKS		(10 * 1000000 / RTWN_SDIO_POLL_INTERVAL)
 
 
 void
@@ -260,8 +264,12 @@ rtwn_sdio_rx(struct rtwn_sdio_softc *uc)
 }
 
 
+/*!	Does the work of a chip interrupt: reads REG_SDIO_HISR, handles a
+	transmit error, reads the frames of a receive request, acknowledges the
+	interrupt and restarts the transmit queue.
+*/
 void
-rtwn_sdio_intr(void *arg)
+rtwn_sdio_service(void *arg)
 {
 	struct rtwn_sdio_softc *uc = arg;
 	struct rtwn_softc *sc = &uc->sc_sc;
@@ -299,10 +307,8 @@ rtwn_sdio_intr(void *arg)
 }
 
 
-/*!	Services a receive request that the card interrupt did not report.
-	About one in seventy receive requests of the RTL8723BS on a Bay Trail
-	SDIO host came without a card interrupt; their frames would wait in
-	the FIFO for the next one.
+/*!	Polls the chip for work. The card interrupt is off (see
+	rtwn_sdio_attach()), so this thread does what it would have done.
 */
 static status_t
 rtwn_sdio_poll_thread(void *arg)
@@ -315,7 +321,7 @@ rtwn_sdio_poll_thread(void *arg)
 		snooze(RTWN_SDIO_POLL_INTERVAL);
 
 		/* test: link statistics every 10 s */
-		if (++statTicks % 200 == 0) {
+		if (++statTicks % RTWN_SDIO_STAT_TICKS == 0) {
 			RTWN_LOCK(sc);
 			if (uc->sc_intr_enabled) {
 				device_printf(sc->sc_dev, "test: tx %u reports %u/%u "
@@ -337,14 +343,8 @@ rtwn_sdio_poll_thread(void *arg)
 			RTWN_UNLOCK(sc);
 		}
 
-		RTWN_LOCK(sc);
-		if (uc->sc_intr_enabled) {
-			uint32_t hisr = rtwn_sdio_local_read_4(uc, RTWN_SDIO_HISR);
-			if (hisr != 0xffffffff
-			    && (hisr & RTWN_SDIO_INT_RX_REQUEST) != 0)
-				rtwn_sdio_rx(uc);
-		}
-		RTWN_UNLOCK(sc);
+		/* test: the card interrupt is off, so do its work here. */
+		rtwn_sdio_service(uc);
 	}
 
 	return (B_OK);

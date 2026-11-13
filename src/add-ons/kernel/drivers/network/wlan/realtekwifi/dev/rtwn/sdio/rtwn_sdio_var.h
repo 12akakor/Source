@@ -88,7 +88,7 @@ int		rtwn_sdio_resume_hci(struct rtwn_sdio_softc *);
 size_t		rtwn_sdio_align_size(size_t);
 
 /* rtwn_sdio_rx.c */
-void		rtwn_sdio_intr(void *);
+void		rtwn_sdio_service(void *);
 void		rtwn_sdio_enable_intr(struct rtwn_sdio_softc *, bool);
 void		rtwn_sdio_poll_start(struct rtwn_sdio_softc *);
 void		rtwn_sdio_poll_stop(struct rtwn_sdio_softc *);
