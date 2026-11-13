@@ -1492,8 +1492,18 @@ rtwn_watchdog(void *arg)
 			sc->sc_rx_seen = sc->sc_rx_transfers;
 			sc->sc_rx_silence = 0;
 			sc->sc_rx_flowing = 1;
-		} else if (++sc->sc_rx_silence
-		    >= (sc->sc_rx_flowing && linked ? sc->rx_silence_limit : 120)) {
+		} else {
+			/*
+			 * net80211 drops a link whose beacons stop and starts a scan,
+			 * so a chip that stops receiving takes the link down with it:
+			 * what counts is whether the silence began on a link.
+			 */
+			if (sc->sc_rx_silence == 0)
+				sc->sc_rx_silent_linked = linked;
+		}
+		if (sc->sc_rx_transfers == sc->sc_rx_seen
+		    && ++sc->sc_rx_silence >= (sc->sc_rx_flowing
+		    && sc->sc_rx_silent_linked ? sc->rx_silence_limit : 120)) {
 			ic_printf(ic, "nothing received for %d s, restarting\n",
 			    sc->sc_rx_silence);
 			sc->sc_rx_silence = 0;

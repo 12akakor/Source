@@ -228,6 +228,7 @@ struct rtwn_softc {
 	uint32_t		sc_rx_seen;
 	int			sc_rx_silence;		/* seconds */
 	int			sc_rx_flowing;
+	int			sc_rx_silent_linked;	/* silence began on a link */
 	int			rx_silence_limit;	/* seconds; 0: not watched */
 #endif
 
