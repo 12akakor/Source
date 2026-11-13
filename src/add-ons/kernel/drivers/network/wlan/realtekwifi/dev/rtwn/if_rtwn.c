@@ -1492,14 +1492,18 @@ rtwn_watchdog(void *arg)
 			sc->sc_rx_seen = sc->sc_rx_transfers;
 			sc->sc_rx_silence = 0;
 			sc->sc_rx_flowing = 1;
-		} else {
 			/*
-			 * net80211 drops a link whose beacons stop and starts a scan,
-			 * so a chip that stops receiving takes the link down with it:
-			 * what counts is whether the silence began on a link.
+			 * net80211 drops a link whose beacons stop within a beacon
+			 * interval or three and starts a scan, so at the first tick
+			 * without frames the link is usually gone already: a chip that
+			 * stops receiving takes the link down with it. Take the link
+			 * state here, while frames still come, or the restart waits
+			 * the full two minutes (seen on a Teclast X98 Air III).
 			 */
-			if (sc->sc_rx_silence == 0)
-				sc->sc_rx_silent_linked = linked;
+			sc->sc_rx_silent_linked = linked;
+		} else if (linked) {
+			/* The link is still up while nothing comes: it counts too. */
+			sc->sc_rx_silent_linked = 1;
 		}
 		if (sc->sc_rx_transfers == sc->sc_rx_seen
 		    && ++sc->sc_rx_silence >= (sc->sc_rx_flowing
