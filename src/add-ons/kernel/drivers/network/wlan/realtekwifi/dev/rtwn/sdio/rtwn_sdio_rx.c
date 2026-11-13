@@ -7,14 +7,15 @@
 
 /*!	Interrupt and receive path of rtwn over SDIO.
 
-	rtwn_sdio_service() does the work of a chip interrupt: the card
-	interrupt runs it in a thread, and while the card interrupt is off
-	(see rtwn_sdio_attach()) the poll thread calls it. REG_SDIO_HISR says
-	why; for received data REG_SDIO_RX0_REQ_LEN gives the number of bytes
-	waiting in the receive FIFO, which are read with one CMD53 per page from
-	the RX0 FIFO address. The buffer holds one or more frames, each with a
-	receive descriptor and aligned to 8 bytes, like an aggregated USB
-	transfer. The order of the steps follows the rtw88 driver (sdio.c).
+	rtwn_sdio_handle() does the work of a chip interrupt: the card
+	interrupt reaches it through rtwn_sdio_service(), and while the card
+	interrupt is off (see rtwn_sdio_attach()) the poll thread calls it
+	directly. REG_SDIO_HISR says why; for received data
+	REG_SDIO_RX0_REQ_LEN gives the number of bytes waiting in the receive
+	FIFO, which are read with one CMD53 per page from the RX0 FIFO address.
+	The buffer holds one or more frames, each with a receive descriptor and
+	aligned to 8 bytes, like an aggregated USB transfer. The order of the
+	steps follows the rtw88 driver (sdio.c).
 */
 
 
@@ -265,13 +266,15 @@ rtwn_sdio_rx(struct rtwn_sdio_softc *uc)
 
 
 /*!	Does the work of a chip interrupt: reads REG_SDIO_HISR, handles a
-	transmit error, reads the frames of a receive request, acknowledges the
-	interrupt and restarts the transmit queue.
+	transmit error, reads the frames of a receive request and acknowledges
+	the interrupt. \a kickTx restarts the transmit queue; the poll thread
+	passes false, because rtwn_start() can wait 20 ms for free pages and
+	that would keep the only thread that reads the receive FIFO away from
+	it.
 */
-void
-rtwn_sdio_service(void *arg)
+static void
+rtwn_sdio_handle(struct rtwn_sdio_softc *uc, bool kickTx)
 {
-	struct rtwn_sdio_softc *uc = arg;
 	struct rtwn_softc *sc = &uc->sc_sc;
 	uint32_t hisr;
 
@@ -302,8 +305,17 @@ rtwn_sdio_service(void *arg)
 	if (hisr != 0)
 		rtwn_sdio_local_write_4(uc, RTWN_SDIO_HISR, hisr);
 
-	rtwn_start(sc);
+	if (kickTx)
+		rtwn_start(sc);
 	RTWN_UNLOCK(sc);
+}
+
+
+/*!	Entry point for the card interrupt; see rtwn_sdio_handle(). */
+void
+rtwn_sdio_service(void *arg)
+{
+	rtwn_sdio_handle(arg, true);
 }
 
 
@@ -344,7 +356,7 @@ rtwn_sdio_poll_thread(void *arg)
 		}
 
 		/* test: the card interrupt is off, so do its work here. */
-		rtwn_sdio_service(uc);
+		rtwn_sdio_handle(uc, false);
 	}
 
 	return (B_OK);
