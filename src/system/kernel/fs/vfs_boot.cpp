@@ -508,8 +508,9 @@ static const size_t kSyslogAreaSize = 512 * 1024;
 	partition: a FAT partition with a block that starts with the marker.
 */
 // Test only: lists every team with its threads and what they wait on.
+// Called from here at boot and from shutdown.cpp during a shutdown.
 
-static void
+void
 dump_teams_for_diag(int32 round)
 {
 	dprintf("hangdiag: ==== snapshot %" B_PRId32 " at %" B_PRIdBIGTIME
