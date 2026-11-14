@@ -58,6 +58,7 @@ struct rtwn_sdio_softc {
 	uint32_t		sc_test_rx_payload;	/* sum of the frame lengths */
 	uint32_t		sc_test_rx_crc;
 	uint32_t		sc_test_rx_icv;
+	uint32_t		sc_test_rx_retry;	/* 802.11 retry flag */
 	uint32_t		sc_test_rx_ampdu;
 	uint32_t		sc_test_rx_amsdu;
 	uint32_t		sc_test_rx_cck;		/* rates the frames came in with */
@@ -70,6 +71,8 @@ struct rtwn_sdio_softc {
 	uint32_t		sc_test_rx_large;	/* 1500 bytes or less */
 	uint32_t		sc_test_rx_jumbo;	/* more than 1500 bytes */
 	uint32_t		sc_test_rx_req;		/* receive requests */
+	uint32_t		sc_test_rx_pad;		/* not block aligned */
+	uint32_t		sc_test_rx_pad_bytes;	/* bytes read too many */
 	uint32_t		sc_test_rx_reads;	/* CMD53 transfers */
 	uint32_t		sc_test_rx_bytes;	/* bytes read from the FIFO */
 	uint32_t		sc_test_polls;		/* polls of the chip */
@@ -88,6 +91,19 @@ struct rtwn_sdio_softc {
 	uint32_t		sc_test_big_last_rate;
 	int32_t			sc_test_big_rssi_sum;
 	uint32_t		sc_test_big_rssi_n;
+	uint32_t		sc_test_big_retry;	/* with the 802.11 retry flag */
+
+	/* test: the uplink, as the chip reports it */
+	uint32_t		sc_test_tx_retries;	/* retries of all reports */
+	uint32_t		sc_test_tx_retried;	/* reports with a retry */
+	uint32_t		sc_test_tx_failed;	/* retry limit reached */
+	uint32_t		sc_test_tx_expired;	/* lifetime expired */
+
+	/* test: the distance between the frames that carry the download */
+	uint64_t		sc_test_big_last;	/* microseconds */
+	uint32_t		sc_test_big_gap_sum;	/* milliseconds */
+	uint32_t		sc_test_big_gap_n;
+	uint32_t		sc_test_big_pauses;	/* over half a second */
 
 	uint8_t			*sc_rx_buf;
 	uint8_t			*sc_tx_buf;

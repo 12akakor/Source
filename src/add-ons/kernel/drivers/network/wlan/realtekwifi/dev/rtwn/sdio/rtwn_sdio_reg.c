@@ -8,11 +8,14 @@
 /*!	Register access of rtwn over SDIO.
 
 	MAC registers are reached through function 1 at RTWN_SDIO_MAC(), the
-	SDIO local registers at RTWN_SDIO_LOCAL(). Until the chip is powered on
-	only CMD52 works on the MAC registers, so 32 bit accesses are made byte
-	by byte; afterwards aligned ones use one CMD53. 16 bit accesses are
-	always made byte by byte: a 2 byte CMD53 fails on the RTL8723BS (the
-	rtw88 driver does the same, see sdio.c there).
+	SDIO local registers at RTWN_SDIO_LOCAL(). One byte always goes through
+	CMD52, and so does every access to the SDIO registers below 0x100: the
+	vendor driver does the same (sdio_read32 in sdio_ops.c), and CMD53
+	reads of HISR and FREE_TXPG fail now and then (70 of them in the log of
+	build #172). 16 bit accesses are always made byte by byte: a 2 byte
+	CMD53 fails on the RTL8723BS (the rtw88 driver does the same, see
+	sdio.c there). After the chip is powered on, the other aligned 32 bit
+	accesses use one CMD53.
 */
 
 
@@ -82,13 +85,15 @@ rtwn_sdio_read(struct rtwn_sdio_softc *uc, uint32_t addr, int len)
 {
 	int err = 0;
 	uint32_t value;
+	bool bytewise = len != 4 || addr < RTWN_SDIO_ADDR(1, 0)
+	    || !uc->sc_powered || (addr % 4) != 0;
 
 	if (len == 1)
 		value = sdio_read_1(uc->sc_func, addr, &err);
-	else if (len == 4 && uc->sc_powered && (addr % 4) == 0)
-		value = sdio_read_4(uc->sc_func, addr, &err);
-	else
+	else if (bytewise)
 		value = rtwn_sdio_read_bytewise(uc, addr, len, &err);
+	else
+		value = sdio_read_4(uc->sc_func, addr, &err);
 
 	static int sFailLogread = 0;	/* test: keep the log readable */
 	if (err != 0 && sFailLogread++ < 100) {
@@ -105,13 +110,15 @@ rtwn_sdio_write(struct rtwn_sdio_softc *uc, uint32_t addr, uint32_t value,
     int len)
 {
 	int err = 0;
+	bool bytewise = len != 4 || addr < RTWN_SDIO_ADDR(1, 0)
+	    || !uc->sc_powered || (addr % 4) != 0;
 
 	if (len == 1)
 		sdio_write_1(uc->sc_func, addr, value, &err);
-	else if (len == 4 && uc->sc_powered && (addr % 4) == 0)
-		sdio_write_4(uc->sc_func, addr, value, &err);
-	else
+	else if (bytewise)
 		err = rtwn_sdio_write_bytewise(uc, addr, value, len);
+	else
+		sdio_write_4(uc->sc_func, addr, value, &err);
 
 	static int sFailLogwrite = 0;	/* test: keep the log readable */
 	if (err != 0 && sFailLogwrite++ < 100) {

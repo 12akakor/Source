@@ -32,6 +32,7 @@
 #include <sys/bus.h>
 #include <sys/endian.h>
 #include <sys/taskqueue.h>
+#include <sys/time.h>
 
 #include <net/if.h>
 #include <net/if_var.h>
@@ -52,6 +53,9 @@
 #include <dev/rtwn/rtl8192c/r92c_reg.h>
 #include <dev/rtwn/rtl8192c/r92c_rx_desc.h>
 #include <dev/rtwn/rtl8192c/r92c_tx_desc.h>
+
+#include <dev/rtwn/rtl8812a/r12a_fw_cmd.h>
+#include <dev/rtwn/rtl8812a/r12a_tx_desc.h>
 
 #include <dev/rtwn/sdio/rtwn_sdio_reg.h>
 #include <dev/rtwn/sdio/rtwn_sdio_var.h>
@@ -96,33 +100,75 @@ rtwn_sdio_read_port(struct rtwn_sdio_softc *uc, uint8_t *buf, size_t size)
 }
 
 
+/*!	Notes when a frame that carries the download arrived, for the average
+	distance between those frames. About one beacon interval means the
+	access point holds the frames back until the station wakes up, which
+	points at power save mode.
+*/
+static void
+rtwn_sdio_rx_note_big(struct rtwn_sdio_softc *uc)
+{
+	struct timeval tv;
+	uint64_t gap, now;
+
+	getmicrouptime(&tv);
+	now = (uint64_t)tv.tv_sec * 1000000 + tv.tv_usec;
+
+	if (uc->sc_test_big_last != 0) {
+		gap = now - uc->sc_test_big_last;
+		if (gap > 500000)
+			uc->sc_test_big_pauses++;
+		uc->sc_test_big_gap_sum += gap / 1000;
+		uc->sc_test_big_gap_n++;
+	}
+	uc->sc_test_big_last = now;
+}
+
+
 /*!	Counts one received frame for the test statistics: its length, whether
 	the chip reports an error, whether it came from an aggregate, and the
 	rate and signal strength it came in with. \a physt is \c NULL when the
 	descriptor has no PHY status of its own (the following MPDUs of an
 	aggregate), in which case the last known signal strength stays.
+	\a frame is the 802.11 header; only its first two bytes are read, for
+	the retry flag.
 */
 static void
 rtwn_sdio_rx_count(struct rtwn_sdio_softc *uc,
-    struct rtwn_rx_stat_common *stat, void *physt)
+    struct rtwn_rx_stat_common *stat, void *physt, const uint8_t *frame)
 {
 	uint32_t rxdw0 = le32toh(stat->rxdw0);
 	uint32_t rxdw1 = le32toh(stat->rxdw1);
 	uint32_t rxdw3 = le32toh(stat->rxdw3);
 	uint8_t rate = MS(rxdw3, R92C_RXDW3_RATE);
 	int pktlen = MS(rxdw0, RTWN_RXDW0_PKTLEN);
+	bool retry = false;
 	int8_t rssi;
 
 	uc->sc_test_rx++;
 	uc->sc_test_rx_payload += pktlen;
+
+	/* test: the chip hands over frames with a bad FCS or ICV too (see
+	   the poll thread), but they say nothing about the link. */
+	if (rxdw0 & RTWN_RXDW0_CRCERR) {
+		uc->sc_test_rx_crc++;
+		return;
+	}
+	if (rxdw0 & RTWN_RXDW0_ICVERR) {
+		uc->sc_test_rx_icv++;
+		return;
+	}
+
 	uc->sc_test_last_pktlen = pktlen;
 	uc->sc_test_last_rxdw1 = rxdw1;
 	uc->sc_test_last_rxdw3 = rxdw3;
 
-	if (rxdw0 & RTWN_RXDW0_CRCERR)
-		uc->sc_test_rx_crc++;
-	if (rxdw0 & RTWN_RXDW0_ICVERR)
-		uc->sc_test_rx_icv++;
+	/* test: the access point retransmitted this frame. */
+	if (pktlen >= 2 && (frame[1] & IEEE80211_FC1_RETRY) != 0) {
+		retry = true;
+		uc->sc_test_rx_retry++;
+	}
+
 	if (rxdw1 & R92C_RXDW1_AMPDU)
 		uc->sc_test_rx_ampdu++;
 	if (rxdw1 & R92C_RXDW1_AMSDU)
@@ -172,7 +218,39 @@ rtwn_sdio_rx_count(struct rtwn_sdio_softc *uc,
 		uc->sc_test_big_last_rate = rate;
 		uc->sc_test_big_rssi_sum += rssi;
 		uc->sc_test_big_rssi_n++;
+		if (retry)
+			uc->sc_test_big_retry++;
+		rtwn_sdio_rx_note_big(uc);
 	}
+}
+
+
+/*!	Counts one transmit report for the test statistics: how often the chip
+	had to retransmit an uplink frame and how often it gave up on one. The
+	layout is the one r12a_ratectl_tx_complete() reads.
+*/
+static void
+rtwn_sdio_rx_count_tx_report(struct rtwn_sdio_softc *uc, uint8_t *buf,
+    int len)
+{
+	struct r12a_c2h_tx_rpt *rpt;
+	int ntries;
+
+	/* Skip Rx descriptor / report id / sequence fields. */
+	buf += sizeof(struct r92c_rx_stat) + 2;
+	len -= sizeof(struct r92c_rx_stat) + 2;
+	if (len != (int)sizeof(*rpt))
+		return;
+
+	rpt = (struct r12a_c2h_tx_rpt *)buf;
+	ntries = MS(rpt->txrptb2, R12A_TXRPTB2_RETRY_CNT);
+	uc->sc_test_tx_retries += ntries;
+	if (ntries != 0)
+		uc->sc_test_tx_retried++;
+	if (rpt->txrptb0 & R12A_TXRPTB0_RETRY_OVER)
+		uc->sc_test_tx_failed++;
+	if (rpt->txrptb0 & R12A_TXRPTB0_LIFE_EXPIRE)
+		uc->sc_test_tx_expired++;
 }
 
 
@@ -242,7 +320,8 @@ rtwn_sdio_rx_parse(struct rtwn_softc *sc, uint8_t *buf, int len)
 			   bytes, like rtwn_rx_common() expects. */
 			if (infosz != 0 && (rxdw0 & RTWN_RXDW0_PHYST))
 				physt = buf + sizeof(*stat) + shift;
-			rtwn_sdio_rx_count(RTWN_SDIO_SOFTC(sc), stat, physt);
+			rtwn_sdio_rx_count(RTWN_SDIO_SOFTC(sc), stat, physt,
+			    buf + sizeof(*stat) + shift + infosz);
 			m = rtwn_sdio_rx_copy(sc, stat, totlen);
 			sc->sc_rx_transfers++;
 			if (m != NULL) {
@@ -255,6 +334,8 @@ rtwn_sdio_rx_parse(struct rtwn_softc *sc, uint8_t *buf, int len)
 			break;
 		case RTWN_RX_TX_REPORT:
 			RTWN_SDIO_SOFTC(sc)->sc_test_tx_reports++;	/* test */
+			rtwn_sdio_rx_count_tx_report(RTWN_SDIO_SOFTC(sc),
+			    buf, totlen);				/* test */
 			if (sc->sc_ratectl == RTWN_RATECTL_NET80211) {
 				RTWN_NT_LOCK(sc);
 				rtwn_handle_tx_report(sc, buf, totlen);
@@ -332,6 +413,10 @@ rtwn_sdio_rx(struct rtwn_sdio_softc *uc)
 
 		uc->sc_test_rx_req++;	/* test */
 		size = rtwn_sdio_align_size(len);
+		if (size > len) {	/* test: the card pads to whole blocks */
+			uc->sc_test_rx_pad++;
+			uc->sc_test_rx_pad_bytes += size - len;
+		}
 		if (size > RTWN_SDIO_RXBUFSZ) {
 			device_printf(sc->sc_dev, "%s: %u bytes do not fit\n",
 			    __func__, len);
@@ -436,6 +521,10 @@ rtwn_sdio_poll_thread(void *arg)
 		if (++statTicks % RTWN_SDIO_STAT_TICKS == 0) {
 			RTWN_LOCK(sc);
 			if (uc->sc_intr_enabled) {
+				/* test: let the chip hand over frames with a
+				   bad FCS or ICV, so that they are counted. */
+				sc->rcr |= R92C_RCR_ACRC32 | R92C_RCR_AICV;
+				rtwn_write_4(sc, R92C_RCR, sc->rcr);
 				device_printf(sc->sc_dev, "test: tx %u reports %u/%u "
 				    "c2h %u rx %u, last data txdw3 %08x txdw4 %08x, "
 				    "RRSR %08x ARFR 0x444 %08x 0x448 %08x 0x44c %08x "
@@ -457,7 +546,7 @@ rtwn_sdio_poll_thread(void *arg)
 				device_printf(sc->sc_dev, "test: rxb %u crc %u icv %u "
 				    "ampdu %u amsdu %u, len 128:%u 512:%u 1500:%u "
 				    "big:%u, req %u reads %u %u B, rxreq %u of %u "
-				    "polls, ovfw %u\n",
+				    "polls, ovfw %u pad %u %u B\n",
 				    uc->sc_test_rx_payload, uc->sc_test_rx_crc,
 				    uc->sc_test_rx_icv, uc->sc_test_rx_ampdu,
 				    uc->sc_test_rx_amsdu,
@@ -465,13 +554,14 @@ rtwn_sdio_poll_thread(void *arg)
 				    uc->sc_test_rx_large, uc->sc_test_rx_jumbo,
 				    uc->sc_test_rx_req, uc->sc_test_rx_reads,
 				    uc->sc_test_rx_bytes, uc->sc_test_polls_rx,
-				    uc->sc_test_polls, uc->sc_test_ovfw);
+				    uc->sc_test_polls, uc->sc_test_ovfw,
+				    uc->sc_test_rx_pad, uc->sc_test_rx_pad_bytes);
 				/* test: the air side of it */
 				device_printf(sc->sc_dev, "test: phy avg rssi %d "
 				    "min %d max %d of %u, cck %u ofdm %u mcs0-3 %u "
 				    "mcs4-7 %u mcs8+ %u, last %u B rate %u%s%s%s "
 				    "rssi %d, big %u %u B rssi avg %d rate %u, "
-				    "tx rate %u\n",
+				    "tx data rate %u\n",
 				    uc->sc_test_rssi_n != 0
 					? uc->sc_test_rssi_sum
 					    / (int32_t)uc->sc_test_rssi_n : 0,
@@ -494,8 +584,21 @@ rtwn_sdio_poll_thread(void *arg)
 					? uc->sc_test_big_rssi_sum
 					    / (int32_t)uc->sc_test_big_rssi_n : 0,
 				    uc->sc_test_big_last_rate,
-				    uc->sc_test_last_txdw5
-					& R92C_TXDW5_DATARATE_M);
+				    MS(uc->sc_test_last_txdw4,
+					R12A_TXDW4_DATARATE));
+				/* test: retries, and how the uplink fares */
+				device_printf(sc->sc_dev, "test: air retry %u "
+				    "big %u, tx rpt retry %u in %u frames, "
+				    "fail %u expire %u, big gap %u ms of %u, "
+				    "pauses %u\n",
+				    uc->sc_test_rx_retry, uc->sc_test_big_retry,
+				    uc->sc_test_tx_retries, uc->sc_test_tx_retried,
+				    uc->sc_test_tx_failed, uc->sc_test_tx_expired,
+				    uc->sc_test_big_gap_n != 0
+					? uc->sc_test_big_gap_sum
+					    / uc->sc_test_big_gap_n : 0,
+				    uc->sc_test_big_gap_n,
+				    uc->sc_test_big_pauses);
 			}
 			RTWN_UNLOCK(sc);
 		}
