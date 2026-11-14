@@ -53,6 +53,26 @@ struct rtwn_sdio_softc {
 	uint32_t		sc_test_last_txdw4;
 	uint32_t		sc_test_last_txdw3;
 
+	/* test: receive statistics, to see where the frames stay */
+	uint32_t		sc_test_rx_payload;	/* sum of the frame lengths */
+	uint32_t		sc_test_rx_crc;
+	uint32_t		sc_test_rx_icv;
+	uint32_t		sc_test_rx_ampdu;
+	uint32_t		sc_test_rx_small;	/* 128 bytes or less */
+	uint32_t		sc_test_rx_medium;	/* 512 bytes or less */
+	uint32_t		sc_test_rx_large;	/* 1500 bytes or less */
+	uint32_t		sc_test_rx_jumbo;	/* more than 1500 bytes */
+	uint32_t		sc_test_rx_req;		/* receive requests */
+	uint32_t		sc_test_rx_reads;	/* CMD53 transfers */
+	uint32_t		sc_test_rx_bytes;	/* bytes read from the FIFO */
+	uint32_t		sc_test_polls;		/* polls of the chip */
+	uint32_t		sc_test_polls_rx;	/* polls with a request */
+	uint32_t		sc_test_ovfw;		/* RX FIFO overflows */
+	uint32_t		sc_test_last_pktlen;
+	uint32_t		sc_test_last_rxdw1;
+	uint32_t		sc_test_last_rxdw3;
+	int8_t			sc_test_last_rssi;
+
 	uint8_t			*sc_rx_buf;
 	uint8_t			*sc_tx_buf;
 

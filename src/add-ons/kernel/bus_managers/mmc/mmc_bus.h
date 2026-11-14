@@ -255,8 +255,6 @@ private:
 		bool					fInitialScanWaited;
 		bool					fDeferRegistration;
 		uint16_t				fSdioRca;
-		uint16_t				fSdioVendor;
-		uint16_t				fSdioDevice;
 		bool					fSdioHighSpeedSupported;
 		mutex					fRegistrationLock;
 		card_info				fPendingCards[kMaxPendingCards];

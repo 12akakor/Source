@@ -16,6 +16,9 @@
 	The buffer holds one or more frames, each with a receive descriptor and
 	aligned to 8 bytes, like an aggregated USB transfer. The order of the
 	steps follows the rtw88 driver (sdio.c).
+
+	The receive path also counts what it does, for the test line that the
+	poll thread prints every 10 s (see rtwn_sdio_rx_count()).
 */
 
 
@@ -47,6 +50,7 @@
 #include <dev/rtwn/if_rtwn_tx.h>
 
 #include <dev/rtwn/rtl8192c/r92c_reg.h>
+#include <dev/rtwn/rtl8192c/r92c_rx_desc.h>
 
 #include <dev/rtwn/sdio/rtwn_sdio_reg.h>
 #include <dev/rtwn/sdio/rtwn_sdio_var.h>
@@ -80,6 +84,7 @@ rtwn_sdio_read_port(struct rtwn_sdio_softc *uc, uint8_t *buf, size_t size)
 	while (size > 0) {
 		size_t chunk = MIN(size, RTWN_SDIO_RX_CHUNK);
 		int status = sdio_read_bytes(uc->sc_func, addr, buf, chunk, true);
+		uc->sc_test_rx_reads++;	/* test */
 		if (status != 0)
 			error = status;
 		buf += chunk;
@@ -87,6 +92,55 @@ rtwn_sdio_read_port(struct rtwn_sdio_softc *uc, uint8_t *buf, size_t size)
 	}
 
 	return (error);
+}
+
+
+/*!	Counts one received frame for the test statistics: its length, whether
+	the chip reports an error, whether it came from an aggregate, and the
+	rate and signal strength it came in with. \a physt is \c NULL when the
+	descriptor has no PHY status of its own (the following MPDUs of an
+	aggregate), in which case the last known signal strength stays.
+*/
+static void
+rtwn_sdio_rx_count(struct rtwn_sdio_softc *uc,
+    struct rtwn_rx_stat_common *stat, void *physt)
+{
+	uint32_t rxdw0 = le32toh(stat->rxdw0);
+	uint32_t rxdw1 = le32toh(stat->rxdw1);
+	uint32_t rxdw3 = le32toh(stat->rxdw3);
+	uint8_t rate = MS(rxdw3, R92C_RXDW3_RATE);
+	int pktlen = MS(rxdw0, RTWN_RXDW0_PKTLEN);
+
+	uc->sc_test_rx++;
+	uc->sc_test_rx_payload += pktlen;
+	uc->sc_test_last_pktlen = pktlen;
+	uc->sc_test_last_rxdw1 = rxdw1;
+	uc->sc_test_last_rxdw3 = rxdw3;
+
+	if (rxdw0 & RTWN_RXDW0_CRCERR)
+		uc->sc_test_rx_crc++;
+	if (rxdw0 & RTWN_RXDW0_ICVERR)
+		uc->sc_test_rx_icv++;
+	if (rxdw1 & R92C_RXDW1_AMPDU)
+		uc->sc_test_rx_ampdu++;
+
+	if (pktlen <= 128)
+		uc->sc_test_rx_small++;
+	else if (pktlen <= 512)
+		uc->sc_test_rx_medium++;
+	else if (pktlen <= 1500)
+		uc->sc_test_rx_large++;
+	else
+		uc->sc_test_rx_jumbo++;
+
+	if (physt != NULL) {
+		if (RTWN_RATE_IS_CCK(rate))
+			uc->sc_test_last_rssi
+			    = rtwn_get_rssi_cck(&uc->sc_sc, physt);
+		else
+			uc->sc_test_last_rssi
+			    = rtwn_get_rssi_ofdm(&uc->sc_sc, physt);
+	}
 }
 
 
@@ -143,6 +197,7 @@ rtwn_sdio_rx_parse(struct rtwn_softc *sc, uint8_t *buf, int len)
 		int infosz = MS(rxdw0, RTWN_RXDW0_INFOSZ) * 8;
 		int shift = MS(rxdw0, RTWN_RXDW0_SHIFT);
 		int totlen = sizeof(*stat) + infosz + shift + pktlen;
+		void *physt = NULL;
 		struct mbuf *m;
 
 		if (pktlen == 0 || totlen > len)
@@ -150,8 +205,11 @@ rtwn_sdio_rx_parse(struct rtwn_softc *sc, uint8_t *buf, int len)
 
 		switch (rtwn_classify_intr(sc, buf, totlen)) {
 		case RTWN_RX_DATA:
+			/* test: count it, with its own signal strength. */
+			if (infosz != 0 && (rxdw0 & RTWN_RXDW0_PHYST))
+				physt = buf + shift;
+			rtwn_sdio_rx_count(RTWN_SDIO_SOFTC(sc), stat, physt);
 			m = rtwn_sdio_rx_copy(sc, stat, totlen);
-			RTWN_SDIO_SOFTC(sc)->sc_test_rx++;	/* test */
 			sc->sc_rx_transfers++;
 			if (m != NULL) {
 				if (last == NULL)
@@ -238,6 +296,7 @@ rtwn_sdio_rx(struct rtwn_sdio_softc *uc)
 		if (len == 0 || len == 0xffff)
 			break;
 
+		uc->sc_test_rx_req++;	/* test */
 		size = rtwn_sdio_align_size(len);
 		if (size > RTWN_SDIO_RXBUFSZ) {
 			device_printf(sc->sc_dev, "%s: %u bytes do not fit\n",
@@ -249,6 +308,7 @@ rtwn_sdio_rx(struct rtwn_sdio_softc *uc)
 			counter_u64_add(sc->sc_ic.ic_ierrors, 1);
 			break;
 		}
+		uc->sc_test_rx_bytes += len;	/* test */
 		total += len;
 
 		m = rtwn_sdio_rx_parse(sc, uc->sc_rx_buf, MIN(len, size));
@@ -284,11 +344,15 @@ rtwn_sdio_handle(struct rtwn_sdio_softc *uc, bool kickTx)
 		return;
 	}
 
+	uc->sc_test_polls++;	/* test */
 	hisr = rtwn_sdio_local_read_4(uc, RTWN_SDIO_HISR);
 	if (hisr == 0xffffffff) {
 		RTWN_UNLOCK(sc);
 		return;
 	}
+
+	if (hisr & RTWN_SDIO_INT_RXFOVW)
+		uc->sc_test_ovfw++;	/* test */
 
 	if (hisr & RTWN_SDIO_INT_TXERR) {
 		/* The cause is in REG_TXDMA_STATUS; write 1 to clear. */
@@ -297,8 +361,10 @@ rtwn_sdio_handle(struct rtwn_sdio_softc *uc, bool kickTx)
 		device_printf(sc->sc_dev, "transmit error (HISR %#x, "
 		    "TXDMA_STATUS %#x)\n", hisr, status);
 	}
-	if (hisr & RTWN_SDIO_INT_RX_REQUEST)
+	if (hisr & RTWN_SDIO_INT_RX_REQUEST) {
+		uc->sc_test_polls_rx++;	/* test */
 		rtwn_sdio_rx(uc);
+	}
 
 	/* Only defined bits: others keep the interrupt asserted. */
 	hisr &= RTWN_SDIO_HISR_CLEAR_MASK;
@@ -351,6 +417,27 @@ rtwn_sdio_poll_thread(void *arg)
 				    uc->sc_test_rx_err,
 				    rtwn_sdio_local_read_4(uc, RTWN_SDIO_HISR),
 				    rtwn_sdio_local_read_2(uc, RTWN_SDIO_RX0_REQ_LEN));
+				/* test: what the receive path did with it */
+				device_printf(sc->sc_dev, "test: rxb %u crc %u icv %u "
+				    "ampdu %u, len 128:%u 512:%u 1500:%u big:%u, "
+				    "req %u reads %u %u B, rxreq %u of %u polls, "
+				    "ovfw %u, last len %u rate %u%s%s%s rssi %d\n",
+				    uc->sc_test_rx_payload, uc->sc_test_rx_crc,
+				    uc->sc_test_rx_icv, uc->sc_test_rx_ampdu,
+				    uc->sc_test_rx_small, uc->sc_test_rx_medium,
+				    uc->sc_test_rx_large, uc->sc_test_rx_jumbo,
+				    uc->sc_test_rx_req, uc->sc_test_rx_reads,
+				    uc->sc_test_rx_bytes, uc->sc_test_polls_rx,
+				    uc->sc_test_polls, uc->sc_test_ovfw,
+				    uc->sc_test_last_pktlen,
+				    MS(uc->sc_test_last_rxdw3, R92C_RXDW3_RATE),
+				    (uc->sc_test_last_rxdw3 & R92C_RXDW3_HT) != 0
+					? " ht" : "",
+				    (uc->sc_test_last_rxdw3 & R92C_RXDW3_HT40) != 0
+					? " 40" : "",
+				    (uc->sc_test_last_rxdw1 & R92C_RXDW1_AMPDU) != 0
+					? " ampdu" : "",
+				    uc->sc_test_last_rssi);
 			}
 			RTWN_UNLOCK(sc);
 		}
