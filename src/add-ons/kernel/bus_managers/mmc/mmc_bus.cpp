@@ -457,6 +457,21 @@ MMCBus::_SwitchSdioHighSpeed()
 {
 	if (!fSdioHighSpeedSupported)
 		return;
+
+	// The RTL8723BS on SDIO returns data with CRC and end bit errors when
+	// the bus runs at 50MHz under load (seen on Bay Trail, in the Teclast
+	// X98 Air III). At 25MHz it is reliable, and 25MHz in 4 bit mode is
+	// 12.5MB/s, still faster than the 72Mbps the WiFi part can do, so
+	// stay in default speed instead of switching to high speed.
+	const uint16_t kRtl8723bsVendor = 0x024c;
+	const uint16_t kRtl8723bsDevice = 0xb723;
+	if (fSdioVendor == kRtl8723bsVendor
+		&& fSdioDevice == kRtl8723bsDevice) {
+		SetClock(25000);
+		TRACE_ALWAYS("SDIO card: RTL8723BS, 25MHz (50MHz is unreliable)\n");
+		return;
+	}
+
 	if (SetTiming(fSdioRca, MMC_TIMING_HS,
 			MMC_TIMING_QUERY | MMC_TIMING_NO_VERIFY) != B_OK) {
 		TRACE_ALWAYS("SDIO card: the host has no high speed\n");
@@ -592,6 +607,8 @@ MMCBus::_ProbeSDIO()
 	const uint32_t kBusSpeedSelect = 0x13;
 	uint8_t speed = 0;
 	fSdioRca = rca;
+	fSdioVendor = vendor;
+	fSdioDevice = device;
 	fSdioHighSpeedSupported
 		= _ReadDirect(rca, 0, kBusSpeedSelect, &speed) == B_OK
 			&& (speed & 0x01) != 0;
