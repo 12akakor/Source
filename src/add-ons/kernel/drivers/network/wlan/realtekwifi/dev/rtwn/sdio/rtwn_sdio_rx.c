@@ -100,26 +100,34 @@ rtwn_sdio_read_port(struct rtwn_sdio_softc *uc, uint8_t *buf, size_t size)
 }
 
 
-/*!	Notes when a frame that carries the download arrived, for the average
-	distance between those frames. About one beacon interval means the
-	access point holds the frames back until the station wakes up, which
-	points at power save mode.
+/*!	Notes when a frame that carries the download arrived, for the
+	histogram of the distance between those frames. Gaps of about one
+	beacon interval mean the access point holds the frames back until the
+	station wakes up, which points at power save mode; gaps of a few
+	hundred milliseconds point at the transport layer instead.
 */
 static void
 rtwn_sdio_rx_note_big(struct rtwn_sdio_softc *uc)
 {
+	/* Upper bounds of the first five buckets, in microseconds. */
+	static const uint32_t bounds[] = {
+		10000, 100000, 200000, 300000, 500000
+	};
 	struct timeval tv;
 	uint64_t gap, now;
+	size_t i;
 
 	getmicrouptime(&tv);
 	now = (uint64_t)tv.tv_sec * 1000000 + tv.tv_usec;
 
 	if (uc->sc_test_big_last != 0) {
 		gap = now - uc->sc_test_big_last;
-		if (gap > 500000)
-			uc->sc_test_big_pauses++;
-		uc->sc_test_big_gap_sum += gap / 1000;
-		uc->sc_test_big_gap_n++;
+		for (i = 0; i < sizeof(bounds) / sizeof(bounds[0]); i++) {
+			if (gap < bounds[i])
+				break;
+		}
+		uc->sc_test_big_gap[i]++;
+		uc->sc_test_big_gaps++;
 	}
 	uc->sc_test_big_last = now;
 }
@@ -148,8 +156,8 @@ rtwn_sdio_rx_count(struct rtwn_sdio_softc *uc,
 	uc->sc_test_rx++;
 	uc->sc_test_rx_payload += pktlen;
 
-	/* test: the chip hands over frames with a bad FCS or ICV too (see
-	   the poll thread), but they say nothing about the link. */
+	/* test: a frame with a bad FCS or ICV says nothing about the link,
+	   so count it and leave the statistics of the good frames alone. */
 	if (rxdw0 & RTWN_RXDW0_CRCERR) {
 		uc->sc_test_rx_crc++;
 		return;
@@ -521,10 +529,6 @@ rtwn_sdio_poll_thread(void *arg)
 		if (++statTicks % RTWN_SDIO_STAT_TICKS == 0) {
 			RTWN_LOCK(sc);
 			if (uc->sc_intr_enabled) {
-				/* test: let the chip hand over frames with a
-				   bad FCS or ICV, so that they are counted. */
-				sc->rcr |= R92C_RCR_ACRC32 | R92C_RCR_AICV;
-				rtwn_write_4(sc, R92C_RCR, sc->rcr);
 				device_printf(sc->sc_dev, "test: tx %u reports %u/%u "
 				    "c2h %u rx %u, last data txdw3 %08x txdw4 %08x, "
 				    "RRSR %08x ARFR 0x444 %08x 0x448 %08x 0x44c %08x "
@@ -589,16 +593,15 @@ rtwn_sdio_poll_thread(void *arg)
 				/* test: retries, and how the uplink fares */
 				device_printf(sc->sc_dev, "test: air retry %u "
 				    "big %u, tx rpt retry %u in %u frames, "
-				    "fail %u expire %u, big gap %u ms of %u, "
-				    "pauses %u\n",
+				    "fail %u expire %u, gaps %u: %u %u %u %u "
+				    "%u %u\n",
 				    uc->sc_test_rx_retry, uc->sc_test_big_retry,
 				    uc->sc_test_tx_retries, uc->sc_test_tx_retried,
 				    uc->sc_test_tx_failed, uc->sc_test_tx_expired,
-				    uc->sc_test_big_gap_n != 0
-					? uc->sc_test_big_gap_sum
-					    / uc->sc_test_big_gap_n : 0,
-				    uc->sc_test_big_gap_n,
-				    uc->sc_test_big_pauses);
+				    uc->sc_test_big_gaps,
+				    uc->sc_test_big_gap[0], uc->sc_test_big_gap[1],
+				    uc->sc_test_big_gap[2], uc->sc_test_big_gap[3],
+				    uc->sc_test_big_gap[4], uc->sc_test_big_gap[5]);
 			}
 			RTWN_UNLOCK(sc);
 		}

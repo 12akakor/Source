@@ -101,9 +101,8 @@ struct rtwn_sdio_softc {
 
 	/* test: the distance between the frames that carry the download */
 	uint64_t		sc_test_big_last;	/* microseconds */
-	uint32_t		sc_test_big_gap_sum;	/* milliseconds */
-	uint32_t		sc_test_big_gap_n;
-	uint32_t		sc_test_big_pauses;	/* over half a second */
+	uint32_t		sc_test_big_gap[6];	/* buckets, see note_big() */
+	uint32_t		sc_test_big_gaps;	/* all gaps together */
 
 	uint8_t			*sc_rx_buf;
 	uint8_t			*sc_tx_buf;
