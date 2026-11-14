@@ -451,6 +451,7 @@ MMCBus::_ReadCISManufacturer(uint16_t rca, uint32_t cisPointer,
 /*!	Switches an SDIO card that supports it (SHS) to high speed: EHS in the
 	CCCR, then the host to high speed timing and 50MHz (SDIO Simplified
 	Specification 3.00, 6.9 and 12.1), as Linux does (mmc_sdio_switch_hs).
+	The RTL8723BS is an exception, it stays in default speed at 25MHz.
 */
 void
 MMCBus::_SwitchSdioHighSpeed()
