@@ -52,12 +52,19 @@ struct rtwn_sdio_softc {
 	uint32_t		sc_test_rx_err;	/* test */
 	uint32_t		sc_test_last_txdw4;
 	uint32_t		sc_test_last_txdw3;
+	uint32_t		sc_test_last_txdw5;
 
 	/* test: receive statistics, to see where the frames stay */
 	uint32_t		sc_test_rx_payload;	/* sum of the frame lengths */
 	uint32_t		sc_test_rx_crc;
 	uint32_t		sc_test_rx_icv;
 	uint32_t		sc_test_rx_ampdu;
+	uint32_t		sc_test_rx_amsdu;
+	uint32_t		sc_test_rx_cck;		/* rates the frames came in with */
+	uint32_t		sc_test_rx_ofdm;
+	uint32_t		sc_test_rx_mcs03;
+	uint32_t		sc_test_rx_mcs47;
+	uint32_t		sc_test_rx_mcs8;
 	uint32_t		sc_test_rx_small;	/* 128 bytes or less */
 	uint32_t		sc_test_rx_medium;	/* 512 bytes or less */
 	uint32_t		sc_test_rx_large;	/* 1500 bytes or less */
@@ -72,6 +79,15 @@ struct rtwn_sdio_softc {
 	uint32_t		sc_test_last_rxdw1;
 	uint32_t		sc_test_last_rxdw3;
 	int8_t			sc_test_last_rssi;
+	int32_t			sc_test_rssi_sum;	/* of the frames with PHY status */
+	uint32_t		sc_test_rssi_n;
+	int8_t			sc_test_rssi_min;
+	int8_t			sc_test_rssi_max;
+	uint32_t		sc_test_big_frames;	/* frames over 1500 bytes */
+	uint32_t		sc_test_big_bytes;
+	uint32_t		sc_test_big_last_rate;
+	int32_t			sc_test_big_rssi_sum;
+	uint32_t		sc_test_big_rssi_n;
 
 	uint8_t			*sc_rx_buf;
 	uint8_t			*sc_tx_buf;

@@ -51,6 +51,7 @@
 
 #include <dev/rtwn/rtl8192c/r92c_reg.h>
 #include <dev/rtwn/rtl8192c/r92c_rx_desc.h>
+#include <dev/rtwn/rtl8192c/r92c_tx_desc.h>
 
 #include <dev/rtwn/sdio/rtwn_sdio_reg.h>
 #include <dev/rtwn/sdio/rtwn_sdio_var.h>
@@ -110,6 +111,7 @@ rtwn_sdio_rx_count(struct rtwn_sdio_softc *uc,
 	uint32_t rxdw3 = le32toh(stat->rxdw3);
 	uint8_t rate = MS(rxdw3, R92C_RXDW3_RATE);
 	int pktlen = MS(rxdw0, RTWN_RXDW0_PKTLEN);
+	int8_t rssi;
 
 	uc->sc_test_rx++;
 	uc->sc_test_rx_payload += pktlen;
@@ -123,6 +125,8 @@ rtwn_sdio_rx_count(struct rtwn_sdio_softc *uc,
 		uc->sc_test_rx_icv++;
 	if (rxdw1 & R92C_RXDW1_AMPDU)
 		uc->sc_test_rx_ampdu++;
+	if (rxdw1 & R92C_RXDW1_AMSDU)
+		uc->sc_test_rx_amsdu++;
 
 	if (pktlen <= 128)
 		uc->sc_test_rx_small++;
@@ -133,13 +137,41 @@ rtwn_sdio_rx_count(struct rtwn_sdio_softc *uc,
 	else
 		uc->sc_test_rx_jumbo++;
 
-	if (physt != NULL) {
-		if (RTWN_RATE_IS_CCK(rate))
-			uc->sc_test_last_rssi
-			    = rtwn_get_rssi_cck(&uc->sc_sc, physt);
-		else
-			uc->sc_test_last_rssi
-			    = rtwn_get_rssi_ofdm(&uc->sc_sc, physt);
+	/* test: which rate the frame came in with. */
+	if (RTWN_RATE_IS_CCK(rate))
+		uc->sc_test_rx_cck++;
+	else if (RTWN_RATE_IS_OFDM(rate))
+		uc->sc_test_rx_ofdm++;
+	else if (rate < RTWN_RIDX_HT_MCS(4))
+		uc->sc_test_rx_mcs03++;
+	else if (rate < RTWN_RIDX_HT_MCS(8))
+		uc->sc_test_rx_mcs47++;
+	else
+		uc->sc_test_rx_mcs8++;
+
+	if (physt == NULL)
+		return;
+
+	if (RTWN_RATE_IS_CCK(rate))
+		rssi = rtwn_get_rssi_cck(&uc->sc_sc, physt);
+	else
+		rssi = rtwn_get_rssi_ofdm(&uc->sc_sc, physt);
+	uc->sc_test_last_rssi = rssi;
+
+	uc->sc_test_rssi_sum += rssi;
+	if (uc->sc_test_rssi_n == 0 || rssi < uc->sc_test_rssi_min)
+		uc->sc_test_rssi_min = rssi;
+	if (uc->sc_test_rssi_n == 0 || rssi > uc->sc_test_rssi_max)
+		uc->sc_test_rssi_max = rssi;
+	uc->sc_test_rssi_n++;
+
+	/* test: the frames that carry the download. */
+	if (pktlen > 1500) {
+		uc->sc_test_big_frames++;
+		uc->sc_test_big_bytes += pktlen;
+		uc->sc_test_big_last_rate = rate;
+		uc->sc_test_big_rssi_sum += rssi;
+		uc->sc_test_big_rssi_n++;
 	}
 }
 
@@ -205,9 +237,11 @@ rtwn_sdio_rx_parse(struct rtwn_softc *sc, uint8_t *buf, int len)
 
 		switch (rtwn_classify_intr(sc, buf, totlen)) {
 		case RTWN_RX_DATA:
-			/* test: count it, with its own signal strength. */
+			/* test: count it, with its own signal strength. The
+			   PHY status sits after the descriptor and the shift
+			   bytes, like rtwn_rx_common() expects. */
 			if (infosz != 0 && (rxdw0 & RTWN_RXDW0_PHYST))
-				physt = buf + shift;
+				physt = buf + sizeof(*stat) + shift;
 			rtwn_sdio_rx_count(RTWN_SDIO_SOFTC(sc), stat, physt);
 			m = rtwn_sdio_rx_copy(sc, stat, totlen);
 			sc->sc_rx_transfers++;
@@ -405,7 +439,8 @@ rtwn_sdio_poll_thread(void *arg)
 				device_printf(sc->sc_dev, "test: tx %u reports %u/%u "
 				    "c2h %u rx %u, last data txdw3 %08x txdw4 %08x, "
 				    "RRSR %08x ARFR 0x444 %08x 0x448 %08x 0x44c %08x "
-				    "TXPAUSE %02x IGI %02x rxerr %u HISR %08x RX0_REQ_LEN %u\n",
+				    "TXPAUSE %02x IGI %02x rxerr %u HISR %08x "
+				    "RX0_REQ_LEN %u RCR %08x\n",
 				    uc->sc_test_tx,
 				    uc->sc_test_tx_reports, uc->sc_test_tx_reports2,
 				    uc->sc_test_c2h, uc->sc_test_rx,
@@ -416,19 +451,35 @@ rtwn_sdio_poll_thread(void *arg)
 				    rtwn_bb_read(sc, 0xc50) & 0x7f,
 				    uc->sc_test_rx_err,
 				    rtwn_sdio_local_read_4(uc, RTWN_SDIO_HISR),
-				    rtwn_sdio_local_read_2(uc, RTWN_SDIO_RX0_REQ_LEN));
+				    rtwn_sdio_local_read_2(uc, RTWN_SDIO_RX0_REQ_LEN),
+				    sc->rcr);
 				/* test: what the receive path did with it */
 				device_printf(sc->sc_dev, "test: rxb %u crc %u icv %u "
-				    "ampdu %u, len 128:%u 512:%u 1500:%u big:%u, "
-				    "req %u reads %u %u B, rxreq %u of %u polls, "
-				    "ovfw %u, last len %u rate %u%s%s%s rssi %d\n",
+				    "ampdu %u amsdu %u, len 128:%u 512:%u 1500:%u "
+				    "big:%u, req %u reads %u %u B, rxreq %u of %u "
+				    "polls, ovfw %u\n",
 				    uc->sc_test_rx_payload, uc->sc_test_rx_crc,
 				    uc->sc_test_rx_icv, uc->sc_test_rx_ampdu,
+				    uc->sc_test_rx_amsdu,
 				    uc->sc_test_rx_small, uc->sc_test_rx_medium,
 				    uc->sc_test_rx_large, uc->sc_test_rx_jumbo,
 				    uc->sc_test_rx_req, uc->sc_test_rx_reads,
 				    uc->sc_test_rx_bytes, uc->sc_test_polls_rx,
-				    uc->sc_test_polls, uc->sc_test_ovfw,
+				    uc->sc_test_polls, uc->sc_test_ovfw);
+				/* test: the air side of it */
+				device_printf(sc->sc_dev, "test: phy avg rssi %d "
+				    "min %d max %d of %u, cck %u ofdm %u mcs0-3 %u "
+				    "mcs4-7 %u mcs8+ %u, last %u B rate %u%s%s%s "
+				    "rssi %d, big %u %u B rssi avg %d rate %u, "
+				    "tx rate %u\n",
+				    uc->sc_test_rssi_n != 0
+					? uc->sc_test_rssi_sum
+					    / (int32_t)uc->sc_test_rssi_n : 0,
+				    uc->sc_test_rssi_min, uc->sc_test_rssi_max,
+				    uc->sc_test_rssi_n,
+				    uc->sc_test_rx_cck, uc->sc_test_rx_ofdm,
+				    uc->sc_test_rx_mcs03, uc->sc_test_rx_mcs47,
+				    uc->sc_test_rx_mcs8,
 				    uc->sc_test_last_pktlen,
 				    MS(uc->sc_test_last_rxdw3, R92C_RXDW3_RATE),
 				    (uc->sc_test_last_rxdw3 & R92C_RXDW3_HT) != 0
@@ -437,7 +488,14 @@ rtwn_sdio_poll_thread(void *arg)
 					? " 40" : "",
 				    (uc->sc_test_last_rxdw1 & R92C_RXDW1_AMPDU) != 0
 					? " ampdu" : "",
-				    uc->sc_test_last_rssi);
+				    uc->sc_test_last_rssi,
+				    uc->sc_test_big_frames, uc->sc_test_big_bytes,
+				    uc->sc_test_big_rssi_n != 0
+					? uc->sc_test_big_rssi_sum
+					    / (int32_t)uc->sc_test_big_rssi_n : 0,
+				    uc->sc_test_big_last_rate,
+				    uc->sc_test_last_txdw5
+					& R92C_TXDW5_DATARATE_M);
 			}
 			RTWN_UNLOCK(sc);
 		}
