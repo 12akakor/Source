@@ -63,8 +63,11 @@
 
 /* Stop reading after this many bytes to let other work in. */
 #define RTWN_SDIO_RX_BUDGET	(64 * 1024)
-/* Bytes per CMD53, whole blocks. */
-#define RTWN_SDIO_RX_CHUNK	4096
+/* Bytes per CMD53: one block. A read of several blocks from the receive
+   FIFO ends in a data CRC and end bit error under load (int status
+   0x00608000) about one time in six, and then the frame is lost. Single
+   block transfers did not fail once in the same log. */
+#define RTWN_SDIO_RX_CHUNK	RTWN_SDIO_BLOCK_SIZE
 /* How often rtwn_sdio_poll_thread() looks for a receive request. */
 #define RTWN_SDIO_POLL_INTERVAL	10000
 /* How many polls make the 10 s of the test statistics. */
@@ -420,8 +423,13 @@ rtwn_sdio_rx(struct rtwn_sdio_softc *uc)
 			break;
 
 		uc->sc_test_rx_req++;	/* test */
-		size = rtwn_sdio_align_size(len);
-		if (size > len) {	/* test: the card pads to whole blocks */
+		/* Read what the chip says it has, not a whole number of blocks:
+		   rounding up made the read run past the frame, into a part of
+		   the FIFO the chip may not have filled yet. The SDIO layer
+		   splits a length that is not a multiple of the block size into
+		   whole blocks and a byte mode tail. */
+		size = roundup2(len, 4);
+		if (size > len) {	/* test: rounded to whole dwords */
 			uc->sc_test_rx_pad++;
 			uc->sc_test_rx_pad_bytes += size - len;
 		}
