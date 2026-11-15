@@ -75,8 +75,8 @@ struct rtwn_sdio_softc {
 	uint32_t		sc_test_rx_pad_bytes;	/* bytes read too many */
 	uint32_t		sc_test_rx_reads;	/* CMD53 transfers */
 	uint32_t		sc_test_rx_bytes;	/* bytes read from the FIFO */
-	uint32_t		sc_test_rx_retry;	/* reads tried again */
-	uint32_t		sc_test_rx_retry_ok;	/* retries that worked */
+	uint32_t		sc_test_rx_read_retry;	/* reads tried again */
+	uint32_t		sc_test_rx_read_retry_ok;	/* retries that worked */
 	uint32_t		sc_test_polls;		/* polls of the chip */
 	uint32_t		sc_test_polls_rx;	/* polls with a request */
 	uint32_t		sc_test_ovfw;		/* RX FIFO overflows */

@@ -130,14 +130,14 @@ rtwn_sdio_rx_read(struct rtwn_sdio_softc *uc, uint32_t len, size_t size)
 	if (again != len)
 		return (error);
 
-	uc->sc_test_rx_retry++;	/* test */
+	uc->sc_test_rx_read_retry++;	/* test */
 	uc->sc_rx_id = id;
 	error = rtwn_sdio_read_port(uc, RTWN_SDIO_RX0FF(id), uc->sc_rx_buf,
 	    size);
 	if (error != 0)
 		return (error);
 
-	uc->sc_test_rx_retry_ok++;	/* test */
+	uc->sc_test_rx_read_retry_ok++;	/* test */
 	return (0);
 }
 
@@ -601,7 +601,8 @@ rtwn_sdio_poll_thread(void *arg)
 				    uc->sc_test_rx_bytes, uc->sc_test_polls_rx,
 				    uc->sc_test_polls, uc->sc_test_ovfw,
 				    uc->sc_test_rx_pad, uc->sc_test_rx_pad_bytes,
-				    uc->sc_test_rx_retry, uc->sc_test_rx_retry_ok);
+				    uc->sc_test_rx_read_retry,
+				    uc->sc_test_rx_read_retry_ok);
 				/* test: the air side of it */
 				device_printf(sc->sc_dev, "test: phy avg rssi %d "
 				    "min %d max %d of %u, cck %u ofdm %u mcs0-3 %u "
