@@ -64,7 +64,7 @@
 /* Stop reading after this many bytes to let other work in. */
 #define RTWN_SDIO_RX_BUDGET	(64 * 1024)
 /* How often rtwn_sdio_poll_thread() looks for a receive request. */
-#define RTWN_SDIO_POLL_INTERVAL	10000
+#define RTWN_SDIO_POLL_INTERVAL	5000
 /* How many polls make the 10 s of the test statistics. */
 #define RTWN_SDIO_STAT_TICKS		(10 * 1000000 / RTWN_SDIO_POLL_INTERVAL)
 
