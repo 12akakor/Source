@@ -63,11 +63,8 @@
 
 /* Stop reading after this many bytes to let other work in. */
 #define RTWN_SDIO_RX_BUDGET	(64 * 1024)
-/* Bytes per CMD53: one block. A read of several blocks from the receive
-   FIFO ends in a data CRC and end bit error under load (int status
-   0x00608000) about one time in six, and then the frame is lost. Single
-   block transfers did not fail once in the same log. */
-#define RTWN_SDIO_RX_CHUNK	RTWN_SDIO_BLOCK_SIZE
+/* Bytes per CMD53, whole blocks. */
+#define RTWN_SDIO_RX_CHUNK	4096
 /* How often rtwn_sdio_poll_thread() looks for a receive request. */
 #define RTWN_SDIO_POLL_INTERVAL	10000
 /* How many polls make the 10 s of the test statistics. */
@@ -83,9 +80,9 @@ rtwn_sdio_enable_intr(struct rtwn_sdio_softc *uc, bool enable)
 
 
 static int
-rtwn_sdio_read_port(struct rtwn_sdio_softc *uc, uint8_t *buf, size_t size)
+rtwn_sdio_read_port(struct rtwn_sdio_softc *uc, uint32_t addr, uint8_t *buf,
+    size_t size)
 {
-	uint32_t addr = RTWN_SDIO_RX0FF(uc->sc_rx_id++);
 	int error = 0;
 
 	/* Drain all of it even after an error, or the next read is garbage. */
@@ -95,11 +92,53 @@ rtwn_sdio_read_port(struct rtwn_sdio_softc *uc, uint8_t *buf, size_t size)
 		uc->sc_test_rx_reads++;	/* test */
 		if (status != 0)
 			error = status;
+		addr = RTWN_SDIO_RX0FF(++uc->sc_rx_id);
 		buf += chunk;
 		size -= chunk;
 	}
 
 	return (error);
+}
+
+
+/*!	Reads \a size bytes from the receive FIFO into the receive buffer.
+
+	The card now and then gives up on the data phase of a read: the host
+	controller reports a data CRC error, the transfer stops, and the frame
+	is lost even though the chip still has it in its FIFO. Reading once
+	more from the same address then gets it. That is only safe while the
+	chip announces the same length as before; a different length means
+	the FIFO changed and the retry would read the wrong bytes.
+*/
+static int
+rtwn_sdio_rx_read(struct rtwn_sdio_softc *uc, uint32_t len, size_t size)
+{
+	uint8_t id = uc->sc_rx_id;
+	uint32_t again;
+	int error;
+
+	error = rtwn_sdio_read_port(uc, RTWN_SDIO_RX0FF(id), uc->sc_rx_buf,
+	    size);
+	if (error == 0)
+		return (0);
+
+	uc->sc_test_rx_err++;	/* test */
+	again = rtwn_sdio_local_read_2(uc, RTWN_SDIO_RX0_REQ_LEN);
+	if (uc->sc_test_rx_err <= 20)	/* test */
+		device_printf(uc->sc_sc.sc_dev, "test: reading %u bytes failed, "
+		    "RX0_REQ_LEN is %u\n", len, again);
+	if (again != len)
+		return (error);
+
+	uc->sc_test_rx_retry++;	/* test */
+	uc->sc_rx_id = id;
+	error = rtwn_sdio_read_port(uc, RTWN_SDIO_RX0FF(id), uc->sc_rx_buf,
+	    size);
+	if (error != 0)
+		return (error);
+
+	uc->sc_test_rx_retry_ok++;	/* test */
+	return (0);
 }
 
 
@@ -423,13 +462,8 @@ rtwn_sdio_rx(struct rtwn_sdio_softc *uc)
 			break;
 
 		uc->sc_test_rx_req++;	/* test */
-		/* Read what the chip says it has, not a whole number of blocks:
-		   rounding up made the read run past the frame, into a part of
-		   the FIFO the chip may not have filled yet. The SDIO layer
-		   splits a length that is not a multiple of the block size into
-		   whole blocks and a byte mode tail. */
-		size = roundup2(len, 4);
-		if (size > len) {	/* test: rounded to whole dwords */
+		size = rtwn_sdio_align_size(len);
+		if (size > len) {	/* test: the card pads to whole blocks */
 			uc->sc_test_rx_pad++;
 			uc->sc_test_rx_pad_bytes += size - len;
 		}
@@ -438,8 +472,7 @@ rtwn_sdio_rx(struct rtwn_sdio_softc *uc)
 			    __func__, len);
 			size = RTWN_SDIO_RXBUFSZ;
 		}
-		if (rtwn_sdio_read_port(uc, uc->sc_rx_buf, size) != 0) {
-			uc->sc_test_rx_err++;	/* test */
+		if (rtwn_sdio_rx_read(uc, len, size) != 0) {
 			counter_u64_add(sc->sc_ic.ic_ierrors, 1);
 			break;
 		}
@@ -558,7 +591,7 @@ rtwn_sdio_poll_thread(void *arg)
 				device_printf(sc->sc_dev, "test: rxb %u crc %u icv %u "
 				    "ampdu %u amsdu %u, len 128:%u 512:%u 1500:%u "
 				    "big:%u, req %u reads %u %u B, rxreq %u of %u "
-				    "polls, ovfw %u pad %u %u B\n",
+				    "polls, ovfw %u pad %u %u B retry %u ok %u\n",
 				    uc->sc_test_rx_payload, uc->sc_test_rx_crc,
 				    uc->sc_test_rx_icv, uc->sc_test_rx_ampdu,
 				    uc->sc_test_rx_amsdu,
@@ -567,7 +600,8 @@ rtwn_sdio_poll_thread(void *arg)
 				    uc->sc_test_rx_req, uc->sc_test_rx_reads,
 				    uc->sc_test_rx_bytes, uc->sc_test_polls_rx,
 				    uc->sc_test_polls, uc->sc_test_ovfw,
-				    uc->sc_test_rx_pad, uc->sc_test_rx_pad_bytes);
+				    uc->sc_test_rx_pad, uc->sc_test_rx_pad_bytes,
+				    uc->sc_test_rx_retry, uc->sc_test_rx_retry_ok);
 				/* test: the air side of it */
 				device_printf(sc->sc_dev, "test: phy avg rssi %d "
 				    "min %d max %d of %u, cck %u ofdm %u mcs0-3 %u "
