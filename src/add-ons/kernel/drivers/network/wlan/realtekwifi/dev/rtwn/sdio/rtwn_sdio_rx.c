@@ -16,9 +16,6 @@
 	The buffer holds one or more frames, each with a receive descriptor and
 	aligned to 8 bytes, like an aggregated USB transfer. The order of the
 	steps follows the rtw88 driver (sdio.c).
-
-	The receive path also counts what it does, for the test line that the
-	poll thread prints every 10 s (see rtwn_sdio_rx_count()).
 */
 
 
@@ -31,8 +28,6 @@
 #include <sys/socket.h>
 #include <sys/bus.h>
 #include <sys/endian.h>
-#include <sys/taskqueue.h>
-#include <sys/time.h>
 
 #include <net/if.h>
 #include <net/if_var.h>
@@ -46,16 +41,10 @@
 #include <dev/rtwn/if_rtwnreg.h>
 #include <dev/rtwn/if_rtwnvar.h>
 #include <dev/rtwn/if_rtwn_debug.h>
-#include <dev/rtwn/if_rtwn_ridx.h>
 #include <dev/rtwn/if_rtwn_rx.h>
 #include <dev/rtwn/if_rtwn_tx.h>
 
 #include <dev/rtwn/rtl8192c/r92c_reg.h>
-#include <dev/rtwn/rtl8192c/r92c_rx_desc.h>
-#include <dev/rtwn/rtl8192c/r92c_tx_desc.h>
-
-#include <dev/rtwn/rtl8812a/r12a_fw_cmd.h>
-#include <dev/rtwn/rtl8812a/r12a_tx_desc.h>
 
 #include <dev/rtwn/sdio/rtwn_sdio_reg.h>
 #include <dev/rtwn/sdio/rtwn_sdio_var.h>
@@ -65,8 +54,6 @@
 #define RTWN_SDIO_RX_BUDGET	(64 * 1024)
 /* How often rtwn_sdio_poll_thread() looks for a receive request. */
 #define RTWN_SDIO_POLL_INTERVAL	5000
-/* How many polls make the 10 s of the test statistics. */
-#define RTWN_SDIO_STAT_TICKS		(10 * 1000000 / RTWN_SDIO_POLL_INTERVAL)
 
 
 void
@@ -91,7 +78,6 @@ rtwn_sdio_read_port(struct rtwn_sdio_softc *uc, size_t size)
 	error = sdio_read_bytes(uc->sc_func, RTWN_SDIO_RX0FF(uc->sc_rx_id),
 	    uc->sc_rx_buf, size, true);
 	uc->sc_rx_id++;
-	uc->sc_test_rx_reads++;	/* test */
 
 	return (error);
 }
@@ -103,181 +89,18 @@ rtwn_sdio_read_port(struct rtwn_sdio_softc *uc, size_t size)
 static int
 rtwn_sdio_rx_read(struct rtwn_sdio_softc *uc, uint32_t len, size_t size)
 {
+	/* Keep the log readable when the card stops answering. */
+	static int sFailLog = 0;
 	int error;
 
 	error = rtwn_sdio_read_port(uc, size);
-	if (error == 0)
-		return (0);
-
-	uc->sc_test_rx_err++;	/* test */
-	if (uc->sc_test_rx_err <= 20)	/* test */
-		device_printf(uc->sc_sc.sc_dev, "test: reading %u bytes failed, "
-		    "RX0_REQ_LEN is %u\n", len,
+	if (error != 0 && sFailLog++ < 20) {
+		device_printf(uc->sc_sc.sc_dev, "reading %u bytes failed: %d, "
+		    "RX0_REQ_LEN is %u\n", len, error,
 		    rtwn_sdio_local_read_2(uc, RTWN_SDIO_RX0_REQ_LEN));
+	}
 
 	return (error);
-}
-
-
-/*!	Notes when a frame that carries the download arrived, for the
-	histogram of the distance between those frames. Gaps of about one
-	beacon interval mean the access point holds the frames back until the
-	station wakes up, which points at power save mode; gaps of a few
-	hundred milliseconds point at the transport layer instead.
-*/
-static void
-rtwn_sdio_rx_note_big(struct rtwn_sdio_softc *uc)
-{
-	/* Upper bounds of the first five buckets, in microseconds. */
-	static const uint32_t bounds[] = {
-		10000, 100000, 200000, 300000, 500000
-	};
-	struct timeval tv;
-	uint64_t gap, now;
-	size_t i;
-
-	getmicrouptime(&tv);
-	now = (uint64_t)tv.tv_sec * 1000000 + tv.tv_usec;
-
-	if (uc->sc_test_big_last != 0) {
-		gap = now - uc->sc_test_big_last;
-		for (i = 0; i < sizeof(bounds) / sizeof(bounds[0]); i++) {
-			if (gap < bounds[i])
-				break;
-		}
-		uc->sc_test_big_gap[i]++;
-		uc->sc_test_big_gaps++;
-	}
-	uc->sc_test_big_last = now;
-}
-
-
-/*!	Counts one received frame for the test statistics: its length, whether
-	the chip reports an error, whether it came from an aggregate, and the
-	rate and signal strength it came in with. \a physt is \c NULL when the
-	descriptor has no PHY status of its own (the following MPDUs of an
-	aggregate), in which case the last known signal strength stays.
-	\a frame is the 802.11 header; only its first two bytes are read, for
-	the retry flag.
-*/
-static void
-rtwn_sdio_rx_count(struct rtwn_sdio_softc *uc,
-    struct rtwn_rx_stat_common *stat, void *physt, const uint8_t *frame)
-{
-	uint32_t rxdw0 = le32toh(stat->rxdw0);
-	uint32_t rxdw1 = le32toh(stat->rxdw1);
-	uint32_t rxdw3 = le32toh(stat->rxdw3);
-	uint8_t rate = MS(rxdw3, R92C_RXDW3_RATE);
-	int pktlen = MS(rxdw0, RTWN_RXDW0_PKTLEN);
-	bool retry = false;
-	int8_t rssi;
-
-	uc->sc_test_rx++;
-	uc->sc_test_rx_payload += pktlen;
-
-	/* test: a frame with a bad FCS or ICV says nothing about the link,
-	   so count it and leave the statistics of the good frames alone. */
-	if (rxdw0 & RTWN_RXDW0_CRCERR) {
-		uc->sc_test_rx_crc++;
-		return;
-	}
-	if (rxdw0 & RTWN_RXDW0_ICVERR) {
-		uc->sc_test_rx_icv++;
-		return;
-	}
-
-	uc->sc_test_last_pktlen = pktlen;
-	uc->sc_test_last_rxdw1 = rxdw1;
-	uc->sc_test_last_rxdw3 = rxdw3;
-
-	/* test: the access point retransmitted this frame. */
-	if (pktlen >= 2 && (frame[1] & IEEE80211_FC1_RETRY) != 0) {
-		retry = true;
-		uc->sc_test_rx_retry++;
-	}
-
-	if (rxdw1 & R92C_RXDW1_AMPDU)
-		uc->sc_test_rx_ampdu++;
-	if (rxdw1 & R92C_RXDW1_AMSDU)
-		uc->sc_test_rx_amsdu++;
-
-	if (pktlen <= 128)
-		uc->sc_test_rx_small++;
-	else if (pktlen <= 512)
-		uc->sc_test_rx_medium++;
-	else if (pktlen <= 1500)
-		uc->sc_test_rx_large++;
-	else
-		uc->sc_test_rx_jumbo++;
-
-	/* test: which rate the frame came in with. */
-	if (RTWN_RATE_IS_CCK(rate))
-		uc->sc_test_rx_cck++;
-	else if (RTWN_RATE_IS_OFDM(rate))
-		uc->sc_test_rx_ofdm++;
-	else if (rate < RTWN_RIDX_HT_MCS(4))
-		uc->sc_test_rx_mcs03++;
-	else if (rate < RTWN_RIDX_HT_MCS(8))
-		uc->sc_test_rx_mcs47++;
-	else
-		uc->sc_test_rx_mcs8++;
-
-	if (physt == NULL)
-		return;
-
-	if (RTWN_RATE_IS_CCK(rate))
-		rssi = rtwn_get_rssi_cck(&uc->sc_sc, physt);
-	else
-		rssi = rtwn_get_rssi_ofdm(&uc->sc_sc, physt);
-	uc->sc_test_last_rssi = rssi;
-
-	uc->sc_test_rssi_sum += rssi;
-	if (uc->sc_test_rssi_n == 0 || rssi < uc->sc_test_rssi_min)
-		uc->sc_test_rssi_min = rssi;
-	if (uc->sc_test_rssi_n == 0 || rssi > uc->sc_test_rssi_max)
-		uc->sc_test_rssi_max = rssi;
-	uc->sc_test_rssi_n++;
-
-	/* test: the frames that carry the download. */
-	if (pktlen > 1500) {
-		uc->sc_test_big_frames++;
-		uc->sc_test_big_bytes += pktlen;
-		uc->sc_test_big_last_rate = rate;
-		uc->sc_test_big_rssi_sum += rssi;
-		uc->sc_test_big_rssi_n++;
-		if (retry)
-			uc->sc_test_big_retry++;
-		rtwn_sdio_rx_note_big(uc);
-	}
-}
-
-
-/*!	Counts one transmit report for the test statistics: how often the chip
-	had to retransmit an uplink frame and how often it gave up on one. The
-	layout is the one r12a_ratectl_tx_complete() reads.
-*/
-static void
-rtwn_sdio_rx_count_tx_report(struct rtwn_sdio_softc *uc, uint8_t *buf,
-    int len)
-{
-	struct r12a_c2h_tx_rpt *rpt;
-	int ntries;
-
-	/* Skip Rx descriptor / report id / sequence fields. */
-	buf += sizeof(struct r92c_rx_stat) + 2;
-	len -= sizeof(struct r92c_rx_stat) + 2;
-	if (len != (int)sizeof(*rpt))
-		return;
-
-	rpt = (struct r12a_c2h_tx_rpt *)buf;
-	ntries = MS(rpt->txrptb2, R12A_TXRPTB2_RETRY_CNT);
-	uc->sc_test_tx_retries += ntries;
-	if (ntries != 0)
-		uc->sc_test_tx_retried++;
-	if (rpt->txrptb0 & R12A_TXRPTB0_RETRY_OVER)
-		uc->sc_test_tx_failed++;
-	if (rpt->txrptb0 & R12A_TXRPTB0_LIFE_EXPIRE)
-		uc->sc_test_tx_expired++;
 }
 
 
@@ -334,7 +157,6 @@ rtwn_sdio_rx_parse(struct rtwn_softc *sc, uint8_t *buf, int len)
 		int infosz = MS(rxdw0, RTWN_RXDW0_INFOSZ) * 8;
 		int shift = MS(rxdw0, RTWN_RXDW0_SHIFT);
 		int totlen = sizeof(*stat) + infosz + shift + pktlen;
-		void *physt = NULL;
 		struct mbuf *m;
 
 		if (pktlen == 0 || totlen > len)
@@ -342,13 +164,6 @@ rtwn_sdio_rx_parse(struct rtwn_softc *sc, uint8_t *buf, int len)
 
 		switch (rtwn_classify_intr(sc, buf, totlen)) {
 		case RTWN_RX_DATA:
-			/* test: count it, with its own signal strength. The
-			   PHY status sits after the descriptor and the shift
-			   bytes, like rtwn_rx_common() expects. */
-			if (infosz != 0 && (rxdw0 & RTWN_RXDW0_PHYST))
-				physt = buf + sizeof(*stat) + shift;
-			rtwn_sdio_rx_count(RTWN_SDIO_SOFTC(sc), stat, physt,
-			    buf + sizeof(*stat) + shift + infosz);
 			m = rtwn_sdio_rx_copy(sc, stat, totlen);
 			sc->sc_rx_transfers++;
 			if (m != NULL) {
@@ -360,9 +175,6 @@ rtwn_sdio_rx_parse(struct rtwn_softc *sc, uint8_t *buf, int len)
 			}
 			break;
 		case RTWN_RX_TX_REPORT:
-			RTWN_SDIO_SOFTC(sc)->sc_test_tx_reports++;	/* test */
-			rtwn_sdio_rx_count_tx_report(RTWN_SDIO_SOFTC(sc),
-			    buf, totlen);				/* test */
 			if (sc->sc_ratectl == RTWN_RATECTL_NET80211) {
 				RTWN_NT_LOCK(sc);
 				rtwn_handle_tx_report(sc, buf, totlen);
@@ -370,7 +182,6 @@ rtwn_sdio_rx_parse(struct rtwn_softc *sc, uint8_t *buf, int len)
 			}
 			break;
 		case RTWN_RX_TX_REPORT2:
-			RTWN_SDIO_SOFTC(sc)->sc_test_tx_reports2++;	/* test */
 			if (sc->sc_ratectl == RTWN_RATECTL_NET80211) {
 				RTWN_NT_LOCK(sc);
 				rtwn_handle_tx_report2(sc, buf, totlen);
@@ -378,7 +189,6 @@ rtwn_sdio_rx_parse(struct rtwn_softc *sc, uint8_t *buf, int len)
 			}
 			break;
 		default:
-			RTWN_SDIO_SOFTC(sc)->sc_test_c2h++;	/* test */
 			rtwn_handle_c2h_report(sc, buf, totlen);
 			break;
 		}
@@ -438,12 +248,7 @@ rtwn_sdio_rx(struct rtwn_sdio_softc *uc)
 		if (len == 0 || len == 0xffff)
 			break;
 
-		uc->sc_test_rx_req++;	/* test */
 		size = rtwn_sdio_align_size(len);
-		if (size > len) {	/* test: the card pads to whole blocks */
-			uc->sc_test_rx_pad++;
-			uc->sc_test_rx_pad_bytes += size - len;
-		}
 		if (size > RTWN_SDIO_RXBUFSZ) {
 			device_printf(sc->sc_dev, "%s: %u bytes do not fit\n",
 			    __func__, len);
@@ -453,7 +258,6 @@ rtwn_sdio_rx(struct rtwn_sdio_softc *uc)
 			counter_u64_add(sc->sc_ic.ic_ierrors, 1);
 			break;
 		}
-		uc->sc_test_rx_bytes += len;	/* test */
 		total += len;
 
 		m = rtwn_sdio_rx_parse(sc, uc->sc_rx_buf, MIN(len, size));
@@ -489,15 +293,11 @@ rtwn_sdio_handle(struct rtwn_sdio_softc *uc, bool kickTx)
 		return;
 	}
 
-	uc->sc_test_polls++;	/* test */
 	hisr = rtwn_sdio_local_read_4(uc, RTWN_SDIO_HISR);
 	if (hisr == 0xffffffff) {
 		RTWN_UNLOCK(sc);
 		return;
 	}
-
-	if (hisr & RTWN_SDIO_INT_RXFOVW)
-		uc->sc_test_ovfw++;	/* test */
 
 	if (hisr & RTWN_SDIO_INT_TXERR) {
 		/* The cause is in REG_TXDMA_STATUS; write 1 to clear. */
@@ -506,10 +306,8 @@ rtwn_sdio_handle(struct rtwn_sdio_softc *uc, bool kickTx)
 		device_printf(sc->sc_dev, "transmit error (HISR %#x, "
 		    "TXDMA_STATUS %#x)\n", hisr, status);
 	}
-	if (hisr & RTWN_SDIO_INT_RX_REQUEST) {
-		uc->sc_test_polls_rx++;	/* test */
+	if (hisr & RTWN_SDIO_INT_RX_REQUEST)
 		rtwn_sdio_rx(uc);
-	}
 
 	/* Only defined bits: others keep the interrupt asserted. */
 	hisr &= RTWN_SDIO_HISR_CLEAR_MASK;
@@ -537,106 +335,9 @@ static status_t
 rtwn_sdio_poll_thread(void *arg)
 {
 	struct rtwn_sdio_softc *uc = arg;
-	struct rtwn_softc *sc = &uc->sc_sc;
 
-	int statTicks = 0;	/* test */
 	while (!uc->sc_poll_stop) {
 		snooze(RTWN_SDIO_POLL_INTERVAL);
-
-		/* test: link statistics every 10 s */
-		if (++statTicks % RTWN_SDIO_STAT_TICKS == 0) {
-			RTWN_LOCK(sc);
-			if (uc->sc_intr_enabled) {
-				device_printf(sc->sc_dev, "test: tx %u reports %u/%u "
-				    "c2h %u rx %u, last data txdw3 %08x txdw4 %08x, "
-				    "RRSR %08x ARFR 0x444 %08x 0x448 %08x 0x44c %08x "
-				    "TXPAUSE %02x IGI %02x rxerr %u HISR %08x "
-				    "RX0_REQ_LEN %u RCR %08x\n",
-				    uc->sc_test_tx,
-				    uc->sc_test_tx_reports, uc->sc_test_tx_reports2,
-				    uc->sc_test_c2h, uc->sc_test_rx,
-				    uc->sc_test_last_txdw3, uc->sc_test_last_txdw4,
-				    rtwn_read_4(sc, 0x440), rtwn_read_4(sc, 0x444),
-				    rtwn_read_4(sc, 0x448), rtwn_read_4(sc, 0x44c),
-				    rtwn_read_1(sc, 0x522),
-				    rtwn_bb_read(sc, 0xc50) & 0x7f,
-				    uc->sc_test_rx_err,
-				    rtwn_sdio_local_read_4(uc, RTWN_SDIO_HISR),
-				    rtwn_sdio_local_read_2(uc, RTWN_SDIO_RX0_REQ_LEN),
-				    sc->rcr);
-				/* test: what the receive path did with it */
-				device_printf(sc->sc_dev, "test: rxb %u crc %u icv %u "
-				    "ampdu %u amsdu %u, len 128:%u 512:%u 1500:%u "
-				    "big:%u, req %u reads %u %u B, rxreq %u of %u "
-				    "polls, ovfw %u pad %u %u B\n",
-				    uc->sc_test_rx_payload, uc->sc_test_rx_crc,
-				    uc->sc_test_rx_icv, uc->sc_test_rx_ampdu,
-				    uc->sc_test_rx_amsdu,
-				    uc->sc_test_rx_small, uc->sc_test_rx_medium,
-				    uc->sc_test_rx_large, uc->sc_test_rx_jumbo,
-				    uc->sc_test_rx_req, uc->sc_test_rx_reads,
-				    uc->sc_test_rx_bytes, uc->sc_test_polls_rx,
-				    uc->sc_test_polls, uc->sc_test_ovfw,
-				    uc->sc_test_rx_pad, uc->sc_test_rx_pad_bytes);
-				/* test: the air side of it */
-				device_printf(sc->sc_dev, "test: phy avg rssi %d "
-				    "min %d max %d of %u, cck %u ofdm %u mcs0-3 %u "
-				    "mcs4-7 %u mcs8+ %u, last %u B rate %u%s%s%s "
-				    "rssi %d, big %u %u B rssi avg %d rate %u, "
-				    "tx data rate %u\n",
-				    uc->sc_test_rssi_n != 0
-					? uc->sc_test_rssi_sum
-					    / (int32_t)uc->sc_test_rssi_n : 0,
-				    uc->sc_test_rssi_min, uc->sc_test_rssi_max,
-				    uc->sc_test_rssi_n,
-				    uc->sc_test_rx_cck, uc->sc_test_rx_ofdm,
-				    uc->sc_test_rx_mcs03, uc->sc_test_rx_mcs47,
-				    uc->sc_test_rx_mcs8,
-				    uc->sc_test_last_pktlen,
-				    MS(uc->sc_test_last_rxdw3, R92C_RXDW3_RATE),
-				    (uc->sc_test_last_rxdw3 & R92C_RXDW3_HT) != 0
-					? " ht" : "",
-				    (uc->sc_test_last_rxdw3 & R92C_RXDW3_HT40) != 0
-					? " 40" : "",
-				    (uc->sc_test_last_rxdw1 & R92C_RXDW1_AMPDU) != 0
-					? " ampdu" : "",
-				    uc->sc_test_last_rssi,
-				    uc->sc_test_big_frames, uc->sc_test_big_bytes,
-				    uc->sc_test_big_rssi_n != 0
-					? uc->sc_test_big_rssi_sum
-					    / (int32_t)uc->sc_test_big_rssi_n : 0,
-				    uc->sc_test_big_last_rate,
-				    MS(uc->sc_test_last_txdw4,
-					R12A_TXDW4_DATARATE));
-				/* test: retries, and how the uplink fares */
-				device_printf(sc->sc_dev, "test: air retry %u "
-				    "big %u, tx rpt retry %u in %u frames, "
-				    "fail %u expire %u, gaps %u: %u %u %u %u "
-				    "%u %u\n",
-				    uc->sc_test_rx_retry, uc->sc_test_big_retry,
-				    uc->sc_test_tx_retries, uc->sc_test_tx_retried,
-				    uc->sc_test_tx_failed, uc->sc_test_tx_expired,
-				    uc->sc_test_big_gaps,
-				    uc->sc_test_big_gap[0], uc->sc_test_big_gap[1],
-				    uc->sc_test_big_gap[2], uc->sc_test_big_gap[3],
-				    uc->sc_test_big_gap[4], uc->sc_test_big_gap[5]);
-				/* test: what the transmit path had to wait for */
-				device_printf(sc->sc_dev, "test: txq %u "
-				    "offered, %u written, %u without pages, "
-				    "%u write errors, %u ms waiting, "
-				    "FREE_TXPG %08x OQT %02x\n",
-				    uc->sc_test_tx_try, uc->sc_test_tx,
-				    uc->sc_test_tx_nopages, uc->sc_test_tx_err,
-				    uc->sc_test_tx_wait_us / 1000,
-				    rtwn_sdio_local_read_4(uc,
-					RTWN_SDIO_FREE_TXPG),
-				    rtwn_sdio_local_read_1(uc,
-					RTWN_SDIO_OQT_FREE_PG));
-			}
-			RTWN_UNLOCK(sc);
-		}
-
-		/* test: the card interrupt is off, so do its work here. */
 		rtwn_sdio_handle(uc, false);
 	}
 

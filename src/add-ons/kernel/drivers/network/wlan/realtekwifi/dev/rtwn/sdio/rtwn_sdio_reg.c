@@ -83,6 +83,8 @@ rtwn_sdio_write_bytewise(struct rtwn_sdio_softc *uc, uint32_t addr,
 static uint32_t
 rtwn_sdio_read(struct rtwn_sdio_softc *uc, uint32_t addr, int len)
 {
+	/* Keep the log readable when the card stops answering. */
+	static int sFailLog = 0;
 	int err = 0;
 	uint32_t value;
 	bool bytewise = len != 4 || addr < RTWN_SDIO_ADDR(1, 0)
@@ -95,12 +97,13 @@ rtwn_sdio_read(struct rtwn_sdio_softc *uc, uint32_t addr, int len)
 	else
 		value = sdio_read_4(uc->sc_func, addr, &err);
 
-	static int sFailLogread = 0;	/* test: keep the log readable */
-	if (err != 0 && sFailLogread++ < 100) {
-		device_printf(uc->sc_sc.sc_dev, "read%d at %#x failed: %d\n",
-		    len * 8, addr, err);
+	if (err != 0) {
+		if (sFailLog++ < 100)
+			device_printf(uc->sc_sc.sc_dev,
+			    "read%d at %#x failed: %d\n", len * 8, addr, err);
 		return (0xffffffff);
 	}
+
 	return (value);
 }
 
@@ -109,6 +112,8 @@ static int
 rtwn_sdio_write(struct rtwn_sdio_softc *uc, uint32_t addr, uint32_t value,
     int len)
 {
+	/* Keep the log readable when the card stops answering. */
+	static int sFailLog = 0;
 	int err = 0;
 	bool bytewise = len != 4 || addr < RTWN_SDIO_ADDR(1, 0)
 	    || !uc->sc_powered || (addr % 4) != 0;
@@ -120,11 +125,11 @@ rtwn_sdio_write(struct rtwn_sdio_softc *uc, uint32_t addr, uint32_t value,
 	else
 		sdio_write_4(uc->sc_func, addr, value, &err);
 
-	static int sFailLogwrite = 0;	/* test: keep the log readable */
-	if (err != 0 && sFailLogwrite++ < 100) {
+	if (err != 0 && sFailLog++ < 100) {
 		device_printf(uc->sc_sc.sc_dev, "write%d at %#x failed: %d\n",
 		    len * 8, addr, err);
 	}
+
 	return (err);
 }
 

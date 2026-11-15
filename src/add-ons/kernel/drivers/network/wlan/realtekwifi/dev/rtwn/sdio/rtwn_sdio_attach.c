@@ -206,9 +206,9 @@ rtwn_sdio_attach(device_t dev)
 	}
 
 	/*
-	 * test: the card interrupt is off, so that it cannot corrupt a block
-	 * that is being received (it uses DAT1 in 4 bit mode); the poll thread
-	 * does its work instead. Turn it back on with sdio_setup_intr() here.
+	 * The card interrupt stays off: it uses DAT1 in 4 bit mode and can
+	 * corrupt a block that is being received. The poll thread does its
+	 * work instead; sdio_setup_intr() would turn the interrupt on.
 	 */
 	error = rtwn_attach(sc);
 	if (error != 0)

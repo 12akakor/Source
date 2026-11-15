@@ -99,29 +99,15 @@ static int
 rtwn_sdio_wait_pages(struct rtwn_sdio_softc *uc, int queue, int pages)
 {
 	uint32_t freePages = 0;
-	int waited;
+	int tries;
 
-	for (waited = 0; waited < RTWN_SDIO_TX_WAIT_US; waited += 100) {
+	for (tries = 0; tries < RTWN_SDIO_TX_WAIT_US / 100; tries++) {
 		freePages = rtwn_sdio_local_read_4(uc, RTWN_SDIO_FREE_TXPG);
 		if (freePages != 0xffffffff
 		    && rtwn_sdio_free_pages(freePages, queue) >= pages
 		    && rtwn_sdio_local_read_1(uc, RTWN_SDIO_OQT_FREE_PG) != 0)
 			return (0);
 		DELAY(100);
-	}
-
-	/* test: the frame is dropped for lack of pages. Report the first
-	   twenty with what the chip said, to see whether it really had none
-	   or whether the calculation above is too strict. */
-	uc->sc_test_tx_nopages++;
-	uc->sc_test_tx_wait_us += waited;
-	if (uc->sc_test_tx_nopages <= 20) {
-		device_printf(uc->sc_sc.sc_dev, "test: no pages for queue %d "
-		    "(%d needed) after %d us: FREE_TXPG %08x OQT_FREE_PG %02x, "
-		    "%d free\n", queue, pages, waited, freePages,
-		    rtwn_sdio_local_read_1(uc, RTWN_SDIO_OQT_FREE_PG),
-		    freePages == 0xffffffff ? -1
-			: rtwn_sdio_free_pages(freePages, queue));
 	}
 
 	return (ENOBUFS);
@@ -157,8 +143,6 @@ rtwn_sdio_tx_start(struct rtwn_softc *sc, struct ieee80211_node *ni,
 
 	RTWN_ASSERT_LOCKED(sc);
 
-	uc->sc_test_tx_try++;	/* test */
-
 	length = sc->txdesc_len + m->m_pkthdr.len;
 	size = rtwn_sdio_align_size(length);
 	if (size > RTWN_SDIO_TXBUFSZ)
@@ -182,12 +166,6 @@ rtwn_sdio_tx_start(struct rtwn_softc *sc, struct ieee80211_node *ni,
 
 	rtwn_dump_tx_desc(sc, tx_desc);
 
-	if (type == IEEE80211_FC0_TYPE_DATA) {	/* test */
-		uc->sc_test_last_txdw3 = le32toh(((uint32_t *)tx_desc)[3]);
-		uc->sc_test_last_txdw4 = le32toh(((uint32_t *)tx_desc)[4]);
-		uc->sc_test_last_txdw5 = le32toh(((uint32_t *)tx_desc)[5]);
-	}
-	uc->sc_test_tx++;	/* test */
 	memcpy(uc->sc_tx_buf, tx_desc, sc->txdesc_len);
 	m_copydata(m, 0, m->m_pkthdr.len,
 	    (caddr_t)(uc->sc_tx_buf + sc->txdesc_len));
@@ -197,7 +175,6 @@ rtwn_sdio_tx_start(struct rtwn_softc *sc, struct ieee80211_node *ni,
 	    howmany(length, 4));
 	error = sdio_write_bytes(uc->sc_func, addr, uc->sc_tx_buf, size, true);
 	if (error != 0) {
-		uc->sc_test_tx_err++;	/* test */
 		device_printf(sc->sc_dev, "%s: writing %zu bytes to queue %d "
 		    "failed: %d\n", __func__, size, queue, error);
 		return (EIO);

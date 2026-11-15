@@ -465,7 +465,7 @@ SdhciBus::ExecuteCommand(uint8_t command, uint32_t argument, uint32_t* response)
 	if (!dataCommand && (fCommandResult & SDHCI_INT_ERROR) != 0
 		&& (fCommandResult & SDHCI_INT_CMD_CMP) != 0
 		&& (fCommandResult & kCommandErrorBits) == 0) {
-		static int32 sStaleLogCount = 0;	// test: keep the log readable
+		static int32 sStaleLogCount = 0;
 		if (atomic_add(&sStaleLogCount, 1) < 20) {
 			ERROR("command %d: ignoring stale data error %08" B_PRIx32 "\n",
 				command, fCommandResult);
@@ -482,9 +482,7 @@ SdhciBus::ExecuteCommand(uint8_t command, uint32_t argument, uint32_t* response)
 		// meantime, without anybody having seen them.
 		fRegisters->interrupt_status = fCommandResult & kClearableStatusBits;
 		if (fCommandResult & SDHCI_INT_COMMAND_TIMEOUT) {
-			static int32 sTimeoutLogCount = 0;	// test: keep the log readable
-			if (atomic_add(&sTimeoutLogCount, 1) < 100)
-				ERROR("Command execution timed out\n");
+			ERROR("Command execution timed out\n");
 			// At this point, the "command inhibit" bit is not set yet, it will be set only after
 			// another command is sent while the controller is in the timeout state.
 			// But resetting the controller state pre-emptively will allow to send another command.
@@ -766,29 +764,10 @@ SdhciBus::_LogCardStatus(const char* when, uint32 status)
 	example still streaming an open ended multiple block read), DAT0 stays
 	low, and every following command fails.
 */
-/*!	Diagnostics (TEST): logs all standard SDHCI registers, 32 bits at a time,
-	to compare the controller setup with what Linux sdhci-acpi ends up with.
-*/
-void
-SdhciBus::_DumpRegisters(const char* when)
-{
-	volatile uint32* base = (volatile uint32*)fRegisters;
-	dprintf("sdhci regs (%s):\n", when);
-	for (uint32 offset = 0; offset < 0x100; offset += 0x10) {
-		dprintf("sdhci %02x: %08" B_PRIx32 " %08" B_PRIx32 " %08" B_PRIx32
-			" %08" B_PRIx32 "\n", (unsigned)offset, base[offset / 4],
-			base[offset / 4 + 1], base[offset / 4 + 2], base[offset / 4 + 3]);
-	}
-}
-
-
 void
 SdhciBus::_AbortTransfer(const char* reason)
 {
-	static int32 sAbortLogCount = 0;	// test: keep the log readable
-	static int32 sAbortDumpCount = 0;
-	if (fCardType == CARD_TYPE_SDIO && atomic_add(&sAbortDumpCount, 1) < 2)
-		_DumpRegisters("at first transfer error");
+	static int32 sAbortLogCount = 0;
 	if (atomic_add(&sAbortLogCount, 1) < 100)
 	ERROR("abort (%s): state %08" B_PRIx32 ", int status %08" B_PRIx32
 		", adma error %02x, auto cmd error %04x, host control %02x\n", reason,
@@ -1062,12 +1041,12 @@ SdhciBus::_TransferChunk(uint8 command, uint32 argument, uint32 blockCount,
 
 			size_t offset = (size_t)block * blockSize;
 			if (isWrite) {
-				if (buffer != NULL)
-				{
+				if (buffer != NULL) {
+					// A byte mode CMD53 can end inside a word: clear
+					// the bytes behind the block before copying.
 					words[wordCount - 1] = 0;
 					memcpy(words, buffer + offset, blockSize);
-				}
-				else
+				} else
 					vm_memcpy_from_physical(words, physical + offset, blockSize,
 						false);
 				for (uint32 i = 0; i < wordCount; i++)
@@ -1597,9 +1576,6 @@ SdhciBus::SetTiming(int timing, uint32 flags)
 		if (status != B_OK)
 			return status;
 	}
-
-	if (fCardType == CARD_TYPE_SDIO)
-		_DumpRegisters(name);
 
 	if ((flags & MMC_TIMING_NO_VERIFY) != 0)
 		return B_OK;
