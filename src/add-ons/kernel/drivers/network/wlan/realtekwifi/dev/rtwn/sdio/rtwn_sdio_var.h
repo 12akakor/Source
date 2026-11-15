@@ -99,6 +99,12 @@ struct rtwn_sdio_softc {
 	uint32_t		sc_test_tx_failed;	/* retry limit reached */
 	uint32_t		sc_test_tx_expired;	/* lifetime expired */
 
+	/* test: frames the transmit path could not hand to the chip */
+	uint32_t		sc_test_tx_try;		/* frames offered */
+	uint32_t		sc_test_tx_nopages;	/* dropped: no pages */
+	uint32_t		sc_test_tx_err;		/* dropped: write failed */
+	uint32_t		sc_test_tx_wait_us;	/* time spent waiting */
+
 	/* test: the distance between the frames that carry the download */
 	uint64_t		sc_test_big_last;	/* microseconds */
 	uint32_t		sc_test_big_gap[6];	/* buckets, see note_big() */

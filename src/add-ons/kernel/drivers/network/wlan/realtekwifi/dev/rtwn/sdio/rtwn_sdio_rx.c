@@ -602,6 +602,18 @@ rtwn_sdio_poll_thread(void *arg)
 				    uc->sc_test_big_gap[0], uc->sc_test_big_gap[1],
 				    uc->sc_test_big_gap[2], uc->sc_test_big_gap[3],
 				    uc->sc_test_big_gap[4], uc->sc_test_big_gap[5]);
+				/* test: what the transmit path had to wait for */
+				device_printf(sc->sc_dev, "test: txq %u "
+				    "offered, %u written, %u without pages, "
+				    "%u write errors, %u ms waiting, "
+				    "FREE_TXPG %08x OQT %02x\n",
+				    uc->sc_test_tx_try, uc->sc_test_tx,
+				    uc->sc_test_tx_nopages, uc->sc_test_tx_err,
+				    uc->sc_test_tx_wait_us / 1000,
+				    rtwn_sdio_local_read_4(uc,
+					RTWN_SDIO_FREE_TXPG),
+				    rtwn_sdio_local_read_1(uc,
+					RTWN_SDIO_OQT_FREE_PG));
 			}
 			RTWN_UNLOCK(sc);
 		}
