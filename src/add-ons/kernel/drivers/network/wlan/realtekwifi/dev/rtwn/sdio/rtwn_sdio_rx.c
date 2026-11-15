@@ -12,7 +12,7 @@
 	interrupt is off (see rtwn_sdio_attach()) the poll thread calls it
 	directly. REG_SDIO_HISR says why; for received data
 	REG_SDIO_RX0_REQ_LEN gives the number of bytes waiting in the receive
-	FIFO, which are read with one CMD53 per page from the RX0 FIFO address.
+	FIFO, which are read with one CMD53 from the RX0 FIFO address.
 	The buffer holds one or more frames, each with a receive descriptor and
 	aligned to 8 bytes, like an aggregated USB transfer. The order of the
 	steps follows the rtw88 driver (sdio.c).
@@ -63,8 +63,6 @@
 
 /* Stop reading after this many bytes to let other work in. */
 #define RTWN_SDIO_RX_BUDGET	(64 * 1024)
-/* Bytes per CMD53, whole blocks. */
-#define RTWN_SDIO_RX_CHUNK	4096
 /* How often rtwn_sdio_poll_thread() looks for a receive request. */
 #define RTWN_SDIO_POLL_INTERVAL	10000
 /* How many polls make the 10 s of the test statistics. */
@@ -79,66 +77,45 @@ rtwn_sdio_enable_intr(struct rtwn_sdio_softc *uc, bool enable)
 }
 
 
-static int
-rtwn_sdio_read_port(struct rtwn_sdio_softc *uc, uint32_t addr, uint8_t *buf,
-    size_t size)
-{
-	int error = 0;
+/*!	Reads \a size bytes of the pending receive request from the FIFO.
 
-	/* Drain all of it even after an error, or the next read is garbage. */
-	while (size > 0) {
-		size_t chunk = MIN(size, RTWN_SDIO_RX_CHUNK);
-		int status = sdio_read_bytes(uc->sc_func, addr, buf, chunk, true);
-		uc->sc_test_rx_reads++;	/* test */
-		if (status != 0)
-			error = status;
-		addr = RTWN_SDIO_RX0FF(++uc->sc_rx_id);
-		buf += chunk;
-		size -= chunk;
-	}
+	The whole request goes in one CMD53, as in the vendor driver. A second
+	CMD53 for the rest of a request reads nothing, whatever address it uses,
+	and leaves the receive FIFO stuck until the chip is reset.
+*/
+static int
+rtwn_sdio_read_port(struct rtwn_sdio_softc *uc, size_t size)
+{
+	int error;
+
+	error = sdio_read_bytes(uc->sc_func, RTWN_SDIO_RX0FF(uc->sc_rx_id),
+	    uc->sc_rx_buf, size, true);
+	uc->sc_rx_id++;
+	uc->sc_test_rx_reads++;	/* test */
 
 	return (error);
 }
 
 
-/*!	Reads \a size bytes from the receive FIFO into the receive buffer.
-
-	The card now and then gives up on the data phase of a read: the host
-	controller reports a data CRC error, the transfer stops, and the frame
-	is lost even though the chip still has it in its FIFO. Reading once
-	more from the same address then gets it. That is only safe while the
-	chip announces the same length as before; a different length means
-	the FIFO changed and the retry would read the wrong bytes.
+/*!	Reads the request announced as \a len bytes, of which \a size bytes are
+	transferred, and says why a read failed.
 */
 static int
 rtwn_sdio_rx_read(struct rtwn_sdio_softc *uc, uint32_t len, size_t size)
 {
-	uint8_t id = uc->sc_rx_id;
-	uint32_t again;
 	int error;
 
-	error = rtwn_sdio_read_port(uc, RTWN_SDIO_RX0FF(id), uc->sc_rx_buf,
-	    size);
+	error = rtwn_sdio_read_port(uc, size);
 	if (error == 0)
 		return (0);
 
 	uc->sc_test_rx_err++;	/* test */
-	again = rtwn_sdio_local_read_2(uc, RTWN_SDIO_RX0_REQ_LEN);
 	if (uc->sc_test_rx_err <= 20)	/* test */
 		device_printf(uc->sc_sc.sc_dev, "test: reading %u bytes failed, "
-		    "RX0_REQ_LEN is %u\n", len, again);
-	if (again != len)
-		return (error);
+		    "RX0_REQ_LEN is %u\n", len,
+		    rtwn_sdio_local_read_2(uc, RTWN_SDIO_RX0_REQ_LEN));
 
-	uc->sc_test_rx_read_retry++;	/* test */
-	uc->sc_rx_id = id;
-	error = rtwn_sdio_read_port(uc, RTWN_SDIO_RX0FF(id), uc->sc_rx_buf,
-	    size);
-	if (error != 0)
-		return (error);
-
-	uc->sc_test_rx_read_retry_ok++;	/* test */
-	return (0);
+	return (error);
 }
 
 
@@ -591,7 +568,7 @@ rtwn_sdio_poll_thread(void *arg)
 				device_printf(sc->sc_dev, "test: rxb %u crc %u icv %u "
 				    "ampdu %u amsdu %u, len 128:%u 512:%u 1500:%u "
 				    "big:%u, req %u reads %u %u B, rxreq %u of %u "
-				    "polls, ovfw %u pad %u %u B retry %u ok %u\n",
+				    "polls, ovfw %u pad %u %u B\n",
 				    uc->sc_test_rx_payload, uc->sc_test_rx_crc,
 				    uc->sc_test_rx_icv, uc->sc_test_rx_ampdu,
 				    uc->sc_test_rx_amsdu,
@@ -600,9 +577,7 @@ rtwn_sdio_poll_thread(void *arg)
 				    uc->sc_test_rx_req, uc->sc_test_rx_reads,
 				    uc->sc_test_rx_bytes, uc->sc_test_polls_rx,
 				    uc->sc_test_polls, uc->sc_test_ovfw,
-				    uc->sc_test_rx_pad, uc->sc_test_rx_pad_bytes,
-				    uc->sc_test_rx_read_retry,
-				    uc->sc_test_rx_read_retry_ok);
+				    uc->sc_test_rx_pad, uc->sc_test_rx_pad_bytes);
 				/* test: the air side of it */
 				device_printf(sc->sc_dev, "test: phy avg rssi %d "
 				    "min %d max %d of %u, cck %u ofdm %u mcs0-3 %u "

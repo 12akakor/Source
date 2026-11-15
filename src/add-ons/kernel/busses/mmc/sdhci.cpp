@@ -109,12 +109,15 @@ SdhciBus::SdhciBus(struct registers* registers, uint8_t irq, bool poll)
 	} else
 		fStatus = B_OK;
 
-	// Memory for DMA: page 0 holds the ADMA2 descriptor table, page 1 is a
-	// bounce buffer used by the transfer self test and by ReadData(). It has
-	// to be physically contiguous, and below 4GB since we use the 32-bit
+	// Memory for DMA: page 0 holds the ADMA2 descriptor table, the rest is a
+	// bounce buffer used by the transfer self test, by ReadData() and by SDIO
+	// transfers, which may be as large as MMC_MAX_TRANSFER_SIZE bytes (the
+	// whole receive FIFO of the RTL8723BS in one CMD53). It has to be
+	// physically contiguous, and below 4GB since we use the 32-bit
 	// descriptor format and the 32-bit SDMA address register.
+	const size_t dmaSize = B_PAGE_SIZE + MMC_MAX_TRANSFER_SIZE;
 	fDmaArea = create_area("sdhci dma", (void**)&fDmaDescriptors,
-		B_ANY_KERNEL_ADDRESS, 2 * B_PAGE_SIZE, B_32_BIT_CONTIGUOUS,
+		B_ANY_KERNEL_ADDRESS, dmaSize, B_32_BIT_CONTIGUOUS,
 		B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA);
 	if (fDmaArea < 0) {
 		ERROR("Could not allocate DMA memory\n");
@@ -123,7 +126,7 @@ SdhciBus::SdhciBus(struct registers* registers, uint8_t irq, bool poll)
 	}
 
 	physical_entry entry;
-	fStatus = get_memory_map(fDmaDescriptors, 2 * B_PAGE_SIZE, &entry, 1);
+	fStatus = get_memory_map(fDmaDescriptors, dmaSize, &entry, 1);
 	if (fStatus != B_OK) {
 		ERROR("Could not get physical address of DMA memory\n");
 		return;
@@ -1700,7 +1703,7 @@ SdhciBus::TransferIO(uint32 argument, bool isWrite, void* buffer,
 	uint32 blockCount, uint32 blockSize)
 {
 	const size_t length = (size_t)blockCount * blockSize;
-	if (buffer == NULL || length == 0 || length > B_PAGE_SIZE)
+	if (buffer == NULL || length == 0 || length > MMC_MAX_TRANSFER_SIZE)
 		return B_BAD_VALUE;
 
 	if (isWrite)
