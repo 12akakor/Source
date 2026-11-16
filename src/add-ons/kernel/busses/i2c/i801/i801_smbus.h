@@ -69,7 +69,11 @@ typedef struct {
 	mutex					hwLock;
 	ConditionVariable		transactionDone;
 	int32					transactionPending;
-	int32					ownsHardware;	// this driver holds HSTS.IUS
+	// Whether this driver holds HSTS.IUS. iusLock makes taking or
+	// releasing the semaphore and the interrupt handler's test of this
+	// flag plus its read of HSTS exclude each other.
+	bool					ownsHardware;
+	spinlock				iusLock;
 	uint8					transactionStatus;
 
 	// Host Notify

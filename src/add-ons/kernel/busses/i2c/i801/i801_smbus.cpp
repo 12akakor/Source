@@ -152,12 +152,19 @@ i801_interrupt_handler(void* data)
 	// it), so HSTS is only read while this driver holds the semaphore.
 	// Otherwise a Host Notify interrupt took it, nobody released it, and
 	// every later transaction found the bus "in use by firmware".
-	if (atomic_get(&bus->ownsHardware) == 0)
+	// The test and the read are one step under iusLock: without it,
+	// release_hardware() on another CPU could give the semaphore back in
+	// between, and the read would take it again for good.
+	SpinLocker iusLocker(bus->iusLock);
+	if (!bus->ownsHardware)
 		return result;
 
 	uint8 status = smb_read(bus, SMB_HSTS);
-	if ((status & SMB_HSTS_DONE) != 0) {
+	if ((status & SMB_HSTS_DONE) != 0)
 		smb_write(bus, SMB_HSTS, status & SMB_HSTS_CLEAR);
+	iusLocker.Unlock();
+
+	if ((status & SMB_HSTS_DONE) != 0) {
 		if (atomic_get(&bus->transactionPending) != 0) {
 			// store the status before giving up the pending flag: a waiter
 			// that just timed out reads it once it loses the flag
@@ -183,16 +190,24 @@ static void release_hardware(i801_smbus* bus);
 static status_t
 acquire_hardware(i801_smbus* bus)
 {
-	// The first read after a release returns IUS = 0 and sets it.
+	// The first read after a release returns IUS = 0 and sets it. The
+	// read and the flag change together under iusLock, see the
+	// interrupt handler.
 	bigtime_t end = system_time() + kSemaphoreTimeout;
-	while ((smb_read(bus, SMB_HSTS) & SMB_HSTS_IUS) != 0) {
+	while (true) {
+		InterruptsSpinLocker locker(bus->iusLock);
+		if ((smb_read(bus, SMB_HSTS) & SMB_HSTS_IUS) == 0) {
+			bus->ownsHardware = true;
+			break;
+		}
+		locker.Unlock();
+
 		if (system_time() > end) {
 			ERROR("SMBus in use by firmware, giving up\n");
 			return B_BUSY;
 		}
 		snooze(100);
 	}
-	atomic_set(&bus->ownsHardware, 1);
 
 	// wait for a transaction started by someone else to finish
 	end = system_time() + kTransactionTimeout;
@@ -210,7 +225,10 @@ acquire_hardware(i801_smbus* bus)
 static void
 release_hardware(i801_smbus* bus)
 {
-	atomic_set(&bus->ownsHardware, 0);
+	// The interrupt handler must not read HSTS between these two steps:
+	// that read would take the semaphore again.
+	InterruptsSpinLocker locker(bus->iusLock);
+	bus->ownsHardware = false;
 	// writing 1 to IUS makes the next read return 0
 	smb_write(bus, SMB_HSTS, SMB_HSTS_IUS);
 }
@@ -329,21 +347,22 @@ exec_locked(i801_smbus* bus, i2c_op op, i2c_addr address,
 		| (read ? SMB_TSA_READ : SMB_TSA_WRITE));
 
 	if (IS_BLOCK_OP(op)) {
-		if (cmdLength != 1)
+		// check the lengths before E32B is set: an early return must not
+		// leave the controller in block buffer mode
+		if (cmdLength != 1 || dataLength == 0
+			|| (!read && dataLength > I2C_SMBUS_BLOCK_MAX)) {
 			return B_BAD_VALUE;
+		}
 		smb_write(bus, SMB_HCMD, cmd[0]);
 		command = SMB_CMD_BLOCK;
 		set_block_buffer(bus, true);
 
 		if (!read) {
-			if (dataLength == 0 || dataLength > I2C_SMBUS_BLOCK_MAX)
-				return B_BAD_VALUE;
 			smb_write(bus, SMB_HD0, (uint8)dataLength);
 			smb_read(bus, SMB_HCTL);	// resets the block buffer index
 			for (size_t i = 0; i < dataLength; i++)
 				smb_write(bus, SMB_HBD, data[i]);
-		} else if (dataLength < 1)
-			return B_BAD_VALUE;
+		}
 	} else if (cmdLength == 0 && dataLength == 0) {
 		command = SMB_CMD_QUICK;
 	} else if (cmdLength == 0 && dataLength == 1) {
@@ -542,6 +561,7 @@ init_bus(device_node* node, void** _cookie)
 	mutex_init(&bus->hwLock, "i801 smbus hardware");
 	bus->transactionDone.Init(bus, "i801 smbus transaction");
 	B_INITIALIZE_SPINLOCK(&bus->notifyLock);
+	B_INITIALIZE_SPINLOCK(&bus->iusLock);
 
 	// no Host Notify until someone asks for it, no PEC
 	smb_write_scmd(bus, bus->savedScmd & ~SMB_SCMD_HNI);
