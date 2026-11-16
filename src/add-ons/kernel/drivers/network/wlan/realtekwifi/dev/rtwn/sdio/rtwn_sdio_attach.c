@@ -211,6 +211,15 @@ rtwn_sdio_attach(device_t dev)
 	 * work instead; sdio_setup_intr() would turn the interrupt on.
 	 */
 	error = rtwn_attach(sc);
+
+	/*
+	 * The efuse is read: off again until the interface comes up, also
+	 * when the attach failed.
+	 */
+	RTWN_LOCK(sc);
+	rtwn_power_off(sc);
+	RTWN_UNLOCK(sc);
+
 	if (error != 0)
 		goto fail;
 

@@ -89,12 +89,11 @@ rtwn_sdio_read_port(struct rtwn_sdio_softc *uc, size_t size)
 static int
 rtwn_sdio_rx_read(struct rtwn_sdio_softc *uc, uint32_t len, size_t size)
 {
-	/* Keep the log readable when the card stops answering. */
-	static int sFailLog = 0;
 	int error;
 
 	error = rtwn_sdio_read_port(uc, size);
-	if (error != 0 && sFailLog++ < 20) {
+	if (error != 0
+	    && uc->sc_io_errors_logged++ < RTWN_SDIO_MAX_IO_LOGS) {
 		device_printf(uc->sc_sc.sc_dev, "reading %u bytes failed: %d, "
 		    "RX0_REQ_LEN is %u\n", len, error,
 		    rtwn_sdio_local_read_2(uc, RTWN_SDIO_RX0_REQ_LEN));
@@ -238,7 +237,7 @@ static void
 rtwn_sdio_rx(struct rtwn_sdio_softc *uc)
 {
 	struct rtwn_softc *sc = &uc->sc_sc;
-	uint32_t total = 0;
+	uint32_t total = 0, hisr;
 
 	do {
 		uint32_t len = rtwn_sdio_local_read_2(uc, RTWN_SDIO_RX0_REQ_LEN);
@@ -250,9 +249,17 @@ rtwn_sdio_rx(struct rtwn_sdio_softc *uc)
 
 		size = rtwn_sdio_align_size(len);
 		if (size > RTWN_SDIO_RXBUFSZ) {
+			/*
+			 * Cannot happen with a receive FIFO that is smaller than
+			 * the buffer (checked in the chip's attach). Part of a
+			 * request cannot be read either (see
+			 * rtwn_sdio_read_port()): leave it, the watchdog restarts
+			 * a chip that stops receiving.
+			 */
 			device_printf(sc->sc_dev, "%s: %u bytes do not fit\n",
 			    __func__, len);
-			size = RTWN_SDIO_RXBUFSZ;
+			counter_u64_add(sc->sc_ic.ic_ierrors, 1);
+			break;
 		}
 		if (rtwn_sdio_rx_read(uc, len, size) != 0) {
 			counter_u64_add(sc->sc_ic.ic_ierrors, 1);
@@ -261,16 +268,21 @@ rtwn_sdio_rx(struct rtwn_sdio_softc *uc)
 		total += len;
 
 		m = rtwn_sdio_rx_parse(sc, uc->sc_rx_buf, MIN(len, size));
-		if (m != NULL)
+		if (m != NULL) {
 			rtwn_sdio_rx_input(sc, m);
+			/* The lock was dropped: the device may have stopped. */
+			if (!uc->sc_intr_enabled
+			    || !(sc->sc_flags & RTWN_RUNNING))
+				break;
+		}
 
 		/*
 		 * The 8051 chips can show a length while the FIFO is still
 		 * being filled; only go on while a request is pending.
 		 */
-	} while (total < RTWN_SDIO_RX_BUDGET
-	    && (rtwn_sdio_local_read_4(uc, RTWN_SDIO_HISR)
-		& RTWN_SDIO_INT_RX_REQUEST) != 0);
+		hisr = rtwn_sdio_local_read_4(uc, RTWN_SDIO_HISR);
+	} while (total < RTWN_SDIO_RX_BUDGET && hisr != 0xffffffff
+	    && (hisr & RTWN_SDIO_INT_RX_REQUEST) != 0);
 }
 
 

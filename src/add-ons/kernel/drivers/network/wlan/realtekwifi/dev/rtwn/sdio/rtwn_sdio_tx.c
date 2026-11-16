@@ -114,8 +114,9 @@ rtwn_sdio_wait_pages(struct rtwn_sdio_softc *uc, int queue, int pages)
 }
 
 
-/*!	Checksum of the first 32 bytes of the descriptor, inverted, as the
-	RTL8723B family expects (rtw88, rtw8723x.c).
+/*!	Checksum of the descriptor as the RTL8723B family expects it: the XOR
+	of its first 32 bytes as 16 bit words, not inverted (rtw88, rtw8723x.c;
+	the same as rtwn_usb).
 */
 static void
 rtwn_sdio_tx_checksum(struct rtwn_tx_desc_common *txd)
@@ -123,7 +124,6 @@ rtwn_sdio_tx_checksum(struct rtwn_tx_desc_common *txd)
 	uint16_t sum = 0;
 	int i;
 
-	/* XOR of the first 32 bytes, not inverted (rtw88, rtwn_usb). */
 	txd->txdw7.usb_checksum = 0;
 	for (i = 0; i < 32 / 2; i++)
 		sum ^= ((uint16_t *)txd)[i];

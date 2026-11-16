@@ -171,6 +171,11 @@ r8723bs_adj_devcaps(struct rtwn_softc *sc)
 }
 
 
+/* A receive request (at most the receive FIFO) is read in one piece. */
+_Static_assert(R8723B_RX_DMA_BUFFER_SIZE <= RTWN_SDIO_RXBUFSZ,
+    "the receive buffer must hold the whole receive FIFO");
+
+
 void
 r8723bs_attach(struct rtwn_sdio_softc *uc)
 {
@@ -222,14 +227,6 @@ r8723bs_attach(struct rtwn_sdio_softc *uc)
 	sc->sc_set_media_status		= r92e_set_media_status;
 	sc->sc_set_rsvd_page		= r88e_set_rsvd_page;
 	sc->sc_set_pwrmode		= r92e_set_pwrmode;
-
-	/*
-	 * After an error on the SDIO bus the chip can stop answering function 1
-	 * (every CMD53 then ends with ILLEGAL_COMMAND), under load and also while
-	 * idle; taking the interface down and up brings it back. A beacon comes
-	 * every 100 ms, so 4 s without a frame on a link that is up means that.
-	 */
-	sc->rx_silence_limit		= 4;
 	sc->sc_set_rssi			= rtwn_nop_softc;	/* XXX TODO? */
 #else
 	sc->sc_set_media_status		= rtwn_nop_softc_int;
@@ -288,6 +285,14 @@ r8723bs_attach(struct rtwn_sdio_softc *uc)
 
 	sc->ntxchains			= 1;
 	sc->nrxchains			= 1;
+
+	/*
+	 * After an error on the SDIO bus the chip can stop answering function 1
+	 * (every CMD53 then ends with ILLEGAL_COMMAND), under load and also while
+	 * idle; taking the interface down and up brings it back. A beacon comes
+	 * every 100 ms, so 4 s without a frame on a link that is up means that.
+	 */
+	sc->rx_silence_limit		= 4;
 
 	r8723bs_attach_private(sc);
 }

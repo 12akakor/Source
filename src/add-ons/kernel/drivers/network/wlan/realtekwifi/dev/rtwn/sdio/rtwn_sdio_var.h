@@ -29,6 +29,11 @@ enum {
 	RTWN_SDIO_TXQ_COUNT
 };
 
+/* Failed commands in a row after which a card counts as not answering. */
+#define RTWN_SDIO_MAX_IO_ERRORS	8
+/* Failed accesses that are logged, per device. */
+#define RTWN_SDIO_MAX_IO_LOGS	100
+
 struct rtwn_sdio_softc {
 	struct rtwn_softc	sc_sc;		/* must be the first */
 	struct sdio_func	*sc_func;
@@ -37,6 +42,7 @@ struct rtwn_sdio_softc {
 	bool			sc_intr_enabled;
 	uint32_t		sc_himr;
 
+	int			sc_io_errors_logged;
 	uint8_t			sc_rx_id;	/* low bits of the RX FIFO address */
 
 	/* Looks for receive requests the card interrupt missed. */

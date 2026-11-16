@@ -83,8 +83,6 @@ rtwn_sdio_write_bytewise(struct rtwn_sdio_softc *uc, uint32_t addr,
 static uint32_t
 rtwn_sdio_read(struct rtwn_sdio_softc *uc, uint32_t addr, int len)
 {
-	/* Keep the log readable when the card stops answering. */
-	static int sFailLog = 0;
 	int err = 0;
 	uint32_t value;
 	bool bytewise = len != 4 || addr < RTWN_SDIO_ADDR(1, 0)
@@ -98,7 +96,8 @@ rtwn_sdio_read(struct rtwn_sdio_softc *uc, uint32_t addr, int len)
 		value = sdio_read_4(uc->sc_func, addr, &err);
 
 	if (err != 0) {
-		if (sFailLog++ < 100)
+		/* Keep the log readable when the card stops answering. */
+		if (uc->sc_io_errors_logged++ < RTWN_SDIO_MAX_IO_LOGS)
 			device_printf(uc->sc_sc.sc_dev,
 			    "read%d at %#x failed: %d\n", len * 8, addr, err);
 		return (0xffffffff);
@@ -112,8 +111,6 @@ static int
 rtwn_sdio_write(struct rtwn_sdio_softc *uc, uint32_t addr, uint32_t value,
     int len)
 {
-	/* Keep the log readable when the card stops answering. */
-	static int sFailLog = 0;
 	int err = 0;
 	bool bytewise = len != 4 || addr < RTWN_SDIO_ADDR(1, 0)
 	    || !uc->sc_powered || (addr % 4) != 0;
@@ -125,7 +122,7 @@ rtwn_sdio_write(struct rtwn_sdio_softc *uc, uint32_t addr, uint32_t value,
 	else
 		sdio_write_4(uc->sc_func, addr, value, &err);
 
-	if (err != 0 && sFailLog++ < 100) {
+	if (err != 0 && uc->sc_io_errors_logged++ < RTWN_SDIO_MAX_IO_LOGS) {
 		device_printf(uc->sc_sc.sc_dev, "write%d at %#x failed: %d\n",
 		    len * 8, addr, err);
 	}
@@ -280,16 +277,26 @@ int
 rtwn_sdio_resume_hci(struct rtwn_sdio_softc *uc)
 {
 	uint8_t value;
-	int tries;
+	int tries, errors = 0;
 
 	value = rtwn_sdio_local_read_1(uc, RTWN_SDIO_HSUS_CTRL);
 	rtwn_sdio_local_write_1(uc, RTWN_SDIO_HSUS_CTRL,
 	    value & ~RTWN_SDIO_HSUS_SUS_REQ);
 
 	for (tries = 0; tries < RTW_PWR_POLLING_CNT; tries++) {
-		value = rtwn_sdio_local_read_1(uc, RTWN_SDIO_HSUS_CTRL);
-		if (value != 0xff && (value & RTWN_SDIO_HSUS_RESUME_RDY) != 0)
-			return (0);
+		int err = 0;
+
+		value = sdio_read_1(uc->sc_func,
+		    RTWN_SDIO_LOCAL(RTWN_SDIO_HSUS_CTRL), &err);
+		if (err != 0) {
+			/* A card that does not answer will not get ready. */
+			if (++errors >= RTWN_SDIO_MAX_IO_ERRORS)
+				return (EIO);
+		} else {
+			errors = 0;
+			if ((value & RTWN_SDIO_HSUS_RESUME_RDY) != 0)
+				return (0);
+		}
 		DELAY(50);
 	}
 
@@ -313,7 +320,7 @@ rtwn_sdio_run_pwr_seq(struct rtwn_sdio_softc *uc,
 		for (cmd = seq[i]; cmd->cmd != RTW_PWR_CMD_END; cmd++) {
 			uint32_t addr;
 			uint8_t value;
-			int tries;
+			int tries, errors;
 
 			if ((cmd->intf_mask & RTW_PWR_INTF_SDIO_MSK) == 0
 			    || cmd->cut_mask == RTW_PWR_CUT_TEST_MSK)
@@ -338,6 +345,13 @@ rtwn_sdio_run_pwr_seq(struct rtwn_sdio_softc *uc,
 				break;
 
 			case RTW_PWR_CMD_POLLING:
+				/*
+				 * Polling is for a chip that is not ready yet,
+				 * not for one that does not answer: each failed
+				 * command takes its timeout, and 20000 of them
+				 * with the lock held stall a shutdown.
+				 */
+				errors = 0;
 				for (tries = 0; tries < RTW_PWR_POLLING_CNT;
 				    tries++) {
 					err = 0;
@@ -346,6 +360,16 @@ rtwn_sdio_run_pwr_seq(struct rtwn_sdio_softc *uc,
 					if (err == 0 && (value & cmd->mask)
 					    == (cmd->value & cmd->mask))
 						break;
+					if (err == 0)
+						errors = 0;
+					else if (++errors
+					    >= RTWN_SDIO_MAX_IO_ERRORS) {
+						device_printf(uc->sc_sc.sc_dev,
+						    "power sequence %d: no "
+						    "answer polling %#x\n", i,
+						    cmd->offset);
+						return (EIO);
+					}
 					DELAY(50);
 				}
 				if (tries == RTW_PWR_POLLING_CNT) {
