@@ -70,7 +70,6 @@ SdhciBus::SdhciBus(struct registers* registers, uint8_t irq, bool poll)
 	fBouncePhysical(0),
 	fTransferModeSelected(false),
 	fDataMode(kDataModePio),
-	fLastSdioFunction(1),
 	fSdioAdmaFailed(false),
 	fLastAdmaError(0),
 	fStopMode(kStopModeSingle),
@@ -768,12 +767,13 @@ void
 SdhciBus::_AbortTransfer(const char* reason)
 {
 	static int32 sAbortLogCount = 0;
-	if (atomic_add(&sAbortLogCount, 1) < 100)
-	ERROR("abort (%s): state %08" B_PRIx32 ", int status %08" B_PRIx32
-		", adma error %02x, auto cmd error %04x, host control %02x\n", reason,
-		fRegisters->present_state.Bits(), fRegisters->interrupt_status,
-		fRegisters->adma_error_status, fRegisters->auto_cmd12_error_status,
-		fRegisters->host_control.Bits());
+	if (atomic_add(&sAbortLogCount, 1) < 100) {
+		ERROR("abort (%s): state %08" B_PRIx32 ", int status %08" B_PRIx32
+			", adma error %02x, auto cmd error %04x, host control %02x\n", reason,
+			fRegisters->present_state.Bits(), fRegisters->interrupt_status,
+			fRegisters->adma_error_status, fRegisters->auto_cmd12_error_status,
+			fRegisters->host_control.Bits());
+	}
 
 	// Stop the controller side of the transfer
 	fRegisters->software_reset.ResetCommandAndDataLines();
@@ -1684,8 +1684,6 @@ SdhciBus::TransferIO(uint32 argument, bool isWrite, void* buffer,
 
 	if (isWrite)
 		memcpy(fBounceBuffer, buffer, length);
-
-	fLastSdioFunction = (argument >> 28) & 0x7;
 
 	// Multi-block transfers use ADMA2 as on Linux, so that the controller
 	// never has to stop SDCLK between blocks for a late PIO reader. After
