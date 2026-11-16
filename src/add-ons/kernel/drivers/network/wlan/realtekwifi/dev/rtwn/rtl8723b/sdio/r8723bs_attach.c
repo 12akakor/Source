@@ -93,74 +93,10 @@ r8723bs_detach_private(struct rtwn_softc *sc)
 }
 
 
-/*
- * Test only: after every channel switch (which also writes the TX power),
- * set the BB and RF registers where the vendor driver on Android differs
- * from ours while connected: TX power index (+3), CCK and OFDM settings,
- * RF 0x51/0x52. To see whether the link gets better.
- */
 static void
-r8723bs_test_set_chan(struct rtwn_softc *sc, struct ieee80211_channel *c)
+r8723bs_postattach(struct rtwn_softc *sc)
 {
-	r92e_set_chan(sc, c);
-
-	rtwn_bb_write(sc, 0x82c, 0x0c000000);
-	rtwn_bb_write(sc, 0x908, 0x00000208);
-	rtwn_bb_write(sc, 0xa08, 0x8ccd8300);
-	rtwn_bb_write(sc, 0xc64, 0x7112848b);
-	rtwn_bb_write(sc, 0xd2c, 0xcc979175);
-	rtwn_bb_setbits(sc, 0x8e8, 0, 0x00080000);
-	rtwn_bb_write(sc, 0xe00, 0x31313131);
-	rtwn_bb_write(sc, 0xe04, 0x31313131);
-	rtwn_bb_write(sc, 0xe08, 0x03902d2d);
-	rtwn_bb_write(sc, 0xe10, 0x2f2f2f2f);
-	rtwn_bb_write(sc, 0xe14, 0x2f2f2f2f);
-	rtwn_bb_setbits(sc, 0x86c, 0xffffff00, 0x2d2d2d00);
-	rtwn_rf_write(sc, 0, 0x51, 0x6f10e);
-	rtwn_rf_write(sc, 0, 0x52, 0x007d3);
-}
-
-
-/*
- * Test only: the initial gain (IGI) stays at 0x20 of the AGC table, which
- * is the most sensitive setting. The Android driver was at 0x37 while
- * connected (DIG). Use 0x20 while scanning and 0x37 after it, as
- * r92c_scan_start/end do with 0x20/0x32.
- */
-static void (*r8723bs_test_scan_start_prev)(struct ieee80211com *);
-static void (*r8723bs_test_scan_end_prev)(struct ieee80211com *);
-
-static void
-r8723bs_test_set_igi(struct rtwn_softc *sc, uint8_t igi)
-{
-	RTWN_LOCK(sc);
-	rtwn_bb_setbits(sc, 0xc50, 0x7f, igi);
-	RTWN_UNLOCK(sc);
-}
-
-static void
-r8723bs_test_scan_start(struct ieee80211com *ic)
-{
-	r8723bs_test_set_igi(ic->ic_softc, 0x20);
-	r8723bs_test_scan_start_prev(ic);
-}
-
-static void
-r8723bs_test_scan_end(struct ieee80211com *ic)
-{
-	r8723bs_test_set_igi(ic->ic_softc, 0x37);
-	r8723bs_test_scan_end_prev(ic);
-}
-
-static void
-r8723bs_test_postattach(struct rtwn_softc *sc)
-{
-	struct ieee80211com *ic = &sc->sc_ic;
-
-	r8723bs_test_scan_start_prev = ic->ic_scan_start;
-	ic->ic_scan_start = r8723bs_test_scan_start;
-	r8723bs_test_scan_end_prev = ic->ic_scan_end;
-	ic->ic_scan_end = r8723bs_test_scan_end;
+	r8723b_dm_attach(sc);
 }
 
 
@@ -187,7 +123,7 @@ r8723bs_attach(struct rtwn_sdio_softc *uc)
 	/* Common part. */
 	sc->sc_flags			= RTWN_FLAG_EXT_HDR;
 
-	sc->sc_set_chan			= r8723bs_test_set_chan;	/* test */
+	sc->sc_set_chan			= r92e_set_chan;
 	sc->sc_fill_tx_desc		= r12a_fill_tx_desc;
 	sc->sc_fill_tx_desc_raw		= r12a_fill_tx_desc_raw;
 	sc->sc_fill_tx_desc_null	= r12a_fill_tx_desc_null;
@@ -221,7 +157,7 @@ r8723bs_attach(struct rtwn_sdio_softc *uc)
 	sc->sc_read_chipid_vendor	= rtwn_nop_softc_uint32;
 	sc->sc_adj_devcaps		= r8723bs_adj_devcaps;
 	sc->sc_vap_preattach		= rtwn_nop_softc_vap;
-	sc->sc_postattach		= r8723bs_test_postattach;	/* test */
+	sc->sc_postattach		= r8723bs_postattach;
 	sc->sc_detach_private		= r8723bs_detach_private;
 #ifndef RTWN_WITHOUT_UCODE
 	sc->sc_set_media_status		= r92e_set_media_status;
@@ -237,6 +173,7 @@ r8723bs_attach(struct rtwn_sdio_softc *uc)
 	sc->sc_beacon_set_rate		= rtwn_nop_void_int;
 	sc->sc_beacon_select		= r21a_beacon_select;
 	sc->sc_temp_measure		= r88e_temp_measure;
+	sc->sc_dm_watchdog		= r8723b_dm_watchdog;
 	sc->sc_temp_read		= r88e_temp_read;
 	sc->sc_init_tx_agg		= rtwn_nop_softc;
 	sc->sc_init_rx_agg		= r8723b_init_rx_agg;

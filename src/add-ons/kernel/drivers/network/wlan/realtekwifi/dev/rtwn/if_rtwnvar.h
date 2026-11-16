@@ -364,6 +364,8 @@ struct rtwn_softc {
 			    uint8_t *, int);
 	int		(*sc_check_frame)(struct rtwn_softc *, struct mbuf *);
 	void		(*sc_temp_measure)(struct rtwn_softc *);
+	/* Optional: periodic gain control and the like, every 2 seconds. */
+	void		(*sc_dm_watchdog)(struct rtwn_softc *);
 	uint8_t		(*sc_temp_read)(struct rtwn_softc *);
 	void		(*sc_init_tx_agg)(struct rtwn_softc *);
 	void		(*sc_init_rx_agg)(struct rtwn_softc *);

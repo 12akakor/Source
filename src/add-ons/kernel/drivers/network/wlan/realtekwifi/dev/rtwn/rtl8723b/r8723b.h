@@ -36,6 +36,23 @@ struct r8723b_softc {
 	struct r92e_softc	rs;
 	uint8_t			bt_setting;	/* efuse 0xc3 */
 #define R8723B_BT_SETTING_AUX_ANT	0x40	/* WLAN on S0 (aux) */
+
+	/* Dynamic mechanisms (r8723b_dm.c). */
+	uint8_t			dm_igi_history[4];
+	uint16_t		dm_fa_history[4];
+	uint8_t			dm_igi_bitmap;
+	uint8_t			dm_min_rssi;
+	uint8_t			dm_pre_min_rssi;
+	uint8_t			dm_linked;
+	uint8_t			dm_damping;
+	uint8_t			dm_damping_cnt;
+	uint8_t			dm_damping_rssi;
+	uint8_t			dm_cck_pd_lv;
+	uint32_t		dm_cck_fa;
+	uint32_t		dm_cck_fa_avg;
+	uint32_t		dm_total_fa;
+	void			(*dm_scan_start)(struct ieee80211com *);
+	void			(*dm_scan_end)(struct ieee80211com *);
 };
 
 /*
@@ -53,6 +70,11 @@ void	r8723b_post_init(struct rtwn_softc *);
 #ifndef RTWN_WITHOUT_UCODE
 void	r8723b_fw_download_enable(struct rtwn_softc *, int);
 #endif
+
+/* r8723b_dm.c */
+void	r8723b_dm_attach(struct rtwn_softc *);
+void	r8723b_dm_init(struct rtwn_softc *);
+void	r8723b_dm_watchdog(struct rtwn_softc *);
 
 /* r8723b_rom.c */
 void	r8723b_parse_rom_sdio(struct rtwn_softc *, uint8_t *);

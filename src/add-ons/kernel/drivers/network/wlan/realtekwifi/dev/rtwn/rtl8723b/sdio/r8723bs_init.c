@@ -250,6 +250,9 @@ r8723bs_post_init(struct rtwn_softc *sc)
 	/* IQ calibration, as the vendor driver does at init. */
 	r8723b_iq_calib(sc);
 
+	/* The gain control starts from the gain of the tables. */
+	r8723b_dm_init(sc);
+
 	/*
 	 * rtw88 also sets bit 4 (ALWAYS_RECOGNIZE) of TX_CTRL, for the
 	 * RTL8723BS only (rtw_sdio_enable_interrupt()).
