@@ -772,6 +772,16 @@ sensor_report(rmi4_device* device)
 			event.fingerWidth = count == 2 ? 0 : 1;
 	}
 
+	// TEST ONLY: trace what movement_maker gets while the pad is down
+	static int32 sDragLogged;
+	if ((device->padButtons != 0 || device->clickButton != 0)
+		&& sDragLogged++ < 400) {
+		TRACE_ALWAYS("diag: ev t=%" B_PRIdBIGTIME " b=%u f=%02" B_PRIx32
+			" x=%" B_PRIu32 " y=%" B_PRIu32 " z=%u w=%u n=%d mask=%02" B_PRIx32
+			"\n", system_time(), event.buttons, (uint32)event.fingers,
+			event.xPosition, event.yPosition, event.zPressure,
+			event.fingerWidth, count, device->fingerMask);
+	}
 	queue_put(device->touchpadQueue, event);
 }
 
@@ -1113,6 +1123,13 @@ buttons_read(rmi4_device* device)
 	}
 
 	if (pad != device->padButtons) {
+		// TEST ONLY: trace the clickpad button
+		static int32 sLogged;
+		if (sLogged++ < 80) {
+			TRACE_ALWAYS("diag: pad button %u -> %u at %" B_PRIdBIGTIME
+				" (gpio %02x %02x)\n", device->padButtons, pad, system_time(),
+				data[0], data[1]);
+		}
 		device->padButtons = pad;
 		sensor_report(device);
 	}
