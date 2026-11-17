@@ -1483,6 +1483,29 @@ rtwn_watchdog(void *arg)
 	 * channels, the radio waits on one for the supplicant's choice after it,
 	 * and a restart would only start all that again. The 2 minutes there too.
 	 */
+	/*
+	 * A failed block transfer (see sc_io_fault). A chip that is stuck
+	 * answers the single byte commands of the receive poll but receives
+	 * nothing any more, and the silence below would only notice it after
+	 * 2 minutes when it happens during a scan. One that still works
+	 * delivers frames within a few seconds, if only beacons.
+	 */
+	if (sc->rx_silence_limit != 0 && sc->sc_io_fault != 0) {
+		if (sc->sc_io_fault == 1)
+			sc->sc_io_fault_rx = sc->sc_rx_transfers;
+		if (sc->sc_rx_transfers != sc->sc_io_fault_rx)
+			sc->sc_io_fault = 0;
+		else if (sc->sc_io_fault++ > RTWN_IO_FAULT_LIMIT) {
+			ic_printf(ic, "nothing received for %d s after a failed "
+			    "transfer, restarting\n", RTWN_IO_FAULT_LIMIT);
+			sc->sc_io_fault = 0;
+			sc->sc_rx_silence = 0;
+			sc->sc_rx_flowing = 0;
+			ieee80211_restart_all(ic);
+			return;
+		}
+	}
+
 	if (sc->rx_silence_limit != 0) {
 		struct ieee80211vap *vap = TAILQ_FIRST(&ic->ic_vaps);
 		int linked = vap != NULL && vap->iv_state == IEEE80211_S_RUN
@@ -2082,6 +2105,8 @@ rtwn_init(struct rtwn_softc *sc)
 	rtwn_start_xfers(sc);
 
 #ifndef D4054
+	/* A failed transfer of the firmware download is no fault here. */
+	sc->sc_io_fault = 0;
 	callout_reset(&sc->sc_watchdog_to, hz, rtwn_watchdog, sc);
 #endif
 

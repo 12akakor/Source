@@ -80,6 +80,19 @@ rtwn_sdio_write_bytewise(struct rtwn_sdio_softc *uc, uint32_t addr,
 }
 
 
+/*!	A block transfer (CMD53) failed: let the watchdog check that the chip
+	still receives (sc_io_fault in if_rtwnvar.h).
+*/
+void
+rtwn_sdio_io_fault(struct rtwn_sdio_softc *uc)
+{
+	struct rtwn_softc *sc = &uc->sc_sc;
+
+	if (sc->sc_io_fault == 0)
+		sc->sc_io_fault = 1;
+}
+
+
 static uint32_t
 rtwn_sdio_read(struct rtwn_sdio_softc *uc, uint32_t addr, int len)
 {
@@ -96,6 +109,8 @@ rtwn_sdio_read(struct rtwn_sdio_softc *uc, uint32_t addr, int len)
 		value = sdio_read_4(uc->sc_func, addr, &err);
 
 	if (err != 0) {
+		if (!bytewise && len == 4)
+			rtwn_sdio_io_fault(uc);
 		/* Keep the log readable when the card stops answering. */
 		if (uc->sc_io_errors_logged++ < RTWN_SDIO_MAX_IO_LOGS)
 			device_printf(uc->sc_sc.sc_dev,
@@ -122,6 +137,8 @@ rtwn_sdio_write(struct rtwn_sdio_softc *uc, uint32_t addr, uint32_t value,
 	else
 		sdio_write_4(uc->sc_func, addr, value, &err);
 
+	if (err != 0 && !bytewise && len == 4)
+		rtwn_sdio_io_fault(uc);
 	if (err != 0 && uc->sc_io_errors_logged++ < RTWN_SDIO_MAX_IO_LOGS) {
 		device_printf(uc->sc_sc.sc_dev, "write%d at %#x failed: %d\n",
 		    len * 8, addr, err);

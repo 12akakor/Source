@@ -92,6 +92,8 @@ rtwn_sdio_rx_read(struct rtwn_sdio_softc *uc, uint32_t len, size_t size)
 	int error;
 
 	error = rtwn_sdio_read_port(uc, size);
+	if (error != 0)
+		rtwn_sdio_io_fault(uc);
 	if (error != 0
 	    && uc->sc_io_errors_logged++ < RTWN_SDIO_MAX_IO_LOGS) {
 		device_printf(uc->sc_sc.sc_dev, "reading %u bytes failed: %d, "

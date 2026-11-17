@@ -73,6 +73,7 @@ int		rtwn_sdio_fw_write_block(struct rtwn_softc *, const uint8_t *,
 uint8_t		rtwn_sdio_local_read_1(struct rtwn_sdio_softc *, uint16_t);
 uint16_t	rtwn_sdio_local_read_2(struct rtwn_sdio_softc *, uint16_t);
 uint32_t	rtwn_sdio_local_read_4(struct rtwn_sdio_softc *, uint16_t);
+void		rtwn_sdio_io_fault(struct rtwn_sdio_softc *);
 int		rtwn_sdio_local_write_1(struct rtwn_sdio_softc *, uint16_t,
 		    uint8_t);
 int		rtwn_sdio_local_write_4(struct rtwn_sdio_softc *, uint16_t,

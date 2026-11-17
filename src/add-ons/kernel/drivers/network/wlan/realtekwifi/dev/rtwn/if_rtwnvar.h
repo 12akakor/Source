@@ -230,6 +230,14 @@ struct rtwn_softc {
 	int			sc_rx_flowing;
 	int			sc_rx_silent_linked;	/* silence began on a link */
 	int			rx_silence_limit;	/* seconds; 0: not watched */
+	/*
+	 * Set by the bus code when a block transfer failed: the chip may have
+	 * stopped answering. The watchdog then restarts it unless frames come
+	 * within RTWN_IO_FAULT_LIMIT seconds. Counts the seconds after 1.
+	 */
+	int			sc_io_fault;
+	uint32_t		sc_io_fault_rx;		/* sc_rx_transfers then */
+#define RTWN_IO_FAULT_LIMIT	5
 #endif
 
 	struct mtx		sc_mtx;
