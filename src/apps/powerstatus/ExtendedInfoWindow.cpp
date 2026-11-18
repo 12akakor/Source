@@ -28,6 +28,30 @@
 const size_t kLinesCount = 16;
 
 
+// ACPI reports a value it does not know as 0xFFFFFFFF; PowerStatus passes an
+// unknown remaining or full capacity on as -1.
+static void
+append_value(BString& string, uint32 value, const BString& unit)
+{
+	if (value == UINT32_MAX) {
+		string << B_TRANSLATE("unknown");
+		return;
+	}
+	string << value << unit;
+}
+
+
+static void
+append_value(BString& string, int32 value, const BString& unit)
+{
+	if (value < 0) {
+		string << B_TRANSLATE("unknown");
+		return;
+	}
+	string << value << unit;
+}
+
+
 //	#pragma mark -
 
 
@@ -118,24 +142,21 @@ BatteryInfoView::_GetTextForLine(size_t line)
 		}
 		case 1:
 			string = B_TRANSLATE("Capacity: ");
-			string << fBatteryInfo.capacity;
-			string << powerUnit;
+			append_value(string, fBatteryInfo.capacity, powerUnit);
 			break;
 		case 2:
 			string = B_TRANSLATE("Last full charge: ");
-			string << fBatteryInfo.full_capacity;
-			string << powerUnit;
+			append_value(string, fBatteryInfo.full_capacity, powerUnit);
 			break;
 		case 3:
 			string = B_TRANSLATE("Current rate: ");
-			string << fBatteryInfo.current_rate;
-			string << rateUnit;
+			append_value(string, fBatteryInfo.current_rate, rateUnit);
 			break;
 		// case 4 missed intentionally
 		case 5:
 			string = B_TRANSLATE("Design capacity: ");
-			string << fBatteryExtendedInfo.design_capacity;
-			string << powerUnit;
+			append_value(string, fBatteryExtendedInfo.design_capacity,
+				powerUnit);
 			break;
 		case 6:
 			string = B_TRANSLATE("Technology: ");
@@ -148,28 +169,28 @@ BatteryInfoView::_GetTextForLine(size_t line)
 			break;
 		case 7:
 			string = B_TRANSLATE("Design voltage: ");
-			string << fBatteryExtendedInfo.design_voltage;
-			string << B_TRANSLATE(" mV");
+			append_value(string, fBatteryExtendedInfo.design_voltage,
+				B_TRANSLATE(" mV"));
 			break;
 		case 8:
 			string = B_TRANSLATE("Design capacity warning: ");
-			string << fBatteryExtendedInfo.design_capacity_warning;
-			string << powerUnit;
+			append_value(string, fBatteryExtendedInfo.design_capacity_warning,
+				powerUnit);
 			break;
 		case 9:
 			string = B_TRANSLATE("Design capacity low warning: ");
-			string << fBatteryExtendedInfo.design_capacity_low;
-			string << powerUnit;
+			append_value(string, fBatteryExtendedInfo.design_capacity_low,
+				powerUnit);
 			break;
 		case 10:
 			string = B_TRANSLATE("Capacity granularity 1: ");
-			string << fBatteryExtendedInfo.capacity_granularity_1;
-			string << powerUnit;
+			append_value(string, fBatteryExtendedInfo.capacity_granularity_1,
+				powerUnit);
 			break;
 		case 11:
 			string = B_TRANSLATE("Capacity granularity 2: ");
-			string << fBatteryExtendedInfo.capacity_granularity_2;
-			string << powerUnit;
+			append_value(string, fBatteryExtendedInfo.capacity_granularity_2,
+				powerUnit);
 			break;
 		case 12:
 			string = B_TRANSLATE("Model number: ");
