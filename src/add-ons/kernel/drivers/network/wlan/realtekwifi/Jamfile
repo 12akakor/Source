@@ -130,6 +130,7 @@ KernelAddon realtekwifi :
 	# rtl8723b/
 	r8723b_calib.c
 	r8723b_dm.c
+	r8723b_pwrtrack.c
 	r8723b_init.c
 	r8723b_rom.c
 

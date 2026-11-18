@@ -47,6 +47,14 @@ struct r92e_softc {
 	int		ac_usb_dma_size;
 	int		ac_usb_dma_time;
 	uint32_t	rf_chnlbw[R92E_MAX_RF_PATH];
+
+	/*
+	 * TX power index steps on top of the efuse values, from the thermal
+	 * power tracking of chips that have one (RTL8723B): what the
+	 * baseband swing could not take.
+	 */
+	int8_t		pwr_remnant_cck;
+	int8_t		pwr_remnant_ofdm;
 };
 
 #endif	/* R92E_VAR_H */

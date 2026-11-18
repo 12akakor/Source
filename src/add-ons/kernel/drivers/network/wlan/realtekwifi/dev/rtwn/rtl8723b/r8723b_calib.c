@@ -590,8 +590,17 @@ r8723b_iq_calib(struct rtwn_softc *sc)
 			final = IQK_HYBRID;
 	}
 
-	if (final >= 0)
+	if (final >= 0) {
+		struct r8723b_softc *rs = sc->sc_priv;
+
 		r8723b_iqk_fill_a(sc, result[final]);
+		if (result[final][IQK_TX_X] != 0) {
+			/* The power tracking applies its swing with these. */
+			rs->iqk_tx_x = result[final][IQK_TX_X];
+			rs->iqk_tx_y = result[final][IQK_TX_Y];
+			rs->iqk_done = 1;
+		}
+	}
 
 	/* Restore the RF path, GNT_BT and the RX mode table. */
 	rtwn_bb_write(sc, R8723B_BB_SEL_BTG, b.bb_sel_btg);
