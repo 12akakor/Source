@@ -1,0 +1,6 @@
+# Test programs copied to /boot/home/tests in the X270 test image.
+locale_startup_race_test
+locale_thread_exit_test
+# The guarded heap for locale_thread_exit_test; haiku_devel is not in
+# the image.
+<revisioned>libroot_debug.so
