@@ -84,6 +84,8 @@ init_bus_acpi(device_node* node, void** bus_cookie)
 	if (powerStatus == B_OK)
 		TRACE("_PS0 done\n");
 
+	sdhci_intel_byt_ocp_fixup();
+
 	// Ignore invalid bars
 	TRACE("Register SD bus\n");
 
