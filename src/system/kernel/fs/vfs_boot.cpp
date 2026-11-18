@@ -735,7 +735,7 @@ vfs_mount_boot_file_system(kernel_args* args)
 			device->VisitEachDescendant(&printer);
 		}
 
-		panic("did not find any boot partitions! @! syslog | tail 15");
+		panic("did not find any boot partitions! @! syslog | grep -v boot: | tail 30");
 	}
 
 	dev_t bootDevice = -1;
