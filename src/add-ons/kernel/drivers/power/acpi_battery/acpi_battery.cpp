@@ -56,6 +56,7 @@ struct battery_device_cookie {
 
 
 static device_manager_info *sDeviceManager;
+static acpi_module_info *sACPI;
 static ConditionVariable sBatteryCondition;
 
 
@@ -522,6 +523,24 @@ acpi_battery_support(device_node *parent)
 		return 0.0;
 	}
 
+	// On tablets with an X-Powers AXP288 PMIC (INT33F4) the firmware still
+	// describes ACPI batteries, but they are not wired up: _BIX reads a fuel
+	// gauge that does not answer on I2C, and every read times out. The axp288
+	// driver reports the battery from the PMIC instead. Linux skips the ACPI
+	// battery on these machines for the same reason
+	// (acpi_quirk_skip_acpi_ac_and_battery()). get_device() only finds
+	// devices whose _STA says they are present.
+	char path[128];
+	if (sACPI->get_device("INT33F4", 0, path, sizeof(path)) == B_OK) {
+		static bool sLogged;
+		if (!sLogged) {
+			sLogged = true;
+			dprintf("acpi_battery: AXP288 PMIC at %s, leaving the battery to "
+				"its driver\n", path);
+		}
+		return 0.0;
+	}
+
 	return 0.6;
 }
 
@@ -612,6 +631,7 @@ acpi_battery_register_child_devices(void *cookie)
 
 module_dependency module_dependencies[] = {
 	{ B_DEVICE_MANAGER_MODULE_NAME, (module_info **)&sDeviceManager },
+	{ B_ACPI_MODULE_NAME, (module_info **)&sACPI },
 	{}
 };
 
