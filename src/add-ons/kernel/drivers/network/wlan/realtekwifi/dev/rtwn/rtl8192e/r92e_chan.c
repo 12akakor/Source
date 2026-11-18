@@ -146,6 +146,14 @@ r92e_get_txpower(struct rtwn_softc *sc, int chain, struct ieee80211_channel *c,
 		}
 	}
 
+	/* Thermal power tracking remnant, if any. */
+	for (ridx = RTWN_RIDX_CCK1; ridx <= max_mcs; ridx++) {
+		int pwr = power[ridx] + (ridx <= RTWN_RIDX_CCK11 ?
+		    rs->pwr_remnant_cck : rs->pwr_remnant_ofdm);
+
+		power[ridx] = pwr < 0 ? 0 : pwr;
+	}
+
 	/* Apply max limit. */
 	for (ridx = RTWN_RIDX_CCK1; ridx <= max_mcs; ridx++) {
 		if (power[ridx] > R92C_MAX_TX_PWR)
@@ -153,7 +161,7 @@ r92e_get_txpower(struct rtwn_softc *sc, int chain, struct ieee80211_channel *c,
 	}
 }
 
-static void
+void
 r92e_set_txpower(struct rtwn_softc *sc, struct ieee80211_channel *c)
 {
 	uint8_t power[RTWN_RIDX_COUNT];

@@ -53,6 +53,19 @@ struct r8723b_softc {
 	uint32_t		dm_total_fa;
 	void			(*dm_scan_start)(struct ieee80211com *);
 	void			(*dm_scan_end)(struct ieee80211com *);
+
+	/* IQ calibration result of path A, for the power tracking. */
+	int32_t			iqk_tx_x;
+	int32_t			iqk_tx_y;
+	uint8_t			iqk_done;
+
+	/* Thermal power tracking (r8723b_pwrtrack.c). */
+	uint8_t			pt_default_ofdm;	/* swing table index */
+	uint8_t			pt_default_cck;
+	int8_t			pt_delta;		/* swing steps */
+	uint8_t			pt_init;
+	uint8_t			pt_avg_valid;
+	uint32_t		pt_avg;			/* EWMA, Q22.10 */
 };
 
 /*
@@ -75,6 +88,10 @@ void	r8723b_fw_download_enable(struct rtwn_softc *, int);
 void	r8723b_dm_attach(struct rtwn_softc *);
 void	r8723b_dm_init(struct rtwn_softc *);
 void	r8723b_dm_watchdog(struct rtwn_softc *);
+
+/* r8723b_pwrtrack.c */
+void	r8723b_pwrtrack_init(struct rtwn_softc *);
+void	r8723b_pwrtrack(struct rtwn_softc *);
 
 /* r8723b_rom.c */
 void	r8723b_parse_rom_sdio(struct rtwn_softc *, uint8_t *);

@@ -470,6 +470,8 @@ r8723b_dm_watchdog(struct rtwn_softc *sc)
 	if (ic->ic_flags & IEEE80211_F_SCAN)
 		return;
 
+	r8723b_pwrtrack(sc);
+
 	rssi = r8723b_dm_link_rssi(sc);
 	linked = (rssi >= 0);
 	if (linked) {
@@ -505,6 +507,8 @@ r8723b_dm_init(struct rtwn_softc *sc)
 	rs->dm_pre_min_rssi = 0;
 	rs->dm_cck_fa_avg = R8723B_CCK_FA_AVG_RESET;
 	rs->dm_cck_pd_lv = R8723B_CCK_PD_LV_UNKNOWN;
+
+	r8723b_pwrtrack_init(sc);
 }
 
 
