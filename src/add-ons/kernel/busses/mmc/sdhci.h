@@ -668,6 +668,9 @@ status_t transfer_io(void* controller, uint32_t argument, bool isWrite,
 void set_card_interrupt(void* controller, void (*handler)(void*),
 	void* cookie);
 
+// sdhci_intel.cpp
+void sdhci_intel_byt_ocp_fixup();
+
 extern mmc_bus_interface gSDHCIACPIDeviceModule;
 extern mmc_bus_interface gSDHCIPCIDeviceModule;
 

@@ -79,6 +79,12 @@ init_bus_pci(device_node* node, void** bus_cookie)
 	pci_info pciInfo;
 	pci->get_pci_info(device, &pciInfo);
 
+	// Bay Trail in PCI mode (8086:0f14, 0f15, 0f16, 0f50)
+	if (pciInfo.vendor_id == 0x8086 && (pciInfo.device_id == 0x0f14
+			|| pciInfo.device_id == 0x0f15 || pciInfo.device_id == 0x0f16
+			|| pciInfo.device_id == 0x0f50))
+		sdhci_intel_byt_ocp_fixup();
+
 	for (; bar < 6 && slot > 0; bar++, slot--) {
 		if ((pciInfo.u.h0.base_register_flags[bar] & PCI_address_type)
 			== PCI_address_type_64) {
