@@ -271,7 +271,7 @@ AddFilesToPackage :
 AddFilesToPackage bin :
 	$(SYSTEM_BIN)
 	consoled
-	emmc_write_test
+	<bin>emmc_write_test
 	;
 AddFilesToPackage apps
 	: $(SYSTEM_APPS) ;
