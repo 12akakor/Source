@@ -376,6 +376,7 @@ ExtendedInfoWindow::ExtendedInfoWindow(PowerStatusDriverInterface* interface)
 		.SetInsets(B_USE_DEFAULT_SPACING, 0, B_USE_DEFAULT_SPACING, 0)
 		.Add(fBatteryTabView);
 
+	int32 selectedTab = 0;
 	for (int i = 0; i < interface->GetBatteryCount(); i++) {
 		BatteryInfoView* batteryInfoView = new BatteryInfoView();
 		ExtPowerStatusView* view = new ExtPowerStatusView(interface,
@@ -388,13 +389,18 @@ ExtendedInfoWindow::ExtendedInfoWindow(PowerStatusDriverInterface* interface)
 
 		fBatteryViewList.AddItem(view);
 		fDriverInterface->StartWatching(view);
-		if (!view->IsCritical())
+		if (!view->IsCritical() && fSelectedView == NULL) {
 			fSelectedView = view;
+			selectedTab = i;
+		}
 	}
 
 	if (!fSelectedView && fBatteryViewList.CountItems() > 0)
 		fSelectedView = fBatteryViewList.ItemAt(0);
-	fSelectedView->Select();
+	// Show the tab of that battery, not just its info: the tab view would
+	// otherwise open on the first tab, which can be an empty slot.
+	if (fSelectedView != NULL)
+		fBatteryTabView->Select(selectedTab);
 
 	BSize size = GetLayout()->PreferredSize();
 	ResizeTo(size.width, size.height);
