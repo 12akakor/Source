@@ -271,6 +271,7 @@ AddFilesToPackage :
 AddFilesToPackage bin :
 	$(SYSTEM_BIN)
 	consoled
+	emmc_write_test
 	;
 AddFilesToPackage apps
 	: $(SYSTEM_APPS) ;
@@ -510,6 +511,10 @@ for linkTarget in $(DESKBAR_APPLICATIONS) {
 	AddSymlinkToPackage data deskbar menu Applications
 		: ../../../../apps/$(linkTarget) : $(linkTarget) ;
 }
+
+# test: the eMMC write test in the Applications menu
+AddSymlinkToPackage data deskbar menu Applications
+	: ../../../../bin/emmc_write_test : "eMMC write test" ;
 
 # "Desktop applets" links
 AddDirectoryToPackage data deskbar menu Desktop\ applets
