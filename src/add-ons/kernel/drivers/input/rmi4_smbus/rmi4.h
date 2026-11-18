@@ -129,8 +129,7 @@ struct rmi4_device {
 	rmi4_finger				lastFingers[kRmi4MaxFingers];
 	uint32					fingerMask;
 	uint32					lastFingerMask;
-	int32					positionX;
-	int32					positionY;
+	int						activeFinger;	// reported finger, or -1
 	int						loggedFrames;
 
 	// F03 PS/2 guest (TrackPoint)
