@@ -29,21 +29,91 @@
 #endif
 
 
+// 60 Hz, for screens where the driver can't tell
+static const bigtime_t kFrameInterval = 16667;
+
+// Drawing is shared out between at most this many threads, in about twice as
+// many bands, so that one that takes longer doesn't hold the others up. Waking
+// them up costs more than drawing less than kMinBandedPixels.
+static const int32 kMaxDrawThreads = 8;
+static const int32 kBandsPerThread = 2;
+static const int32 kMinBandHeight = 16;
+static const int64 kMinBandedPixels = 256 * 256;
+
+
 Compositor::Compositor(Desktop* desktop)
 	:
 	fDesktop(desktop),
 	fLock("compositor"),
+	fDamageLock("compositor damage"),
+	fWakePending(false),
+	fWakeSem(create_sem(0, "compositor wake")),
+	fThread(-1),
+	fQuit(false),
+	fNextFrame(0),
+	fUsesRetrace(false),
+	fReportedPacing(false),
+	fHelpSem(create_sem(0, "compositor help")),
+	fHelpDoneSem(create_sem(0, "compositor help done")),
+	fBandTarget(NULL),
+	fBandBackground(NULL),
+	fBandLayerCount(0),
+	fBandCount(0),
+	fNextBand(0),
 	fSceneBits(NULL),
 	fSceneWidth(0),
 	fSceneHeight(0)
 {
+	// The helpers can't build this at the same time.
+	WindowShape::ShadowProfile();
+
+	system_info info;
+	if (fHelpSem >= 0 && fHelpDoneSem >= 0 && get_system_info(&info) == B_OK) {
+		int32 count = min_c((int32)info.cpu_count, kMaxDrawThreads) - 1;
+		for (int32 i = 0; i < count; i++) {
+			thread_id helper = spawn_thread(&_HelperEntry, "compositor helper",
+				B_DISPLAY_PRIORITY, this);
+			if (helper < 0)
+				break;
+			fHelpers.push_back(helper);
+			resume_thread(helper);
+		}
+	}
+
+	fThread = spawn_thread(&_ThreadEntry, "compositor", B_DISPLAY_PRIORITY, this);
+	if (fThread >= 0)
+		resume_thread(fThread);
 }
 
 
 Compositor::~Compositor()
 {
+	fQuit = true;
+	delete_sem(fWakeSem);
+	if (fThread >= 0) {
+		status_t result;
+		wait_for_thread(fThread, &result);
+	}
+
+	// Without their semaphore, the helpers quit.
+	delete_sem(fHelpSem);
+	delete_sem(fHelpDoneSem);
+	for (size_t i = 0; i < fHelpers.size(); i++) {
+		status_t result;
+		wait_for_thread(fHelpers[i], &result);
+	}
+
 	for (size_t i = 0; i < fLayers.size(); i++)
 		delete fLayers[i];
+}
+
+
+status_t
+Compositor::InitCheck() const
+{
+	if (fWakeSem < 0)
+		return fWakeSem;
+	return fThread >= 0 ? B_OK : fThread;
 }
 
 
@@ -53,10 +123,182 @@ Compositor::Composite(const BRegion& damage)
 	if (damage.CountRects() == 0)
 		return;
 
-	// Other window threads may composite at the same time. Serializing them
-	// also makes sure the screen ends up correct: a window's drawing is done
-	// when it gets here, so whoever comes next sees its new pixels.
+	BAutolock _(fDamageLock);
+	fDamage.Include(&damage);
+	if (!fWakePending) {
+		fWakePending = true;
+		release_sem(fWakeSem);
+	}
+}
+
+
+void
+Compositor::Flush()
+{
+	if (fDesktop->LockSingleWindow()) {
+		_CompositeDamage();
+		fDesktop->UnlockSingleWindow();
+	}
+}
+
+
+void
+Compositor::ScreenTaken()
+{
+	// _Composite() looks at the owner of the screen with this held.
 	BAutolock _(fLock);
+}
+
+
+void
+Compositor::ScreenReleased()
+{
+	BRegion all((BRect)fDesktop->HWInterface()->DrawingBuffer()->Bounds());
+	Composite(all);
+}
+
+
+/*static*/ status_t
+Compositor::_ThreadEntry(void* data)
+{
+	((Compositor*)data)->_Run();
+	return B_OK;
+}
+
+
+void
+Compositor::_Run()
+{
+	while (!fQuit) {
+		status_t status = acquire_sem(fWakeSem);
+		if (status == B_INTERRUPTED)
+			continue;
+		if (status != B_OK)
+			break;
+
+		if (!fUsesRetrace) {
+			_WaitForFrame();
+
+			if (fDesktop->LockSingleWindow()) {
+				_CompositeDamage();
+				fDesktop->UnlockSingleWindow();
+			}
+			continue;
+		}
+
+		// With a retrace, the frame is built first and only copied to the
+		// screen in the vertical blank. Building it takes longer than the
+		// blank lasts, so building it after the retrace left the top of the
+		// screen to tear; the copy alone runs ahead of the scanout.
+		BRegion present;
+		if (fDesktop->LockSingleWindow()) {
+			_CompositeDamage(&present);
+			fDesktop->UnlockSingleWindow();
+		}
+		_WaitForFrame();
+		_Present(present);
+	}
+}
+
+
+/*!	Paces the updates of the screen. When the driver knows about the vertical
+	retrace, the screen is updated right after it, which keeps a window from
+	tearing while the update is done. Otherwise this just limits the rate, and
+	what comes after an idle moment goes straight to the screen.
+*/
+void
+Compositor::_WaitForFrame()
+{
+	status_t status = fDesktop->HWInterface()->WaitForRetrace(kFrameInterval);
+	fUsesRetrace = status == B_OK || status == B_TIMED_OUT;
+
+	if (!fReportedPacing) {
+		debug_printf("app_server: compositor paced by %s\n",
+			fUsesRetrace ? "the vertical retrace" : "a timer");
+		fReportedPacing = true;
+	}
+
+	if (!fUsesRetrace) {
+		if (system_time() < fNextFrame)
+			snooze_until(fNextFrame, B_SYSTEM_TIMEBASE);
+		fNextFrame = system_time() + kFrameInterval;
+	}
+}
+
+
+void
+Compositor::_CompositeDamage(BRegion* present)
+{
+	BRegion damage;
+	{
+		BAutolock _(fDamageLock);
+		damage = fDamage;
+		fDamage.MakeEmpty();
+		fWakePending = false;
+	}
+
+	// A window with direct access draws to its buffer on its own, and doesn't
+	// say when: while it may, its contents are put on the screen every frame.
+	BRegion direct;
+	WindowList& windows = fDesktop->CurrentWindows();
+	int32 workspace = fDesktop->CurrentWorkspace();
+	for (Window* window = windows.FirstWindow(); window != NULL;
+			window = window->NextWindow(workspace)) {
+		if (!window->IsHidden()
+			&& window->ServerWindow()->IsDirectlyAccessing()) {
+			BRegion content;
+			window->GetContentRegion(&content);
+			direct.Include(&content);
+		}
+	}
+	damage.Include(&direct);
+
+	_Composite(damage, present);
+
+	// and again in the next one
+	Composite(direct);
+}
+
+
+/*!	Copies \a region, as built by _Composite(), from the back buffer to the
+	screen.
+*/
+void
+Compositor::_Present(const BRegion& region)
+{
+	if (region.CountRects() == 0)
+		return;
+
+	BAutolock _(fLock);
+
+	if (fDesktop->IsDirectScreenLocked())
+		return;
+
+	::HWInterface* interface = fDesktop->HWInterface();
+	if (!interface->LockParallelAccess())
+		return;
+
+	interface->InvalidateRegion(region);
+
+	interface->UnlockParallelAccess();
+}
+
+
+/*!	The window lock must be held at least for reading. With \a present, what
+	changed on screen is added to it, to be copied there by _Present();
+	otherwise it is copied at once.
+*/
+void
+Compositor::_Composite(const BRegion& damage, BRegion* present)
+{
+	if (damage.CountRects() == 0)
+		return;
+
+	// Flush() can get here at the same time.
+	BAutolock _(fLock);
+
+	if (fDesktop->IsDirectScreenLocked())
+		return;
 
 	::HWInterface* interface = fDesktop->HWInterface();
 	if (!interface->LockParallelAccess())
@@ -115,49 +357,182 @@ Compositor::Composite(const BRegion& damage)
 		}
 
 		layer->window = window;
+		layer->alpha = window->CompositeAlpha();
 		layerCount++;
 
 		// Only what hides everything behind it ends the search here.
-		remaining.Exclude(&shape.OpaqueRegion());
+		if (layer->alpha == 255) {
+			if (window->IsTransparent()) {
+				BRegion opaque(shape.OpaqueRegion());
+				opaque.Exclude(&window->TransparentRegion());
+				remaining.Exclude(&opaque);
+			} else
+				remaining.Exclude(&shape.OpaqueRegion());
+		}
+	}
+
+	// What each window is drawn with
+	for (size_t i = 0; i < layerCount; i++) {
+		Layer* layer = fLayers[i];
+		layer->opaque = layer->region;
+		layer->clear.MakeEmpty();
+		layer->edge.MakeEmpty();
+
+		Window* window = layer->window;
+		const WindowShape& shape = window->Shape();
+		if (window->IsTransparent()) {
+			layer->clear = layer->region;
+			layer->clear.IntersectWith(&window->TransparentRegion());
+			layer->opaque.Exclude(&layer->clear);
+		}
+		if (shape.EdgeRegion().CountRects() > 0) {
+			layer->opaque.Exclude(&shape.EdgeRegion());
+			layer->edge = layer->region;
+			layer->edge.IntersectWith(&shape.EdgeRegion());
+
+			// The helpers can't build these at the same time.
+			const std::vector<WindowShape::Corner>& corners = shape.Corners();
+			for (size_t c = 0; c < corners.size(); c++)
+				WindowShape::CoverageFor(corners[c].radius);
+		}
 	}
 
 	// Then draw them from the back to the front.
-	_Fill(target, remaining, fDesktop->CurrentBackgroundColor());
+	fBandTarget = target;
+	fBandBackground = &remaining;
+	fBandColor = fDesktop->CurrentBackgroundColor();
+	fBandLayerCount = layerCount;
+	_DrawBands(screenDamage);
 
-	for (size_t i = layerCount; i-- > 0;) {
-		Layer* layer = fLayers[i];
-		const WindowShape& shape = layer->window->Shape();
-
-		if (layer->shadow.CountRects() > 0)
-			_DrawShadow(target, layer->window, layer->shadow);
-
-		BRegion opaque(layer->region);
-		if (shape.EdgeRegion().CountRects() > 0) {
-			opaque.Exclude(&shape.EdgeRegion());
-
-			BRegion edge(layer->region);
-			edge.IntersectWith(&shape.EdgeRegion());
-			_BlendEdges(target, layer->window, edge);
-		}
-		_Copy(target, layer->window, opaque);
-	}
-
-	// A direct window draws straight to the screen, and its buffer is stale:
-	// copying it there would cover what the application has just drawn. A
-	// shadow or a see-through window over it is left out there instead.
-	for (Window* window = windows.FirstWindow(); window != NULL;
-			window = window->NextWindow(workspace)) {
-		if (!window->IsHidden()
-			&& window->ServerWindow()->IsDirectlyAccessing()) {
-			BRegion content;
-			window->GetOnScreenContentRegion(&content);
-			screenDamage.Exclude(&content);
-		}
-	}
-
-	interface->InvalidateRegion(screenDamage);
+	if (present != NULL)
+		present->Include(&screenDamage);
+	else
+		interface->InvalidateRegion(screenDamage);
 
 	interface->UnlockParallelAccess();
+}
+
+
+/*static*/ status_t
+Compositor::_HelperEntry(void* data)
+{
+	((Compositor*)data)->_Help();
+	return B_OK;
+}
+
+
+void
+Compositor::_Help()
+{
+	std::vector<uint8> shadowColumns;
+
+	while (true) {
+		status_t status = acquire_sem(fHelpSem);
+		if (status == B_INTERRUPTED)
+			continue;
+		if (status != B_OK)
+			break;
+
+		_DrawNextBands(shadowColumns);
+		release_sem(fHelpDoneSem);
+	}
+}
+
+
+/*!	Draws the layers found by _Composite() where they are damaged: in bands,
+	together with the helpers, where it is worth it.
+*/
+void
+Compositor::_DrawBands(const BRegion& damage)
+{
+	BRect bounds = damage.Frame();
+	int32 height = bounds.IntegerHeight() + 1;
+
+	int64 pixels = 0;
+	int32 count = damage.CountRects();
+	for (int32 i = 0; i < count; i++) {
+		clipping_rect rect = damage.RectAtInt(i);
+		pixels += (int64)(rect.right - rect.left + 1)
+			* (rect.bottom - rect.top + 1);
+	}
+
+	int32 bandCount = min_c((int32)(fHelpers.size() + 1) * kBandsPerThread,
+		height / kMinBandHeight);
+	if (bandCount < 2 || pixels < kMinBandedPixels) {
+		_DrawBand(bounds, fShadowColumns);
+		return;
+	}
+
+	fBandBounds = bounds;
+	fBandCount = bandCount;
+	fNextBand = 0;
+
+	int32 helperCount = (int32)fHelpers.size();
+	release_sem_etc(fHelpSem, helperCount, 0);
+	_DrawNextBands(fShadowColumns);
+	acquire_sem_etc(fHelpDoneSem, helperCount, 0, 0);
+}
+
+
+void
+Compositor::_DrawNextBands(std::vector<uint8>& shadowColumns)
+{
+	const int32 top = (int32)fBandBounds.top;
+	const int32 height = fBandBounds.IntegerHeight() + 1;
+
+	while (true) {
+		int32 band = atomic_add(&fNextBand, 1);
+		if (band >= fBandCount)
+			return;
+
+		BRect rect(fBandBounds.left, top + height * band / fBandCount,
+			fBandBounds.right, top + height * (band + 1) / fBandCount - 1);
+		_DrawBand(rect, shadowColumns);
+	}
+}
+
+
+/*!	Draws the layers from the back to the front, within \a band. Each thread
+	only writes to the pixels of its own band.
+*/
+void
+Compositor::_DrawBand(const BRect& band, std::vector<uint8>& shadowColumns)
+{
+	RenderingBuffer* target = fBandTarget;
+	const BRegion clip(band);
+
+	BRegion part(clip);
+	part.IntersectWith(fBandBackground);
+	_Fill(target, part, fBandColor);
+
+	for (size_t i = fBandLayerCount; i-- > 0;) {
+		const Layer* layer = fLayers[i];
+		Window* window = layer->window;
+
+		part = clip;
+		part.IntersectWith(&layer->shadow);
+		if (part.CountRects() > 0)
+			_DrawShadow(target, window, part, shadowColumns);
+
+		part = clip;
+		part.IntersectWith(&layer->clear);
+		if (part.CountRects() > 0)
+			_BlendPixels(target, window, part, layer->alpha);
+
+		part = clip;
+		part.IntersectWith(&layer->edge);
+		if (part.CountRects() > 0)
+			_BlendEdges(target, window, part, layer->alpha);
+
+		part = clip;
+		part.IntersectWith(&layer->opaque);
+		if (part.CountRects() == 0)
+			continue;
+		if (layer->alpha == 255)
+			_Copy(target, window, part);
+		else
+			_Blend(target, window, part, layer->alpha);
+	}
 }
 
 
@@ -294,11 +669,97 @@ Compositor::_Copy(RenderingBuffer* target, Window* window,
 }
 
 
-/*!	Mixes a window's corner pixels with what has been drawn behind them.
+/*!	Mixes a window that can be seen through with what has been drawn behind
+	it.
+*/
+void
+Compositor::_Blend(RenderingBuffer* target, Window* window,
+	const BRegion& region, uint8 alpha)
+{
+	const WindowBuffer& buffer = window->BufferInterface()->Buffer();
+	if (buffer.InitCheck() != B_OK)
+		return;
+
+	BRect bufferFrame = buffer.Frame();
+	uint8* bits = (uint8*)target->Bits();
+	uint32 bytesPerRow = target->BytesPerRow();
+	const uint32 inverse = 255 - alpha;
+
+	int32 count = region.CountRects();
+	for (int32 i = 0; i < count; i++) {
+		clipping_rect rect = region.RectAtInt(i);
+		rect.left = max_c(rect.left, (int32)bufferFrame.left);
+		rect.top = max_c(rect.top, (int32)bufferFrame.top);
+		rect.right = min_c(rect.right, (int32)bufferFrame.right);
+		rect.bottom = min_c(rect.bottom, (int32)bufferFrame.bottom);
+
+		for (int32 y = rect.top; y <= rect.bottom; y++) {
+			const uint8* src = buffer.PixelAt(rect.left, y);
+			uint8* dst = bits + y * bytesPerRow + rect.left * 4;
+			for (int32 x = rect.left; x <= rect.right; x++) {
+				dst[0] = (src[0] * alpha + dst[0] * inverse + 127) / 255;
+				dst[1] = (src[1] * alpha + dst[1] * inverse + 127) / 255;
+				dst[2] = (src[2] * alpha + dst[2] * inverse + 127) / 255;
+				src += 4;
+				dst += 4;
+			}
+		}
+	}
+}
+
+
+/*!	Mixes a transparent window's contents with what has been drawn behind it,
+	by the alpha of each pixel, and the window's own \a alpha on top.
+*/
+void
+Compositor::_BlendPixels(RenderingBuffer* target, Window* window,
+	const BRegion& region, uint8 alpha)
+{
+	const WindowBuffer& buffer = window->BufferInterface()->Buffer();
+	if (buffer.InitCheck() != B_OK)
+		return;
+
+	BRect bufferFrame = buffer.Frame();
+	uint8* bits = (uint8*)target->Bits();
+	uint32 bytesPerRow = target->BytesPerRow();
+
+	int32 count = region.CountRects();
+	for (int32 i = 0; i < count; i++) {
+		clipping_rect rect = region.RectAtInt(i);
+		rect.left = max_c(rect.left, (int32)bufferFrame.left);
+		rect.top = max_c(rect.top, (int32)bufferFrame.top);
+		rect.right = min_c(rect.right, (int32)bufferFrame.right);
+		rect.bottom = min_c(rect.bottom, (int32)bufferFrame.bottom);
+
+		for (int32 y = rect.top; y <= rect.bottom; y++) {
+			const uint8* src = buffer.PixelAt(rect.left, y);
+			uint8* dst = bits + y * bytesPerRow + rect.left * 4;
+			for (int32 x = rect.left; x <= rect.right; x++) {
+				uint32 cover = alpha == 255 ? src[3] : src[3] * alpha / 255;
+				if (cover == 255) {
+					dst[0] = src[0];
+					dst[1] = src[1];
+					dst[2] = src[2];
+				} else if (cover != 0) {
+					uint32 inverse = 255 - cover;
+					dst[0] = (src[0] * cover + dst[0] * inverse + 127) / 255;
+					dst[1] = (src[1] * cover + dst[1] * inverse + 127) / 255;
+					dst[2] = (src[2] * cover + dst[2] * inverse + 127) / 255;
+				}
+				src += 4;
+				dst += 4;
+			}
+		}
+	}
+}
+
+
+/*!	Mixes a window's corner pixels with what has been drawn behind them. The
+	window's own \a alpha is applied on top of the coverage of the corners.
 */
 void
 Compositor::_BlendEdges(RenderingBuffer* target, Window* window,
-	const BRegion& region)
+	const BRegion& region, uint8 alpha)
 {
 	const WindowBuffer& buffer = window->BufferInterface()->Buffer();
 	if (buffer.InitCheck() != B_OK)
@@ -337,11 +798,12 @@ Compositor::_BlendEdges(RenderingBuffer* target, Window* window,
 						column = corner.radius - 1 - column;
 					}
 
-					uint32 alpha = coverage[row * corner.radius + column];
-					uint32 inverse = 255 - alpha;
-					dst[0] = (src[0] * alpha + dst[0] * inverse + 127) / 255;
-					dst[1] = (src[1] * alpha + dst[1] * inverse + 127) / 255;
-					dst[2] = (src[2] * alpha + dst[2] * inverse + 127) / 255;
+					uint32 cover = coverage[row * corner.radius + column]
+						* alpha / 255;
+					uint32 inverse = 255 - cover;
+					dst[0] = (src[0] * cover + dst[0] * inverse + 127) / 255;
+					dst[1] = (src[1] * cover + dst[1] * inverse + 127) / 255;
+					dst[2] = (src[2] * cover + dst[2] * inverse + 127) / 255;
 					src += 4;
 					dst += 4;
 				}
@@ -356,13 +818,16 @@ Compositor::_BlendEdges(RenderingBuffer* target, Window* window,
 */
 void
 Compositor::_DrawShadow(RenderingBuffer* target, Window* window,
-	const BRegion& region)
+	const BRegion& region, std::vector<uint8>& columns)
 {
 	const WindowShape& shape = window->Shape();
 	const std::vector<BRect>& rects = shape.ShadowRects();
 	const uint8* profile = WindowShape::ShadowProfile();
 	const int32 margin = WindowShape::ShadowMargin();
-	const uint32 strength = WindowShape::ShadowAlpha();
+	const bool isGlow = shape.IsGlow();
+	const rgb_color glow = shape.GlowColor();
+	const uint32 strength = isGlow
+		? WindowShape::GlowAlpha() : WindowShape::ShadowAlpha();
 
 	uint8* bits = (uint8*)target->Bits();
 	uint32 bytesPerRow = target->BytesPerRow();
@@ -377,11 +842,11 @@ Compositor::_DrawShadow(RenderingBuffer* target, Window* window,
 		int32 width = rect.right - rect.left + 1;
 
 		// Columns only need to be worked out once for the whole rectangle
-		fShadowColumns.resize((size_t)width * rects.size());
+		columns.resize((size_t)width * rects.size());
 		for (size_t k = 0; k < rects.size(); k++) {
 			int32 left = (int32)rects[k].left;
 			int32 right = (int32)rects[k].right;
-			uint8* column = &fShadowColumns[k * width];
+			uint8* column = &columns[k * width];
 			for (int32 x = 0; x < width; x++) {
 				int32 position = rect.left + x;
 				column[x] = EDGE(position - left) * EDGE(right - position) / 255;
@@ -396,15 +861,24 @@ Compositor::_DrawShadow(RenderingBuffer* target, Window* window,
 					int32 top = (int32)rects[k].top;
 					int32 bottom = (int32)rects[k].bottom;
 					uint32 rowValue = EDGE(y - top) * EDGE(bottom - y) / 255;
-					uint32 value = fShadowColumns[k * width + x] * rowValue;
+					uint32 value = columns[k * width + x] * rowValue;
 					if (value > alpha)
 						alpha = value;
 				}
 
 				uint32 keep = 255 - (alpha / 255) * strength / 255;
-				dst[0] = dst[0] * keep / 255;
-				dst[1] = dst[1] * keep / 255;
-				dst[2] = dst[2] * keep / 255;
+				if (isGlow) {
+					// Rounded, or the faint end of it comes out darker than
+					// what is behind it.
+					const uint32 give = 255 - keep;
+					dst[0] = (dst[0] * keep + glow.blue * give + 127) / 255;
+					dst[1] = (dst[1] * keep + glow.green * give + 127) / 255;
+					dst[2] = (dst[2] * keep + glow.red * give + 127) / 255;
+				} else {
+					dst[0] = dst[0] * keep / 255;
+					dst[1] = dst[1] * keep / 255;
+					dst[2] = dst[2] * keep / 255;
+				}
 				dst += 4;
 			}
 		}

@@ -137,6 +137,8 @@ public:
 
 			status_t			LockDirectScreen(team_id team);
 			status_t			UnlockDirectScreen(team_id team);
+			bool				IsDirectScreenLocked() const
+									{ return fDirectScreenTeam != -1; }
 
 			const ::VirtualScreen& VirtualScreen() const
 									{ return fVirtualScreen; }
@@ -252,6 +254,7 @@ public:
 									{ return MarkDirty(region, region); }
 			void				Redraw();
 			void				RedrawBackground();
+			void				WindowShapesChanged();
 
 			bool				ReloadDecor(DecorAddOn* oldDecor);
 
@@ -323,6 +326,7 @@ private:
 			void				_TriggerWindowRedrawing(
 									BRegion& dirtyRegion, BRegion& exposeRegion);
 			void				_SetBackground(BRegion& background);
+			bool				_IsSafeMode() const;
 
 			status_t			_ActivateApp(team_id team);
 

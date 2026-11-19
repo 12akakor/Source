@@ -28,6 +28,7 @@
 #include <WindowPrivate.h>
 
 #include "ClickTarget.h"
+#include "Compositor.h"
 #include "Decorator.h"
 #include "DecorManager.h"
 #include "DefaultDecorator.h"
@@ -36,6 +37,7 @@
 #include "HWInterface.h"
 #include "MessagePrivate.h"
 #include "PortLink.h"
+#include "RoundedDecorator.h"
 #include "ServerApp.h"
 #include "ServerWindow.h"
 #include "WindowBehaviour.h"
@@ -124,7 +126,10 @@ Window::Window(const BRect& frame, const char *name,
 	fWorkspacesViewCount(0),
 
 	fBufferReady(false),
-	fBufferLost(false)
+	fBufferLost(false),
+	fHasRoundedCorners(false),
+	fCompositeAlpha(255),
+	fDecoratorGeneration(0)
 {
 	_InitWindowStack();
 
@@ -211,32 +216,72 @@ Window::SetClipping(BRegion* stillAvailableOnScreen)
 		bool wasReady = fBufferReady;
 
 		fCompositeRegion = fVisibleRegion;
-		fOnScreenRegion = fVisibleRegion;
-		fOnScreenRegion.IntersectWith(stillAvailableOnScreen);
+
+		// A window with direct access draws to its buffer itself, in screen
+		// coordinates, so its buffer is laid out like the screen.
+		int32 screenWidth = 0;
+		int32 screenHeight = 0;
+		if (ServerWindow()->HasDirectFrameBufferAccess()) {
+			RenderingBuffer* screen = fDesktop->HWInterface()->FrontBuffer();
+			screenWidth = screen->Width();
+			screenHeight = screen->Height();
+		}
+		const WindowBuffer& buffer = fBufferInterface->Buffer();
+		bool relaidOut = buffer.ScreenWidth() != screenWidth
+			|| buffer.ScreenHeight() != screenHeight;
+		if (relaidOut) {
+			// As in ReleaseBuffer(), the Painter has to let go of the memory.
+			fDrawingEngine->SetHWInterface(NULL);
+			fBufferInterface->SetScreenLayout(screenWidth, screenHeight);
+			fDrawingEngine->SetHWInterface(fBufferInterface.Get());
+			fBufferReady = false;
+		}
 
 		BRect frame = fCompositeRegion.Frame();
 		bool hasBuffer = fBufferInterface->SetFrame(frame) == B_OK;
 
 		std::vector< ::Decorator::ShapeRect> shape;
+		bool hasRoundedCorners = false;
 		if (::Decorator* decorator = Decorator()) {
-			DefaultDecorator* rounded = dynamic_cast<DefaultDecorator*>(decorator);
-			if (rounded != NULL && rounded->HasRoundedCorners())
+			DefaultDecorator* standard = dynamic_cast<DefaultDecorator*>(decorator);
+			RoundedDecorator* rounded = dynamic_cast<RoundedDecorator*>(decorator);
+			if (standard != NULL && standard->HasRoundedCorners()) {
+				hasRoundedCorners = true;
+				standard->GetRoundedShape(shape);
+			} else if (rounded != NULL && RoundedDecorator::IsActive(fDesktop)) {
+				hasRoundedCorners = true;
 				rounded->GetRoundedShape(shape);
-			else
+			} else
 				decorator->GetShape(shape);
 		}
 		if (shape.empty()) {
 			::Decorator::ShapeRect rect = { fFrame, 0, 0, 0, 0 };
 			shape.push_back(rect);
 		}
-		fShape.SetTo(shape, fCompositeRegion, fLook != kDesktopWindowLook
-			&& fFeel != kDesktopWindowFeel && fLook != B_NO_BORDER_WINDOW_LOOK
-			&& (fFlags & kWindowScreenFlag) == 0);
+		DesktopSettings settings(fDesktop);
+		fShape.SetTo(shape, fCompositeRegion,
+			settings.CompositedShadows()
+				&& fLook != kDesktopWindowLook && fFeel != kDesktopWindowFeel
+				&& fLook != B_NO_BORDER_WINDOW_LOOK
+				&& (fFlags & kWindowScreenFlag) == 0,
+			settings.UIColor(B_PANEL_BACKGROUND_COLOR).IsDark(),
+			settings.UIColor(B_PANEL_TEXT_COLOR));
+
+		fTransparentRegion.MakeEmpty();
+		if (IsTransparent()) {
+			GetContentRegion(&fTransparentRegion);
+			fTransparentRegion.IntersectWith(&fCompositeRegion);
+		}
 
 		// The buffer can't be drawn to above or left of the screen, but other
-		// windows don't matter anymore: the window draws everything else.
-		BRegion drawable(BRect(0, 0, 65535, 65535));
+		// windows don't matter anymore: the window draws everything else. In
+		// the screen layout, it ends where the screen does.
+		BRegion drawable(BRect(0, 0,
+			screenWidth > 0 ? screenWidth - 1 : 65535,
+			screenHeight > 0 ? screenHeight - 1 : 65535));
 		fVisibleRegion.IntersectWith(&drawable);
+		if (relaidOut)
+			ProcessDirtyRegion(fVisibleRegion);
 
 		if (!hasBuffer) {
 			// There is no memory for the window's buffer: nothing can draw
@@ -267,6 +312,16 @@ Window::SetClipping(BRegion* stillAvailableOnScreen)
 			fBufferLost = false;
 			ProcessDirtyRegion(fVisibleRegion);
 		}
+
+		// The decorator draws its border differently around a rounded corner.
+		if (hasRoundedCorners != fHasRoundedCorners) {
+			fHasRoundedCorners = hasRoundedCorners;
+			if (fBufferReady) {
+				BRegion border;
+				GetBorderRegion(&border);
+				ProcessDirtyRegion(border);
+			}
+		}
 		return;
 	}
 
@@ -278,23 +333,25 @@ Window::SetClipping(BRegion* stillAvailableOnScreen)
 }
 
 
-void
-Window::GetOnScreenContentRegion(BRegion* region)
-{
-	if (!fBufferInterface.IsSet()) {
-		*region = VisibleContentRegion();
-		return;
-	}
-
-	GetContentRegion(region);
-	region->IntersectWith(&fOnScreenRegion);
-}
-
-
 bool
 Window::ShapeContains(const BPoint& where) const
 {
-	return !fBufferInterface.IsSet() || fShape.Contains(where);
+	if (!fBufferInterface.IsSet())
+		return true;
+	if (!fShape.Contains(where))
+		return false;
+
+	// What the window hasn't drawn at all can't be clicked.
+	if (fTransparentRegion.Contains(where) && fBufferReady) {
+		const WindowBuffer& buffer = fBufferInterface->Buffer();
+		int32 x = (int32)where.x;
+		int32 y = (int32)where.y;
+		if (buffer.InitCheck() == B_OK && x >= 0 && y >= 0
+			&& buffer.Frame().Contains(BPoint(x, y))) {
+			return buffer.PixelAt(x, y)[3] != 0;
+		}
+	}
+	return true;
 }
 
 
@@ -320,9 +377,24 @@ Window::ReleaseBuffer()
 
 
 void
+Window::SetCompositeAlpha(uint8 alpha)
+{
+	if (alpha == fCompositeAlpha)
+		return;
+
+	fCompositeAlpha = alpha;
+
+	Compositor* compositor = fDesktop->GetCompositor();
+	if (compositor != NULL)
+		compositor->Composite(BRegion(fShape.Bounds()));
+}
+
+
+void
 Window::SetBufferInterface(WindowBufferHWInterface* interface)
 {
 	fBufferInterface.SetTo(interface);
+	interface->SetWindow(this);
 }
 
 
@@ -751,6 +823,7 @@ Window::ReloadDecor()
 	if (stack->WindowAt(0) != this)
 		return true;
 
+	fDecoratorGeneration = gDecorManager.Generation();
 	if (fLook != B_NO_BORDER_WINDOW_LOOK) {
 		// we need a new decorator
 		decorator = gDecorManager.AllocateDecorator(this);
@@ -1450,6 +1523,7 @@ Window::SetLook(window_look look, BRegion* updateRegion)
 	::Decorator* decorator = Decorator();
 	if (decorator == NULL && look != B_NO_BORDER_WINDOW_LOOK) {
 		// we need a new decorator
+		fDecoratorGeneration = gDecorManager.Generation();
 		decorator = gDecorManager.AllocateDecorator(this);
 		fCurrentStack->SetDecorator(decorator);
 		if (IsFocus())
@@ -1500,6 +1574,14 @@ Window::SetFeel(window_feel feel)
 void
 Window::SetFlags(uint32 flags, BRegion* updateRegion)
 {
+	// Turning transparency on or off changes how the whole window is drawn.
+	if (((fFlags ^ flags) & B_TRANSPARENT_WINDOW) != 0
+		&& fBufferInterface.IsSet() && updateRegion != NULL) {
+		BRegion full;
+		GetFullRegion(&full);
+		updateRegion->Include(&full);
+	}
+
 	fOriginalFlags = flags;
 	fFlags = flags & ValidWindowFlags(fFeel);
 	if (!IsNormal())
@@ -1869,6 +1951,7 @@ Window::ValidWindowFlags()
 		| B_SAME_POSITION_IN_ALL_WORKSPACES
 		| B_AUTO_UPDATE_SIZE_LIMITS
 		| B_CLOSE_ON_ESCAPE
+		| B_TRANSPARENT_WINDOW
 		| B_NO_SERVER_SIDE_WINDOW_MODIFIERS
 		| kWindowScreenFlag
 		| kAcceptKeyboardFocusFlag;
@@ -2435,6 +2518,7 @@ Window::_InitWindowStack()
 {
 	fCurrentStack = NULL;
 	::Decorator* decorator = NULL;
+	fDecoratorGeneration = gDecorManager.Generation();
 	if (fLook != B_NO_BORDER_WINDOW_LOOK)
 		decorator = gDecorManager.AllocateDecorator(this);
 

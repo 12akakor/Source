@@ -18,6 +18,8 @@ local decorator_src =
 	DecorManager.cpp
 	Decorator.cpp
 	DefaultDecorator.cpp
+	RoundedDecorator.cpp
+	StyleCanvas.cpp
 	DefaultWindowBehaviour.cpp
 	MagneticBorder.cpp
 	TabDecorator.cpp

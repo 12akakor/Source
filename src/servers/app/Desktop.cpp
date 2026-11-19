@@ -42,6 +42,8 @@
 #include <ServerReadOnlyMemory.h>
 #include <ViewPrivate.h>
 #include <WindowInfo.h>
+#include <driver_settings.h>
+#include <syscalls.h>
 
 #include "AppServer.h"
 #include "ClickTarget.h"
@@ -471,6 +473,9 @@ Desktop::Desktop(uid_t userID, const char* targetScreen)
 
 Desktop::~Desktop()
 {
+	// its thread uses the desktop
+	fCompositor.Unset();
+
 	delete_area(fSharedReadOnlyArea);
 	delete_port(fMessagePort);
 
@@ -528,18 +533,14 @@ Desktop::Init()
 
 	HWInterface()->SetDPMSMode(B_DPMS_ON);
 
-	bool composited = false;
-	BPath onFile;
-	if (find_directory(B_USER_SETTINGS_DIRECTORY, &onFile) == B_OK
-		&& onFile.Append("system/app_server/" COMPOSITED_DESKTOP_ON_FILE)
-			== B_OK
-		&& BEntry(onFile.Path()).Exists()) {
-		composited = true;
-	}
-	// The compositor builds the screen in the back buffer. Not every kind of
-	// screen has one.
-	if (composited && HWInterface()->IsDoubleBuffered())
+	// The compositor builds the screen in the back buffer, which not every kind
+	// of screen has. Safe mode is the way back if it doesn't work on a machine.
+	if (fSettings->CompositedDesktop() && HWInterface()->IsDoubleBuffered()
+		&& !_IsSafeMode()) {
 		fCompositor.SetTo(new(std::nothrow) Compositor(this));
+		if (fCompositor.IsSet() && fCompositor->InitCheck() != B_OK)
+			fCompositor.Unset();
+	}
 	debug_printf("app_server: desktop is %scomposited\n",
 		fCompositor.IsSet() ? "" : "not ");
 
@@ -1025,8 +1026,11 @@ Desktop::LockDirectScreen(team_id team)
 	// which would make this method superfluous.
 
 	status_t status = fDirectScreenLock.LockWithTimeout(1000000L);
-	if (status == B_OK)
+	if (status == B_OK) {
 		fDirectScreenTeam = team;
+		if (fCompositor.IsSet())
+			fCompositor->ScreenTaken();
+	}
 
 	return status;
 }
@@ -1038,6 +1042,8 @@ Desktop::UnlockDirectScreen(team_id team)
 	if (fDirectScreenTeam == team) {
 		fDirectScreenLock.Unlock();
 		fDirectScreenTeam = -1;
+		if (fCompositor.IsSet())
+			fCompositor->ScreenReleased();
 		return B_OK;
 	}
 
@@ -1783,6 +1789,11 @@ Desktop::AddWindow(Window *window)
 {
 	LockAllWindows();
 
+	// The decorator changed while it was being made: after it was given
+	// one, but before it was among the windows ReloadDecor() goes through.
+	if (window->DecoratorGeneration() != gDecorManager.Generation())
+		window->ReloadDecor();
+
 	fAllWindows.AddWindow(window);
 	if (!window->IsNormal())
 		fSubsetWindows.AddWindow(window);
@@ -1867,7 +1878,10 @@ Desktop::ColorUpdated(Window* window, color_which which, rgb_color color)
 {
 	AutoWriteLocker _(fWindowLock);
 
-	window->TopView()->ColorUpdated(which, color);
+	// A window just created has no views until its client sends them; they
+	// take the colors as they are by then.
+	if (window->TopView() != NULL)
+		window->TopView()->ColorUpdated(which, color);
 
 	switch (which) {
 		case B_WINDOW_TAB_COLOR:
@@ -2292,6 +2306,28 @@ Desktop::Redraw()
 {
 	BRegion dirty(fVirtualScreen.Frame());
 	MarkDirty(dirty);
+}
+
+
+/*!	The windows' shadows or rounded corners have been switched on or off. The
+	windows on other workspaces follow when their clipping is rebuilt.
+*/
+void
+Desktop::WindowShapesChanged()
+{
+	AutoWriteLocker _(fWindowLock);
+
+	if (!fCompositor.IsSet())
+		return;
+
+	BRegion background;
+	_RebuildClippingForAllWindows(background);
+	_SetBackground(background);
+
+	// Rounding a corner doesn't change the bounds of a window, so the compositor
+	// can't see that anything has changed.
+	BRegion dirty(fVirtualScreen.Frame());
+	fCompositor->Composite(dirty);
 }
 
 
@@ -3056,6 +3092,9 @@ Desktop::_FlushPendingColors()
 	}
 
 	fPendingColors.MakeEmpty();
+
+	// A window's shadow goes with how dark the colors are.
+	WindowShapesChanged();
 }
 
 
@@ -3665,6 +3704,20 @@ Desktop::RebuildAndRedrawAfterWindowChange(Window* changedWindow,
 	_WindowChanged(changedWindow);
 
 	_TriggerWindowRedrawing(dirty, dirty);
+}
+
+
+bool
+Desktop::_IsSafeMode() const
+{
+	char buffer[32];
+	size_t size = sizeof(buffer);
+	if (_kern_get_safemode_option(B_SAFEMODE_SAFE_MODE, buffer, &size) != B_OK)
+		return false;
+
+	return !strncasecmp(buffer, "true", size) || !strncasecmp(buffer, "yes", size)
+		|| !strncasecmp(buffer, "on", size)
+		|| !strncasecmp(buffer, "enabled", size);
 }
 
 

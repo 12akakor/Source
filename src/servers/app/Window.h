@@ -109,6 +109,9 @@ public:
 									{ return fWindow->EventTarget(); }
 
 			bool				ReloadDecor();
+			// gDecorManager's generation when its decorator was made
+			uint32				DecoratorGeneration() const
+									{ return fDecoratorGeneration; }
 
 			void				SetScreen(const ::Screen* screen);
 			const ::Screen*		Screen() const;
@@ -122,9 +125,6 @@ public:
 	inline	BRegion&			VisibleRegion() { return fVisibleRegion; }
 			BRegion&			VisibleContentRegion();
 
-			// The part of the content that can really be seen on screen.
-			void				GetOnScreenContentRegion(BRegion* region);
-
 			// When compositing, the window's own buffer. It takes ownership.
 			void				SetBufferInterface(
 									WindowBufferHWInterface* interface);
@@ -136,11 +136,27 @@ public:
 			const BRegion&		CompositeRegion() const
 									{ return fCompositeRegion; }
 			const WindowShape&	Shape() const { return fShape; }
-			// When compositing, clicks go through what is cut off at a corner.
+			// When compositing, clicks go through what is cut off at a corner,
+			// and through the clear pixels of a transparent window.
 			bool				ShapeContains(const BPoint& where) const;
+			// Whether the window's contents are mixed with what is behind it
+			// by their own alpha: only on a composited desktop, and when the
+			// window asked for it with B_TRANSPARENT_WINDOW.
+			bool				IsTransparent() const
+									{ return fBufferInterface.IsSet()
+										&& (fFlags & B_TRANSPARENT_WINDOW)
+											!= 0; }
+			// The part of the window that is transparent, its content area.
+			const BRegion&		TransparentRegion() const
+									{ return fTransparentRegion; }
 			// When the window can't be seen for a while, its buffer can go. It
 			// comes back on its own when the window is shown and drawn again.
 			void				ReleaseBuffer();
+			// When compositing, how much of what is behind the window shows
+			// through it: 255 is opaque. Used while the window is dragged.
+			void				SetCompositeAlpha(uint8 alpha);
+			uint8				CompositeAlpha() const
+									{ return fCompositeAlpha; }
 
 			// TODO: not protected by a lock, but no one should need this anyways
 			// make private? when used inside Window, it has the ReadLock()
@@ -481,10 +497,15 @@ private:
 								fBufferInterface;
 			BRegion				fCompositeRegion;
 			WindowShape			fShape;
-			BRegion				fOnScreenRegion;
 			BPoint				fBufferOffset;
 			bool				fBufferReady;
 			bool				fBufferLost;
+			bool				fHasRoundedCorners;
+			uint8				fCompositeAlpha;
+			BRegion				fTransparentRegion;
+
+			// After those, for the same reason.
+			uint32				fDecoratorGeneration;
 };
 
 
