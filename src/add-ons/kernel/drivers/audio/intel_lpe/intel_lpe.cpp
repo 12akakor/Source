@@ -61,6 +61,14 @@
 #define RT5640_STATUS_JD			(1 << 4)
 // MX-FA: IN1 single ended (needed to use the IN1N pin as JD1)
 #define RT5640_IN1_SINGLE_ENDED		(1 << 9)
+// MX-63: VREF1 (slow mode), main bias and bandgap bias; the jack detect
+// comparator needs them, the Android driver keeps them on
+#define RT5640_PWR_VREF1			(1 << 15)
+#define RT5640_PWR_VREF1_SLOW		(1 << 14)
+#define RT5640_PWR_MAIN_BIAS		(1 << 13)
+#define RT5640_PWR_BG_BIAS			(1 << 11)
+#define RT5640_PWR_JD_BIAS			(RT5640_PWR_VREF1 | RT5640_PWR_VREF1_SLOW \
+	| RT5640_PWR_MAIN_BIAS | RT5640_PWR_BG_BIAS)
 
 #define JACK_POLL_INTERVAL			250000
 
@@ -177,6 +185,8 @@ rt5640_probe(intel_lpe_driver* driver)
 		RT5640_IN1_SINGLE_ENDED);
 	rt5640_update(driver, RT5640_JD_CTRL, RT5640_JD_SOURCE_MASK,
 		RT5640_JD_SOURCE_JD1);
+	rt5640_update(driver, RT5640_PWR_ANLG1, RT5640_PWR_JD_BIAS,
+		RT5640_PWR_JD_BIAS);
 
 	static const uint8 kRegisters[] = {
 		RT5640_IN1_IN2, RT5640_PWR_DIG1, RT5640_PWR_ANLG1, RT5640_PWR_ANLG2,
