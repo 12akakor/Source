@@ -788,6 +788,14 @@ intel_set_brightness(float brightness)
 	if (brightness < 0 || brightness > 1)
 		return B_BAD_VALUE;
 
+	// TEST: log the backlight registers before and after
+	if (gInfo->shared_info->device_type.InGroup(INTEL_GROUP_VLV)) {
+		ERROR("TEST set_brightness %d%%: before ctl2 %08" B_PRIx32 " ctl %08"
+			B_PRIx32 "\n", (int)(brightness * 100),
+			read32(0x1250 | REGS_NORTH_PIPE_AND_PORT),
+			read32(MCH_BLC_PWM_CTL));
+	}
+
 	// The "duty cycle" is a proportion of the period (0 = backlight off,
 	// period = maximum brightness).
 	// Additionally we don't want it to be completely 0 here, because then
@@ -850,6 +858,13 @@ intel_set_brightness(float brightness)
 		duty <<= shift;
 
 		write32(intel_get_backlight_register(false), (duty & mask) | (tmp & ~mask));
+
+		if (gInfo->shared_info->device_type.InGroup(INTEL_GROUP_VLV)) {
+			ERROR("TEST set_brightness: period %u duty %u, after ctl2 %08"
+				B_PRIx32 " ctl %08" B_PRIx32 "\n", (unsigned)period,
+				(unsigned)duty, read32(0x1250 | REGS_NORTH_PIPE_AND_PORT),
+				read32(MCH_BLC_PWM_CTL));
+		}
 	}
 
 	return B_OK;
