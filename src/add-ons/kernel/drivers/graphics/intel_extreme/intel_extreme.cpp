@@ -930,18 +930,6 @@ intel_extreme_init(intel_info &info)
 	}
 	TRACE("%s: hw_cdclk: %" B_PRIu32 " kHz\n", __func__, info.shared_info->hw_cdclk);
 
-	// TEST: backlight PWM registers of both pipes and the PWM clock select
-	if (info.device_type.InGroup(INTEL_GROUP_VLV)) {
-		dprintf("intel_extreme: TEST backlight: pipe A ctl2 %08" B_PRIx32
-			" ctl %08" B_PRIx32 " | pipe B ctl2 %08" B_PRIx32 " ctl %08"
-			B_PRIx32 " | cbr1 %08" B_PRIx32 "\n",
-			read32(info, 0x1250 | REGS_NORTH_PIPE_AND_PORT),
-			read32(info, 0x1254 | REGS_NORTH_PIPE_AND_PORT),
-			read32(info, 0x1350 | REGS_NORTH_PIPE_AND_PORT),
-			read32(info, 0x1354 | REGS_NORTH_PIPE_AND_PORT),
-			read32(info, 0x70400 | REGS_NORTH_SHARED));
-	}
-
 	TRACE("%s: completed successfully!\n", __func__);
 	return B_OK;
 }
