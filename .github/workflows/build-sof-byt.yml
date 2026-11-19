@@ -1,0 +1,124 @@
+# SPDX-License-Identifier: MIT
+#
+# Builds Sound Open Firmware for Intel Bay Trail (sof-byt.ri) from source.
+# Bay Trail was last supported in the SOF branch stable-v2.4. The Xtensa
+# cross toolchain is built with SOF's crosstool-ng fork and kept in the
+# Actions cache, so only the first run takes long.
+
+name: build-sof-byt
+
+on:
+  push:
+    branches: [ sof-baytrail-firmware ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  SOF_REF: stable-v2.4
+  CTNG_REF: sof-gcc10x
+  OVERLAY_REF: sof-gcc10.2
+  NEWLIB_REF: xtensa
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    steps:
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y autoconf automake bison flex gperf \
+            help2man libtool libtool-bin texinfo libncurses-dev gawk \
+            unzip python3-dev libexpat1-dev wget git cmake ninja-build \
+            libssl-dev
+
+      - name: Resolve source revisions
+        id: rev
+        run: |
+          echo "ctng=$(git ls-remote https://github.com/thesofproject/crosstool-ng refs/heads/$CTNG_REF | cut -c1-12)" >> $GITHUB_OUTPUT
+          echo "overlay=$(git ls-remote https://github.com/thesofproject/xtensa-overlay refs/heads/$OVERLAY_REF | cut -c1-12)" >> $GITHUB_OUTPUT
+          echo "newlib=$(git ls-remote https://github.com/jcmvbkbc/newlib-xtensa refs/heads/$NEWLIB_REF | cut -c1-12)" >> $GITHUB_OUTPUT
+          echo "sof=$(git ls-remote https://github.com/thesofproject/sof refs/heads/$SOF_REF | cut -c1-12)" >> $GITHUB_OUTPUT
+
+      - name: Restore toolchain from cache
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ws/xtensa-byt-elf
+            ws/xtensa-root
+          key: xtensa-byt-${{ steps.rev.outputs.ctng }}-${{ steps.rev.outputs.overlay }}-${{ steps.rev.outputs.newlib }}
+
+      - name: Build the Xtensa toolchain (first run only)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ws && cd ws
+          git clone https://github.com/thesofproject/xtensa-overlay
+          git clone https://github.com/thesofproject/crosstool-ng
+          git -C xtensa-overlay checkout $OVERLAY_REF
+          git -C crosstool-ng checkout $CTNG_REF
+          cd crosstool-ng
+          ./bootstrap
+          ./configure --prefix=$(pwd)
+          make
+          make install
+          unset LD_LIBRARY_PATH
+          cp config-byt-gcc10.2-gdb9 .config
+          ./ct-ng build
+          cd ..
+          cp -a crosstool-ng/builds/xtensa-byt-elf xtensa-byt-elf
+          rm -rf crosstool-ng/.build
+
+      - name: Build newlib headers (first run only)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          cd ws
+          git clone https://github.com/jcmvbkbc/newlib-xtensa
+          cd newlib-xtensa
+          git checkout $NEWLIB_REF
+          export XTENSA_ROOT=$GITHUB_WORKSPACE/ws/xtensa-root
+          export PATH="$PATH:$GITHUB_WORKSPACE/ws/xtensa-byt-elf/bin"
+          ./configure --target=xtensa-byt-elf --prefix="$XTENSA_ROOT"
+          make
+          make install
+
+      - name: Build SOF for Bay Trail
+        run: |
+          cd ws
+          rm -rf sof
+          git clone --recursive --branch $SOF_REF https://github.com/thesofproject/sof
+          cd sof
+          ./scripts/xtensa-build-all.sh byt
+          ls -l build_byt_gcc/*.ri build_byt_gcc/*.ldc 2>/dev/null || true
+
+      - name: Collect the firmware
+        run: |
+          mkdir -p out
+          cp ws/sof/build_byt_gcc/sof-byt.ri out/
+          cp ws/sof/build_byt_gcc/sof-byt.ldc out/ 2>/dev/null || true
+          cp ws/sof/LICENCE out/LICENCE.sof 2>/dev/null || cp ws/sof/LICENSE out/LICENCE.sof
+          cat > out/README <<INFO
+          Sound Open Firmware for Intel Bay Trail, built from source.
+          SOF:           ${{ steps.rev.outputs.sof }} ($SOF_REF)
+          crosstool-ng:  ${{ steps.rev.outputs.ctng }} ($CTNG_REF)
+          xtensa-overlay: ${{ steps.rev.outputs.overlay }} ($OVERLAY_REF)
+          newlib-xtensa: ${{ steps.rev.outputs.newlib }} ($NEWLIB_REF)
+          INFO
+          (cd out && sha256sum * > SHA256SUMS && cat SHA256SUMS)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sof-byt-${{ steps.rev.outputs.sof }}
+          path: out/
+
+      - name: Publish a release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=sof-byt-${{ steps.rev.outputs.sof }}
+          gh release view $tag -R $GITHUB_REPOSITORY >/dev/null 2>&1 && exit 0
+          gh release create $tag out/* -R $GITHUB_REPOSITORY \
+            --target $GITHUB_SHA --title "SOF for Bay Trail ($SOF_REF, ${{ steps.rev.outputs.sof }})" \
+            --notes-file out/README
