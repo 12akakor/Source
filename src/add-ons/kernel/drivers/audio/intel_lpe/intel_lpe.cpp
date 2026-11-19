@@ -54,21 +54,8 @@
 
 #define RT5640_VENDOR_REALTEK		0x10ec
 
-// MX-BB: jack detect source
-#define RT5640_JD_SOURCE_MASK		(7 << 13)
-#define RT5640_JD_SOURCE_JD1		(2 << 13)
 // MX-BF: status of the selected jack detect source
 #define RT5640_STATUS_JD			(1 << 4)
-// MX-FA: IN1 single ended (needed to use the IN1N pin as JD1)
-#define RT5640_IN1_SINGLE_ENDED		(1 << 9)
-// MX-63: VREF1 (slow mode), main bias and bandgap bias; the jack detect
-// comparator needs them, the Android driver keeps them on
-#define RT5640_PWR_VREF1			(1 << 15)
-#define RT5640_PWR_VREF1_SLOW		(1 << 14)
-#define RT5640_PWR_MAIN_BIAS		(1 << 13)
-#define RT5640_PWR_BG_BIAS			(1 << 11)
-#define RT5640_PWR_JD_BIAS			(RT5640_PWR_VREF1 | RT5640_PWR_VREF1_SLOW \
-	| RT5640_PWR_MAIN_BIAS | RT5640_PWR_BG_BIAS)
 
 #define JACK_POLL_INTERVAL			250000
 
@@ -179,14 +166,26 @@ rt5640_probe(intel_lpe_driver* driver)
 		return status;
 	snooze(10000);
 
-	// Jack detection as the firmware of the tablet sets it up (and as found
-	// in the codec under Android): JD1 (the IN1N pin) is the source.
-	rt5640_update(driver, RT5640_GEN_CTRL1, RT5640_IN1_SINGLE_ENDED,
-		RT5640_IN1_SINGLE_ENDED);
-	rt5640_update(driver, RT5640_JD_CTRL, RT5640_JD_SOURCE_MASK,
-		RT5640_JD_SOURCE_JD1);
-	rt5640_update(driver, RT5640_PWR_ANLG1, RT5640_PWR_JD_BIAS,
-		RT5640_PWR_JD_BIAS);
+	// Jack detection exactly as the Android driver of the tablet left the
+	// codec (register dump taken while playing to the speakers): JD1 (the
+	// IN1N pin, IN1 single ended) is the source, its status drives the IRQ
+	// output on GPIO1, and the analog references and biases that the jack
+	// detect comparator needs are on.
+	static const struct {
+		uint8	reg;
+		uint16	value;
+	} kJackDetectSetup[] = {
+		{ RT5640_PWR_ANLG1,		0xe818 },
+		{ RT5640_GEN_CTRL1,		0x3e71 },
+		{ RT5640_GEN_CTRL2,		0x4040 },
+		{ RT5640_JD_CTRL,		0x4003 },
+		{ RT5640_IRQ_CTRL1,		0x8000 },
+		{ RT5640_GPIO_CTRL1,	0x8400 },
+	};
+	for (size_t i = 0; i < B_COUNT_OF(kJackDetectSetup); i++) {
+		rt5640_write(driver, kJackDetectSetup[i].reg,
+			kJackDetectSetup[i].value);
+	}
 
 	static const uint8 kRegisters[] = {
 		RT5640_IN1_IN2, RT5640_PWR_DIG1, RT5640_PWR_ANLG1, RT5640_PWR_ANLG2,
