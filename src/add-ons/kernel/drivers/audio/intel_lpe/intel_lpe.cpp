@@ -30,7 +30,7 @@
 
 
 #define DRIVER_NAME		"intel_lpe"
-#define INTEL_LPE_DRIVER_MODULE_NAME "drivers/audio/intel_lpe/driver_v1"
+#define INTEL_LPE_DRIVER_MODULE_NAME "drivers/audio/hmulti/intel_lpe/driver_v1"
 
 #define TRACE_ALWAYS(x...)	dprintf(DRIVER_NAME ": " x)
 
