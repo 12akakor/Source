@@ -108,17 +108,6 @@ rt5640_write(intel_lpe_driver* driver, uint8 reg, uint16 value)
 }
 
 
-static status_t
-rt5640_update(intel_lpe_driver* driver, uint8 reg, uint16 mask, uint16 value)
-{
-	uint16 old;
-	status_t status = rt5640_read(driver, reg, &old);
-	if (status != B_OK)
-		return status;
-	return rt5640_write(driver, reg, (old & ~mask) | (value & mask));
-}
-
-
 /*!	Switches on the master clock of the codec. Its ACPI device does that in
 	_PS0: it forces platform clock 3 of the PMC on, which feeds the MCLK pin.
 */
