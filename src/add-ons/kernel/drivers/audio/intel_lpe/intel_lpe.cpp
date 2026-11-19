@@ -155,11 +155,13 @@ rt5640_probe(intel_lpe_driver* driver)
 		return status;
 	snooze(10000);
 
-	// Jack detection exactly as the Android driver of the tablet left the
-	// codec (register dump taken while playing to the speakers): JD1 (the
-	// IN1N pin, IN1 single ended) is the source, its status drives the IRQ
-	// output on GPIO1, and the analog references and biases that the jack
-	// detect comparator needs are on.
+	// Jack detection as the Android driver of the tablet left the codec
+	// (register dump taken while playing to the speakers): JD1 (the IN1N
+	// pin, IN1 single ended) is the source, and the analog references and
+	// biases that the jack detect comparator needs are on.
+	// Android also routes the jack state to the IRQ output (MX-BD, MX-C0);
+	// that line ends at a GPIO interrupt of the SoC that nothing handles yet,
+	// so it stays off and the driver polls MX-BF instead.
 	static const struct {
 		uint8	reg;
 		uint16	value;
@@ -168,8 +170,6 @@ rt5640_probe(intel_lpe_driver* driver)
 		{ RT5640_GEN_CTRL1,		0x3e71 },
 		{ RT5640_GEN_CTRL2,		0x4040 },
 		{ RT5640_JD_CTRL,		0x4003 },
-		{ RT5640_IRQ_CTRL1,		0x8000 },
-		{ RT5640_GPIO_CTRL1,	0x8400 },
 	};
 	for (size_t i = 0; i < B_COUNT_OF(kJackDetectSetup); i++) {
 		rt5640_write(driver, kJackDetectSetup[i].reg,
