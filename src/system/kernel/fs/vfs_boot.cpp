@@ -557,8 +557,9 @@ dump_teams_for_diag(int32 round)
 							strlcpy(wait, "signal", sizeof(wait));
 							break;
 						case THREAD_BLOCK_TYPE_MUTEX:
-							snprintf(wait, sizeof(wait), "mutex %s",
-								((mutex*)thread->wait.object)->name);
+							snprintf(wait, sizeof(wait), "mutex %s %p",
+								((mutex*)thread->wait.object)->name,
+								thread->wait.object);
 							break;
 						case THREAD_BLOCK_TYPE_USER:
 							strlcpy(wait, "user", sizeof(wait));
