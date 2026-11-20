@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: MIT
+SubDir HAIKU_TOP src bin tcpchurn ;
+
+Application <bin>tcpchurn :
+	tcpchurn.cpp
+	: libnetwork.so
+;
