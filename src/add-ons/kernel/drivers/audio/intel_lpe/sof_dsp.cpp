@@ -36,9 +36,6 @@ extern "C" {
 #define DSP_BOOT_TIMEOUT		3000000
 #define IPC_TIMEOUT				500000
 
-#define FW_READY_SIZE			108
-	// sizeof(struct sof_ipc_fw_ready)
-
 // the fixed playback pipeline: host -> buffer -> SSP0
 #define PIPELINE_ID				1
 #define COMP_HOST_ID			1
@@ -279,6 +276,47 @@ lpe_dsp_uninit(lpe_dsp* dsp)
 //	#pragma mark - firmware
 
 
+#define SOF_EXT_MAN_ELEM_WINDOW	1
+
+
+/*!	Takes the mailbox windows from the window element of the extended
+	manifest (struct sof_ext_man_window): an element header, an IPC
+	extended data header, the number of windows and the windows.
+*/
+static void
+parse_windows(lpe_dsp* dsp, const uint8* element, uint32 size)
+{
+	if (size < 8 + 16)
+		return;
+	uint32 count = get32(element + 8 + 12);
+	for (uint32 w = 0; w < count && 8 + 16 + (w + 1) * 24 <= size; w++) {
+		// struct sof_ipc_window_elem: size, type, id, flags, size, offset
+		const uint8* window = element + 8 + 16 + w * 24;
+		uint32 type = get32(window + 4);
+		uint32 windowSize = get32(window + 16);
+		uint32 windowOffset = LPE_MBOX_OFFSET + get32(window + 20);
+		TRACE_ALWAYS("window type %" B_PRIu32 ": %#" B_PRIx32 ", %#" B_PRIx32
+			" bytes\n", type, windowOffset, windowSize);
+		switch (type) {
+			case SOF_IPC_REGION_DOWNBOX:
+				dsp->hostBoxOffset = windowOffset;
+				dsp->hostBoxSize = windowSize;
+				break;
+			case SOF_IPC_REGION_UPBOX:
+				dsp->dspBoxOffset = windowOffset;
+				dsp->dspBoxSize = windowSize;
+				break;
+			case SOF_IPC_REGION_STREAM:
+				dsp->streamBoxOffset = windowOffset;
+				break;
+			case SOF_IPC_REGION_EXCEPTION:
+				dsp->exceptionOffset = windowOffset;
+				break;
+		}
+	}
+}
+
+
 /*!	Copies the blocks of a SOF image ("Reef" header, optionally after an
 	extended manifest) into the DSP memories.
 */
@@ -287,9 +325,21 @@ load_image(lpe_dsp* dsp, const uint8* image, size_t size)
 {
 	size_t offset = 0;
 	if (size >= 16 && get32(image) == SOF_EXT_MAN_MAGIC) {
+		// extended manifest: magic, full size, header size, version, then
+		// elements of a type and a size
 		offset = get32(image + 4);
-		if (offset >= size)
+		uint32 position = get32(image + 8);
+		if (offset >= size || position > offset)
 			return B_BAD_DATA;
+		while (offset - position >= 8) {
+			uint32 type = get32(image + position);
+			uint32 elementSize = get32(image + position + 4);
+			if (elementSize < 8 || elementSize > offset - position)
+				break;
+			if (type == SOF_EXT_MAN_ELEM_WINDOW)
+				parse_windows(dsp, image + position, elementSize);
+			position += elementSize;
+		}
 	}
 
 	// header: signature, file size, number of modules, ABI
@@ -382,53 +432,8 @@ handle_fw_ready(lpe_dsp* dsp)
 		numbers[2], numbers[3], tag, date, time, (abi >> 24) & 0xff,
 		(abi >> 12) & 0xfff, abi & 0xfff);
 
-	// The mailbox windows follow as extended data: headers with the
-	// FW_READY command, a size and a type.
-	uint32 offset = LPE_MBOX_OFFSET + FW_READY_SIZE;
-	for (int i = 0; i < 16; i++) {
-		uint32 header[3];
-		mailbox_read(dsp, offset, header, sizeof(header));
-		if (header[1] != SOF_IPC_FW_READY || header[0] < sizeof(header)
-			|| header[0] > LPE_MBOX_SIZE) {
-			break;
-		}
-
-		if (header[2] == SOF_IPC_EXT_WINDOW) {
-			uint32 count;
-			mailbox_read(dsp, offset + 12, &count, sizeof(count));
-			for (uint32 w = 0; w < count && w < 15; w++) {
-				// struct sof_ipc_window_elem: size, type, id, flags, size,
-				// offset
-				uint32 element[6];
-				mailbox_read(dsp, offset + 16 + w * 24, element,
-					sizeof(element));
-				uint32 windowOffset = LPE_MBOX_OFFSET + element[5];
-				TRACE_ALWAYS("window type %" B_PRIu32 ": %#" B_PRIx32 ", %#"
-					B_PRIx32 " bytes\n", element[1], windowOffset,
-					element[4]);
-				switch (element[1]) {
-					case SOF_IPC_REGION_DOWNBOX:
-						dsp->hostBoxOffset = windowOffset;
-						dsp->hostBoxSize = element[4];
-						break;
-					case SOF_IPC_REGION_UPBOX:
-						dsp->dspBoxOffset = windowOffset;
-						dsp->dspBoxSize = element[4];
-						break;
-					case SOF_IPC_REGION_STREAM:
-						dsp->streamBoxOffset = windowOffset;
-						break;
-					case SOF_IPC_REGION_EXCEPTION:
-						dsp->exceptionOffset = windowOffset;
-						break;
-				}
-			}
-		}
-		offset += header[0];
-	}
-
 	if (dsp->hostBoxSize == 0 || dsp->dspBoxSize == 0)
-		TRACE_ALWAYS("the firmware reported no mailbox windows\n");
+		TRACE_ALWAYS("the firmware image described no mailbox windows\n");
 	dsp->ready = true;
 }
 
