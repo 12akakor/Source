@@ -11,9 +11,9 @@
 // codec on I2C. This driver attaches to that codec (Realtek RT5640, ACPI
 // 10EC5640) and will drive the LPE as well.
 //
-// This first step only brings up the codec: it switches on its master clock
-// through ACPI, checks and resets the chip, sets up jack detection and logs
-// when headphones are plugged in or out.
+// So far it brings up the codec (master clock through ACPI, reset, jack
+// detection, logging when headphones are plugged in or out) and boots Sound
+// Open Firmware on the DSP (sof_dsp.cpp).
 
 
 #include <ACPI.h>
@@ -22,11 +22,17 @@
 #include <i2c.h>
 #include <kernel.h>
 
+#include <FindDirectory.h>
+
 #include <new>
 
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+
+#include "sof_dsp.h"
 
 
 #define DRIVER_NAME		"intel_lpe"
@@ -59,6 +65,12 @@
 
 #define JACK_POLL_INTERVAL			250000
 
+// The firmware is read from the boot volume, which may not be mounted yet
+// when the driver starts.
+#define FIRMWARE_NAME				"sof-byt.ri"
+#define FIRMWARE_WAIT				(120 * 1000000LL)
+#define FIRMWARE_MAX_SIZE			(1024 * 1024)
+
 
 struct intel_lpe_driver {
 	device_node*			node;
@@ -69,6 +81,9 @@ struct intel_lpe_driver {
 
 	thread_id				pollThread;
 	volatile bool			stopPolling;
+
+	lpe_dsp					dsp;
+	bool					dspInitialized;
 };
 
 
@@ -190,6 +205,9 @@ rt5640_probe(intel_lpe_driver* driver)
 }
 
 
+static void start_dsp(intel_lpe_driver* driver);
+
+
 static status_t
 jack_poll_thread(void* data)
 {
@@ -197,7 +215,12 @@ jack_poll_thread(void* data)
 	uint16 last = 0xffff;
 	uint16 lastJD2 = 0xffff;
 
+	start_dsp(driver);
+
 	while (!driver->stopPolling) {
+		if (driver->dspInitialized)
+			lpe_dsp_poll_messages(&driver->dsp);
+
 		uint16 status, gen2;
 		if (rt5640_read(driver, RT5640_INT_IRQ_ST, &status) == B_OK
 			&& rt5640_read(driver, RT5640_GEN_CTRL2, &gen2) == B_OK) {
@@ -215,21 +238,87 @@ jack_poll_thread(void* data)
 }
 
 
-/*!	Logs the state of the LPE in the ACPI tables, as a first look at it. */
-static void
-log_lpe()
+//	#pragma mark - DSP
+
+
+/*!	Reads the SOF firmware from data/firmware/intel/sof, where Linux keeps it
+	as well.
+*/
+static status_t
+read_firmware(uint8** _data, size_t* _size)
 {
-	acpi_module_info* acpi;
-	if (get_module(B_ACPI_MODULE_NAME, (module_info**)&acpi) != B_OK)
+	static const directory_which kDirectories[] = {
+		B_SYSTEM_NONPACKAGED_DATA_DIRECTORY,
+		B_SYSTEM_DATA_DIRECTORY,
+	};
+
+	int fd = -1;
+	char path[B_PATH_NAME_LENGTH];
+	for (size_t i = 0; i < B_COUNT_OF(kDirectories) && fd < 0; i++) {
+		char base[B_PATH_NAME_LENGTH];
+		if (find_directory(kDirectories[i], -1, false, base, sizeof(base))
+				!= B_OK) {
+			continue;
+		}
+		snprintf(path, sizeof(path), "%s/firmware/intel/sof/%s", base,
+			FIRMWARE_NAME);
+		fd = open(path, O_RDONLY);
+	}
+	if (fd < 0)
+		return B_ENTRY_NOT_FOUND;
+
+	off_t size = lseek(fd, 0, SEEK_END);
+	lseek(fd, 0, SEEK_SET);
+	if (size <= 0 || size > FIRMWARE_MAX_SIZE) {
+		close(fd);
+		return B_BAD_DATA;
+	}
+
+	uint8* data = (uint8*)malloc(size);
+	if (data == NULL) {
+		close(fd);
+		return B_NO_MEMORY;
+	}
+	ssize_t bytesRead = read(fd, data, size);
+	close(fd);
+	if (bytesRead != size) {
+		free(data);
+		return B_IO_ERROR;
+	}
+
+	TRACE_ALWAYS("loaded %s (%" B_PRIdOFF " bytes)\n", path, size);
+	*_data = data;
+	*_size = size;
+	return B_OK;
+}
+
+
+static void
+start_dsp(intel_lpe_driver* driver)
+{
+	uint8* image = NULL;
+	size_t size = 0;
+	status_t status;
+	bigtime_t timeout = system_time() + FIRMWARE_WAIT;
+	while ((status = read_firmware(&image, &size)) == B_ENTRY_NOT_FOUND
+		&& system_time() < timeout && !driver->stopPolling) {
+		snooze(1000000);
+	}
+	if (status != B_OK) {
+		TRACE_ALWAYS("no SOF firmware (%s): %s\n", FIRMWARE_NAME,
+			strerror(status));
 		return;
+	}
 
-	char path[255];
-	if (acpi->get_device("80860F28", 0, path, sizeof(path)) == B_OK)
-		TRACE_ALWAYS("LPE audio DSP at %s\n", path);
-	else
-		TRACE_ALWAYS("no LPE audio DSP (80860F28) in ACPI\n");
+	status = lpe_dsp_init(&driver->dsp);
+	if (status == B_OK) {
+		driver->dspInitialized = true;
+		status = lpe_dsp_boot(&driver->dsp, image, size);
+	}
+	free(image);
 
-	put_module(B_ACPI_MODULE_NAME);
+	if (status != B_OK)
+		TRACE_ALWAYS("DSP did not boot: %s\n", strerror(status));
 }
 
 
@@ -300,10 +389,8 @@ intel_lpe_init_driver(device_node* node, void** _driverCookie)
 		return status;
 	}
 
-	log_lpe();
-
 	driver->pollThread = spawn_kernel_thread(jack_poll_thread,
-		"intel_lpe jack detect", B_LOW_PRIORITY, driver);
+		"intel_lpe poll", B_LOW_PRIORITY, driver);
 	if (driver->pollThread >= 0)
 		resume_thread(driver->pollThread);
 
@@ -321,6 +408,8 @@ intel_lpe_uninit_driver(void* driverCookie)
 		status_t result;
 		wait_for_thread(driver->pollThread, &result);
 	}
+	if (driver->dspInitialized)
+		lpe_dsp_uninit(&driver->dsp);
 	delete driver;
 }
 
