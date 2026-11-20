@@ -51,6 +51,7 @@ AddFilesToPackage add-ons kernel busses i2c :
 	pch_i2c@x86,x86_64
 	;
 AddFilesToPackage add-ons kernel busses mmc :
+	designware_mmc@riscv64
 	sdhci
 	bcm2711_emmc2@arm64
 	;
@@ -96,6 +97,7 @@ AddFilesToPackage add-ons kernel generic :
 	ata_adapter
 	bios@x86,x86_64
 	dpc
+	jh7110_clock_reset@riscv64
 	mpu401
 	scsi_periph
 	smbios@x86,x86_64
@@ -149,6 +151,7 @@ AddNewDriversToPackage gpio :
 	baytrail_gpio@x86,x86_64
 	;
 AddNewDriversToPackage graphics :
+	hyperv_video@x86,x86_64,arm64
 	virtio_gpu
 	;
 AddNewDriversToPackage power
@@ -158,6 +161,7 @@ AddNewDriversToPackage sensor
 AddNewDriversToPackage network :
 	brcmfmac@arm64
 	genet@arm64
+	hyperv_netvsc@x86,x86_64,arm64
 	usb_ecm
 	virtio_net
 	;
@@ -368,6 +372,7 @@ AddBootModuleSymlinksToPackage
 	isa@x86,x86_64
 	intel
 	it8211
+	jh7110_clock_reset@riscv64
 	legacy_sata
 	mmc
 	mmc_disk
@@ -386,6 +391,7 @@ AddBootModuleSymlinksToPackage
 	scsi_periph
 	silicon_image_3112
 	smbios@x86,x86_64
+	designware_mmc@riscv64
 	sdhci
 	bcm2711_emmc2@arm64
 	usb
@@ -404,6 +410,8 @@ AddBootModuleSymlinksToPackage
 # add-ons
 AddFilesToPackage add-ons accelerants :
 	framebuffer.accelerant
+	vesa.accelerant@arm64
+		# hyperv_video uses it; x86 gets it from SYSTEM_ADD_ONS_ACCELERANTS
 	virtio_gpu.accelerant
 	$(SYSTEM_ADD_ONS_ACCELERANTS) ;
 AddFilesToPackage add-ons locale catalogs :
