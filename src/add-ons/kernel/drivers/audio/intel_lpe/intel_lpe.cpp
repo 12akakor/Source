@@ -531,8 +531,13 @@ play_test_tone(intel_lpe_driver* driver)
 	TRACE_ALWAYS("tone buffer: page table %#" B_PRIxPHYSADDR ", %" B_PRIu32
 		" frames\n", entry.address, frames);
 
-	if (setup_speaker_playback(driver) == B_OK
-		&& lpe_dsp_start_playback(&driver->dsp, &buffer) == B_OK) {
+	status_t status = setup_speaker_playback(driver);
+	if (status == B_OK) {
+		status = lpe_dsp_start_playback(&driver->dsp, &buffer);
+		if (status != B_OK)
+			TRACE_ALWAYS("playback did not start: %s\n", strerror(status));
+	}
+	if (status == B_OK) {
 		for (int i = 0; i < 3; i++) {
 			snooze(TONE_DURATION / 3);
 			sof_ipc_stream_posn position;
@@ -543,7 +548,7 @@ play_test_tone(intel_lpe_driver* driver)
 			}
 			lpe_dsp_poll_messages(&driver->dsp);
 		}
-		status_t status = lpe_dsp_stop_playback(&driver->dsp);
+		status = lpe_dsp_stop_playback(&driver->dsp);
 		TRACE_ALWAYS("playback stopped: %s\n", strerror(status));
 	}
 
