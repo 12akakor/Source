@@ -12,8 +12,10 @@
 // 10EC5640) and will drive the LPE as well.
 //
 // So far it brings up the codec (master clock through ACPI, reset, jack
-// detection, logging when headphones are plugged in or out) and boots Sound
-// Open Firmware on the DSP (sof_dsp.cpp).
+// detection, logging when headphones are plugged in or out), boots Sound
+// Open Firmware on the DSP (sof_dsp.cpp), sets up a fixed playback pipeline
+// from memory to SSP0 and the codec, and plays a test tone through the
+// speakers once the DSP runs. A multi_audio device follows.
 
 
 #include <ACPI.h>
@@ -206,6 +208,7 @@ rt5640_probe(intel_lpe_driver* driver)
 
 
 static void start_dsp(intel_lpe_driver* driver);
+static void play_test_tone(intel_lpe_driver* driver);
 
 
 static status_t
@@ -317,8 +320,235 @@ start_dsp(intel_lpe_driver* driver)
 	}
 	free(image);
 
-	if (status != B_OK)
+	if (status != B_OK) {
 		TRACE_ALWAYS("DSP did not boot: %s\n", strerror(status));
+		return;
+	}
+
+	play_test_tone(driver);
+}
+
+
+//	#pragma mark - playback
+
+
+struct rt5640_register_value {
+	uint8	reg;
+	uint16	value;
+};
+
+// The codec as Android set it up while it played through the speakers
+// (register dump of the stock Android on this tablet), in a safe order:
+// PLL, then clocks and interfaces, mixers, power, and the speaker last.
+// AIF1 is an I2S consumer with 24 bit data; the system clock comes from
+// the PLL (MCLK 25 MHz * 59 / 60 = 24.576 MHz = 512 * 48 kHz).
+static const rt5640_register_value kSpeakerPlayback[] = {
+	{ 0x81, 0x1c82 },	// PLL: N = 57, K = 2
+	{ 0x82, 0xd000 },	// PLL: M = 13
+	{ 0x64, 0x0200 },	// power: PLL
+	{ 0x80, 0x4000 },	// system clock from the PLL, PLL from MCLK
+	{ 0x83, 0x9a00 },	// ASRC
+	{ 0x84, 0xf800 },
+	{ 0x85, 0x0008 },
+	{ 0x89, 0x0000 },
+	{ 0x8a, 0x0000 },
+	{ 0x70, 0x8008 },	// I2S1: consumer, 24 bit, I2S
+	{ 0x71, 0x8000 },
+	{ 0x72, 0x8000 },
+	{ 0x73, 0x0014 },
+	{ 0x74, 0x0c00 },
+	{ 0x75, 0x1d00 },
+	{ 0x02, 0xa7a7 },	// headphone volume, muted
+	{ 0x03, 0xc8c8 },
+	{ 0x04, 0x8000 },
+	{ 0x05, 0x0000 },
+	{ 0x0d, 0x0540 },
+	{ 0x0e, 0x0500 },
+	{ 0x0f, 0x0808 },
+	{ 0x19, 0xafaf },	// DAC1 digital volume, 0 dB
+	{ 0x1a, 0xaaaa },
+	{ 0x1b, 0x0000 },
+	{ 0x1c, 0x8080 },
+	{ 0x1d, 0x2f2f },
+	{ 0x1e, 0x0000 },
+	{ 0x27, 0x7060 },
+	{ 0x28, 0x7070 },
+	{ 0x29, 0x8080 },	// DAC mixer: interface 1 to DAC1
+	{ 0x2a, 0x1414 },	// stereo DAC mixer: DAC L1/R1
+	{ 0x2b, 0x5454 },
+	{ 0x2c, 0xaa00 },
+	{ 0x2d, 0x0000 },
+	{ 0x2e, 0x0c00 },
+	{ 0x2f, 0x0100 },
+	{ 0x3b, 0x0000 },
+	{ 0x3c, 0x007b },
+	{ 0x3d, 0x0000 },
+	{ 0x3e, 0x007b },
+	{ 0x45, 0xc000 },
+	{ 0x46, 0x0036 },	// speaker mixer: DAC L1
+	{ 0x47, 0x0036 },	// speaker mixer: DAC R1
+	{ 0x48, 0xe800 },
+	{ 0x49, 0x2800 },
+	{ 0x4a, 0x0004 },
+	{ 0x4c, 0xfc00 },
+	{ 0x4d, 0x0000 },
+	{ 0x4e, 0x0000 },
+	{ 0x4f, 0x01fe },
+	{ 0x50, 0x0000 },
+	{ 0x51, 0x0000 },
+	{ 0x52, 0x01fe },
+	{ 0x53, 0xf000 },
+	{ 0x8b, 0x0600 },
+	{ 0x8c, 0x0334 },
+	{ 0x8d, 0x3000 },	// class D: ratio 2x
+	{ 0x8e, 0x0009 },
+	{ 0x8f, 0x3100 },
+	{ 0x90, 0x0646 },
+	{ 0x91, 0x0f00 },
+	{ 0x92, 0x0000 },
+	{ 0x93, 0x3410 },
+	{ 0xb0, 0x2080 },
+	{ 0xb1, 0x0000 },
+	{ 0xb2, 0x0000 },
+	{ 0xb4, 0x2206 },
+	{ 0xb5, 0x1f00 },
+	{ 0xb6, 0x0000 },
+	{ 0xb7, 0x0000 },
+	{ 0xb8, 0x034b },
+	{ 0xb9, 0x0066 },
+	{ 0xba, 0x000b },
+	{ 0xd0, 0x0680 },
+	{ 0xd1, 0x1c17 },
+	{ 0xd2, 0x8c00 },
+	{ 0xd3, 0xaa20 },
+	{ 0xd6, 0x0400 },
+	{ 0xd7, 0x0000 },
+	{ 0xd9, 0x0809 },
+	{ 0xda, 0x0000 },
+	{ 0x61, 0x9801 },	// power: I2S1, DAC L1/R1
+	{ 0x62, 0x0000 },
+	{ 0x65, 0x3000 },	// power: speaker mixers
+	{ 0x66, 0xc000 },	// power: speaker volumes
+	{ 0x01, 0x0808 },	// speaker volume, unmuted
+};
+
+static const uint8 kPlaybackRegisters[] = {
+	0x01, 0x61, 0x63, 0x64, 0x65, 0x66, 0x70, 0x80, 0x81, 0x82
+};
+
+#define RT5640_SPEAKER_VOLUME		0x01
+#define RT5640_SPEAKER_MUTED		0x8888
+
+// one period of a 500 Hz sine at 48 kHz, a quarter of the 24 bit range
+static const int32 kSine[96] = {
+	0, 137160, 273733, 409134, 542783, 674107,
+	802545, 927547, 1048576, 1165115, 1276665, 1382748,
+	1482910, 1576722, 1663782, 1743718, 1816187, 1880878,
+	1937516, 1985856, 2025693, 2056856, 2079210, 2092662,
+	2097152, 2092662, 2079210, 2056856, 2025693, 1985856,
+	1937516, 1880878, 1816187, 1743718, 1663782, 1576722,
+	1482910, 1382748, 1276665, 1165115, 1048576, 927547,
+	802545, 674107, 542783, 409134, 273733, 137160,
+	0, -137160, -273733, -409134, -542783, -674107,
+	-802545, -927547, -1048576, -1165115, -1276665, -1382748,
+	-1482910, -1576722, -1663782, -1743718, -1816187, -1880878,
+	-1937516, -1985856, -2025693, -2056856, -2079210, -2092662,
+	-2097152, -2092662, -2079210, -2056856, -2025693, -1985856,
+	-1937516, -1880878, -1816187, -1743718, -1663782, -1576722,
+	-1482910, -1382748, -1276665, -1165115, -1048576, -927547,
+	-802545, -674107, -542783, -409134, -273733, -137160,
+};
+
+#define TONE_PAGES					3
+#define TONE_DURATION				3000000
+
+
+static status_t
+setup_speaker_playback(intel_lpe_driver* driver)
+{
+	for (size_t i = 0; i < B_COUNT_OF(kSpeakerPlayback); i++) {
+		status_t status = rt5640_write(driver, kSpeakerPlayback[i].reg,
+			kSpeakerPlayback[i].value);
+		if (status != B_OK) {
+			TRACE_ALWAYS("writing MX-%02X failed: %s\n",
+				kSpeakerPlayback[i].reg, strerror(status));
+			return status;
+		}
+		if (kSpeakerPlayback[i].reg == 0x64)
+			snooze(1000);
+	}
+
+	for (size_t i = 0; i < B_COUNT_OF(kPlaybackRegisters); i++) {
+		uint16 value = 0;
+		rt5640_read(driver, kPlaybackRegisters[i], &value);
+		TRACE_ALWAYS("playback MX-%02X = %04x\n", kPlaybackRegisters[i],
+			value);
+	}
+	return B_OK;
+}
+
+
+/*!	Plays a 500 Hz tone through the speakers for a few seconds, to test the
+	path from memory through the DSP and SSP0 to the codec.
+*/
+static void
+play_test_tone(intel_lpe_driver* driver)
+{
+	uint8* memory;
+	area_id area = create_area("intel_lpe tone", (void**)&memory,
+		B_ANY_KERNEL_ADDRESS, (TONE_PAGES + 1) * B_PAGE_SIZE,
+		B_32_BIT_CONTIGUOUS, B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA);
+	if (area < 0) {
+		TRACE_ALWAYS("no memory for the tone: %s\n", strerror(area));
+		return;
+	}
+
+	physical_entry entry;
+	if (get_memory_map(memory, B_PAGE_SIZE, &entry, 1) != B_OK) {
+		delete_area(area);
+		return;
+	}
+
+	// page 0 holds the page table, pages 1 to 3 the samples
+	phys_addr_t pages[TONE_PAGES];
+	for (int i = 0; i < TONE_PAGES; i++)
+		pages[i] = entry.address + (i + 1) * B_PAGE_SIZE;
+	memset(memory, 0, B_PAGE_SIZE);
+	lpe_fill_page_table(memory, pages, TONE_PAGES);
+
+	int32* samples = (int32*)(memory + B_PAGE_SIZE);
+	uint32 frames = TONE_PAGES * B_PAGE_SIZE / 8;
+	for (uint32 i = 0; i < frames; i++) {
+		samples[i * 2] = kSine[i % 96];
+		samples[i * 2 + 1] = kSine[i % 96];
+	}
+
+	lpe_stream_buffer buffer;
+	buffer.pageTable = entry.address;
+	buffer.pageCount = TONE_PAGES;
+	buffer.size = TONE_PAGES * B_PAGE_SIZE;
+	buffer.periodBytes = 48 * 8;
+	TRACE_ALWAYS("tone buffer: page table %#" B_PRIxPHYSADDR ", %" B_PRIu32
+		" frames\n", entry.address, frames);
+
+	if (setup_speaker_playback(driver) == B_OK
+		&& lpe_dsp_start_playback(&driver->dsp, &buffer) == B_OK) {
+		for (int i = 0; i < 3; i++) {
+			snooze(TONE_DURATION / 3);
+			sof_ipc_stream_posn position;
+			if (lpe_dsp_read_position(&driver->dsp, &position) == B_OK) {
+				TRACE_ALWAYS("position: host %" B_PRIu64 ", DAI %" B_PRIu64
+					", xrun %" B_PRId32 "\n", position.host_posn,
+					position.dai_posn, position.xrun_size);
+			}
+			lpe_dsp_poll_messages(&driver->dsp);
+		}
+		status_t status = lpe_dsp_stop_playback(&driver->dsp);
+		TRACE_ALWAYS("playback stopped: %s\n", strerror(status));
+	}
+
+	rt5640_write(driver, RT5640_SPEAKER_VOLUME, RT5640_SPEAKER_MUTED);
+	delete_area(area);
 }
 
 
