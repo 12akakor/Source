@@ -254,6 +254,11 @@ if $(HAIKU_CC_IS_LEGACY_GCC_$(architecture)) = 1 {
 SEARCH on haiku-2019.pub = [ FDirName $(HAIKU_TOP) data trust_db ] ;
 AddFilesToPackage data trust_db : haiku-2019.pub ;
 
+# TEST (not for upstream): the self-built SOF firmware for the LPE DSP
+SEARCH on sof-byt.ri
+	= [ FDirName $(HAIKU_TOP) src add-ons kernel drivers audio intel_lpe test ] ;
+AddFilesToPackage data firmware intel sof : sof-byt.ri ;
+
 # RenkuOS build stamp, read by the About window. CI sets RENKUOS_BUILD in the
 # generated build/jam/UserBuildConfig; a build without it is a developer build
 # and says so. The number is part of the target name so that changing it yields
