@@ -275,6 +275,7 @@ AddFilesToPackage :
 AddFilesToPackage bin :
 	$(SYSTEM_BIN)
 	consoled
+	<bin>tcpchurn
 	;
 AddFilesToPackage apps
 	: $(SYSTEM_APPS) ;

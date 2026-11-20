@@ -22,3 +22,25 @@ done
 # To launch certain applications at boot-up, put links to those applications in
 # the above boot launch directory.
 
+
+# TEST (not for upstream): the tcpchurn reset case with netstat in a loop,
+# results on the serial console
+(
+	exec > /dev/dprintf 2>&1
+	sleep 30
+	echo "NETTEST start"
+	tcpchurn server 5000 8 2000 300 &
+	sleep 2
+	tcpchurn client 127.0.0.1 5000 8 300 reset &
+	n=0
+	end=$(( $(date +%s) + 300 ))
+	while [ $(date +%s) -lt $end ]; do
+		netstat -n > /dev/null
+		n=$(( n + 1 ))
+		if [ $(( n % 100 )) -eq 0 ]; then
+			echo "NETTEST netstat runs: $n"
+		fi
+	done
+	wait
+	echo "NETTEST done, netstat runs: $n"
+) &
