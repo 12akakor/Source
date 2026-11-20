@@ -276,6 +276,7 @@ AddFilesToPackage :
 AddFilesToPackage bin :
 	$(SYSTEM_BIN)
 	consoled
+	<bin>tcpchurn
 	<bin>emmc_write_test
 	;
 AddFilesToPackage apps
@@ -527,6 +528,10 @@ for linkTarget in $(DESKBAR_APPLICATIONS) {
 # test: the eMMC write test in the Applications menu
 AddSymlinkToPackage data deskbar menu Applications
 	: ../../../../bin/emmc_write_test : "eMMC write test" ;
+
+# test: the network test script
+SEARCH on <test>nettest = [ FDirName $(HAIKU_TOP) src bin tcpchurn ] ;
+AddFilesToPackage bin : <test>nettest ;
 
 # "Desktop applets" links
 AddDirectoryToPackage data deskbar menu Desktop\ applets

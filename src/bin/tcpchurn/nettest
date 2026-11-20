@@ -1,0 +1,19 @@
+#!/bin/sh
+# TEST (not for upstream): the tcpchurn reset case over loopback with netstat
+# in a loop, for 5 minutes (or the number of seconds given)
+seconds=${1:-300}
+echo "nettest: $seconds s, 8 server and 8 client threads, client resets"
+tcpchurn server 5000 8 2000 $seconds &
+sleep 2
+tcpchurn client 127.0.0.1 5000 8 $seconds reset &
+n=0
+end=$(( $(date +%s) + seconds ))
+while [ $(date +%s) -lt $end ]; do
+	netstat -n > /dev/null
+	n=$(( n + 1 ))
+	if [ $(( n % 100 )) -eq 0 ]; then
+		echo "nettest: netstat runs: $n"
+	fi
+done
+wait
+echo "nettest: done, netstat runs: $n"
