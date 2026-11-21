@@ -11,11 +11,11 @@
 // codec on I2C. This driver attaches to that codec (Realtek RT5640, ACPI
 // 10EC5640) and will drive the LPE as well.
 //
-// So far it brings up the codec (master clock through ACPI, reset, jack
-// detection, logging when headphones are plugged in or out), boots Sound
-// Open Firmware on the DSP (sof_dsp.cpp), sets up a fixed playback pipeline
-// from memory to SSP0 and the codec, and plays a test tone through the
-// speakers once the DSP runs. A multi_audio device follows.
+// It brings up the codec (master clock through ACPI, reset, jack detection),
+// boots Sound Open Firmware on the DSP (sof_dsp.cpp) and publishes the
+// speakers as a multi_audio device: 48 kHz, 16 bit stereo, two buffers of
+// 1024 frames, played through a fixed pipeline from memory to SSP0 and the
+// codec. Headphones, volume controls and recording are not done yet.
 
 
 #include <ACPI.h>
@@ -23,6 +23,10 @@
 #include <device_manager.h>
 #include <i2c.h>
 #include <kernel.h>
+#include <lock.h>
+#include <util/AutoLock.h>
+
+#include <hmulti_audio.h>
 
 #include <FindDirectory.h>
 
@@ -39,6 +43,8 @@
 
 #define DRIVER_NAME		"intel_lpe"
 #define INTEL_LPE_DRIVER_MODULE_NAME "drivers/audio/hmulti/intel_lpe/driver_v1"
+#define INTEL_LPE_DEVICE_MODULE_NAME "drivers/audio/hmulti/intel_lpe/device_v1"
+#define INTEL_LPE_DEVICE_PATH "audio/hmulti/intel_lpe/1"
 
 #define TRACE_ALWAYS(x...)	dprintf(DRIVER_NAME ": " x)
 
@@ -73,6 +79,27 @@
 #define FIRMWARE_WAIT				(120 * 1000000LL)
 #define FIRMWARE_MAX_SIZE			(1024 * 1024)
 
+// how long the first playback waits for the DSP to boot
+#define DSP_READY_WAIT				(15 * 1000000LL)
+
+// The playback ring: two buffers of 1024 frames, one page each.
+#define PLAYBACK_RATE				48000
+#define PLAYBACK_CHANNELS			2
+#define PLAYBACK_SAMPLE_SIZE		2
+#define PLAYBACK_FRAME_SIZE			(PLAYBACK_CHANNELS * PLAYBACK_SAMPLE_SIZE)
+#define PLAYBACK_BUFFERS			2
+#define PLAYBACK_BUFFER_FRAMES		1024
+#define PLAYBACK_BUFFER_SIZE		(PLAYBACK_BUFFER_FRAMES * PLAYBACK_FRAME_SIZE)
+#define PLAYBACK_RING_SIZE			(PLAYBACK_BUFFERS * PLAYBACK_BUFFER_SIZE)
+#define PLAYBACK_BUFFER_TIME \
+	((bigtime_t)PLAYBACK_BUFFER_FRAMES * 1000000 / PLAYBACK_RATE)
+
+// How the playback thread waits for the next buffer: it sleeps most of a
+// buffer after a change, then checks every POLL_INTERVAL.
+#define POLL_INTERVAL				500
+#define POLL_EARLY_WAKEUP			3000
+#define EXCHANGE_TIMEOUT			500000
+
 
 struct intel_lpe_driver {
 	device_node*			node;
@@ -84,8 +111,28 @@ struct intel_lpe_driver {
 	thread_id				pollThread;
 	volatile bool			stopPolling;
 
+	// Protects the DSP mailboxes and doorbells.
+	mutex					dspLock;
 	lpe_dsp					dsp;
 	bool					dspInitialized;
+
+	area_id					ringArea;
+	uint8*					ring;
+	area_id					tableArea;
+	phys_addr_t				tablePhysical;
+
+	// Protects the fields below and the start and stop of playback.
+	mutex					lock;
+	int32					openCount;
+	int32					running;
+	thread_id				playbackThread;
+	sem_id					bufferReadySem;
+
+	// Playback position, written by the playback thread.
+	spinlock				positionLock;
+	uint32					bufferCycle;
+	int64					framesCount;
+	bigtime_t				realTime;
 };
 
 
@@ -208,7 +255,6 @@ rt5640_probe(intel_lpe_driver* driver)
 
 
 static void start_dsp(intel_lpe_driver* driver);
-static void play_test_tone(intel_lpe_driver* driver);
 
 
 static status_t
@@ -221,8 +267,10 @@ jack_poll_thread(void* data)
 	start_dsp(driver);
 
 	while (!driver->stopPolling) {
-		if (driver->dspInitialized)
+		if (driver->dspInitialized) {
+			MutexLocker dspLocker(driver->dspLock);
 			lpe_dsp_poll_messages(&driver->dsp);
+		}
 
 		uint16 status, gen2;
 		if (rt5640_read(driver, RT5640_INT_IRQ_ST, &status) == B_OK
@@ -313,23 +361,21 @@ start_dsp(intel_lpe_driver* driver)
 		return;
 	}
 
+	MutexLocker dspLocker(driver->dspLock);
 	status = lpe_dsp_init(&driver->dsp);
 	if (status == B_OK) {
 		driver->dspInitialized = true;
 		status = lpe_dsp_boot(&driver->dsp, image, size);
 	}
+	dspLocker.Unlock();
 	free(image);
 
-	if (status != B_OK) {
+	if (status != B_OK)
 		TRACE_ALWAYS("DSP did not boot: %s\n", strerror(status));
-		return;
-	}
-
-	play_test_tone(driver);
 }
 
 
-//	#pragma mark - playback
+//	#pragma mark - codec playback setup
 
 
 struct rt5640_register_value {
@@ -447,174 +493,29 @@ static const rt5640_register_value kPrivateInit[] = {
 #define RT5640_PRIVATE_INDEX		0x6a
 #define RT5640_PRIVATE_DATA			0x6c
 
-static const uint8 kPlaybackRegisters[] = {
-	0x01, 0x61, 0x63, 0x64, 0x65, 0x66, 0x70, 0x80, 0x81, 0x82
-};
-
 #define RT5640_SPEAKER_VOLUME		0x01
 #define RT5640_SPEAKER_MUTED		0x8888
 
-// one period of a 500 Hz sine at 48 kHz, a quarter of the 24 bit range
-static const int32 kSine[96] = {
-	0, 137160, 273733, 409134, 542783, 674107,
-	802545, 927547, 1048576, 1165115, 1276665, 1382748,
-	1482910, 1576722, 1663782, 1743718, 1816187, 1880878,
-	1937516, 1985856, 2025693, 2056856, 2079210, 2092662,
-	2097152, 2092662, 2079210, 2056856, 2025693, 1985856,
-	1937516, 1880878, 1816187, 1743718, 1663782, 1576722,
-	1482910, 1382748, 1276665, 1165115, 1048576, 927547,
-	802545, 674107, 542783, 409134, 273733, 137160,
-	0, -137160, -273733, -409134, -542783, -674107,
-	-802545, -927547, -1048576, -1165115, -1276665, -1382748,
-	-1482910, -1576722, -1663782, -1743718, -1816187, -1880878,
-	-1937516, -1985856, -2025693, -2056856, -2079210, -2092662,
-	-2097152, -2092662, -2079210, -2056856, -2025693, -1985856,
-	-1937516, -1880878, -1816187, -1743718, -1663782, -1576722,
-	-1482910, -1382748, -1276665, -1165115, -1048576, -927547,
-	-802545, -674107, -542783, -409134, -273733, -137160,
-};
-
-#define TONE_PAGES					3
-#define TONE_DURATION				9000000
-
-
-// The codec MCLK is platform clock 3 of the PMC (ACPI: RTEK._PS0 sets
-// CKC3, PCLK = 0xfed03060): bits 1:0 on/off, bit 2 the frequency.
-#define PMC_PLATFORM_CLOCK_3		0xfed0306c
-
-
-static void
-log_codec_clock()
-{
-	void* address;
-	area_id area = map_physical_memory("intel_lpe PMC clocks",
-		PMC_PLATFORM_CLOCK_3 & ~(B_PAGE_SIZE - 1), B_PAGE_SIZE,
-		B_ANY_KERNEL_ADDRESS, B_KERNEL_READ_AREA, &address);
-	if (area < 0)
-		return;
-	uint32 value = *(volatile uint32*)((uint8*)address
-		+ (PMC_PLATFORM_CLOCK_3 & (B_PAGE_SIZE - 1)));
-	delete_area(area);
-	TRACE_ALWAYS("MCLK (PMC platform clock 3): %#" B_PRIx32 ", %s, %s\n",
-		value, (value & 3) == 1 ? "forced on" : (value & 3) == 2
-			? "forced off" : "on with S0", (value & 4) != 0 ? "19.2 MHz"
-			: "25 MHz");
-}
-
-
-// TEST: the pads of the audio path. SSP0 (I2S to the codec) is on SCORE
-// GPIOs 8 to 11 (pads 34, 37, 36, 38), function 1. SSP2 is on SCORE GPIOs
-// 62 to 65 (pads 13, 12, 15, 14). SUS GPIO 21 (pad 2, GPIO function 1) is
-// the "byt_ffrd8_tristate_buffer_gpio" that Android drove low.
-#define SCORE_BASE					0xfed0c000
+// SUS GPIO 21 (pad 2): Android drives it low as
+// "byt_ffrd8_tristate_buffer_gpio"; the firmware leaves it high.
 #define SUS_BASE					0xfed0e000
+#define SUS_PAD_21					2
 
 
 static void
-log_pad(const char* name, uint8* base, uint32 pad)
+set_tristate_buffer_gpio()
 {
-	volatile uint32* registers = (volatile uint32*)(base + pad * 16);
-	TRACE_ALWAYS("pad %s (%" B_PRIu32 "): CONF0 %#" B_PRIx32 " (function %"
-		B_PRIu32 "), VAL %#" B_PRIx32 "\n", name, pad, registers[0],
-		registers[0] & 7, registers[2]);
-}
-
-
-static void
-check_audio_pins()
-{
-	uint8* score;
-	area_id scoreArea = map_physical_memory("intel_lpe SCORE pads",
-		SCORE_BASE, B_PAGE_SIZE, B_ANY_KERNEL_ADDRESS,
-		B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA, (void**)&score);
-	if (scoreArea >= 0) {
-		static const struct { const char* name; uint32 pad; } kPads[] = {
-			{ "SSP0 CLK", 34 }, { "SSP0 FRM", 37 }, { "SSP0 RXD", 36 },
-			{ "SSP0 TXD", 38 }, { "SSP2 CLK", 13 }, { "SSP2 FRM", 12 },
-			{ "SSP2 RXD", 15 }, { "SSP2 TXD", 14 },
-		};
-		for (size_t i = 0; i < B_COUNT_OF(kPads); i++)
-			log_pad(kPads[i].name, score, kPads[i].pad);
-
-		// switch the SSP0 pads to their SSP function if they are not
-		for (int i = 0; i < 4; i++) {
-			volatile uint32* conf0
-				= (volatile uint32*)(score + kPads[i].pad * 16);
-			if ((*conf0 & 7) != 1) {
-				*conf0 = (*conf0 & ~7) | 1;
-				log_pad(kPads[i].name, score, kPads[i].pad);
-			}
-		}
-		delete_area(scoreArea);
-	}
-
 	uint8* sus;
-	area_id susArea = map_physical_memory("intel_lpe SUS pads", SUS_BASE,
+	area_id area = map_physical_memory("intel_lpe SUS pads", SUS_BASE,
 		B_PAGE_SIZE, B_ANY_KERNEL_ADDRESS,
 		B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA, (void**)&sus);
-	if (susArea >= 0) {
-		log_pad("SUS 21", sus, 2);
-		volatile uint32* registers = (volatile uint32*)(sus + 2 * 16);
-		// GPIO function, output enabled (bit 1 clear), level low
-		registers[0] = (registers[0] & ~7) | 1;
-		registers[2] = (registers[2] & ~3) | 4;
-		log_pad("SUS 21", sus, 2);
-		delete_area(susArea);
-	}
-}
-
-
-/*!	TEST: samples the level of the SSP0 pads while SSP0 plays, to see
-	whether the I2S signals leave the SoC.
-*/
-static void
-sample_ssp0_pads()
-{
-	uint8* score;
-	area_id area = map_physical_memory("intel_lpe SCORE pads", SCORE_BASE,
-		B_PAGE_SIZE, B_ANY_KERNEL_ADDRESS, B_KERNEL_READ_AREA,
-		(void**)&score);
 	if (area < 0)
 		return;
-
-	static const struct { const char* name; uint32 pad; } kPads[] = {
-		{ "CLK", 34 }, { "FRM", 37 }, { "RXD", 36 }, { "TXD", 38 },
-	};
-	for (size_t p = 0; p < B_COUNT_OF(kPads); p++) {
-		volatile uint32* value
-			= (volatile uint32*)(score + kPads[p].pad * 16 + 8);
-		uint32 last = *value & 1;
-		uint32 changes = 0;
-		uint32 high = 0;
-		for (int i = 0; i < 100000; i++) {
-			uint32 level = *value & 1;
-			if (level != last)
-				changes++;
-			high += level;
-			last = level;
-		}
-		TRACE_ALWAYS("SSP0 pad %s: %" B_PRIu32 " level changes, high %"
-			B_PRIu32 " of 100000 samples\n", kPads[p].name, changes, high);
-	}
+	volatile uint32* registers = (volatile uint32*)(sus + SUS_PAD_21 * 16);
+	// GPIO function, output enabled (VAL bit 1 clear), level low (bit 0)
+	registers[0] = (registers[0] & ~7) | 1;
+	registers[2] = (registers[2] & ~3) | 4;
 	delete_area(area);
-}
-
-
-static void
-verify_speaker_playback(intel_lpe_driver* driver)
-{
-	int mismatches = 0;
-	for (size_t i = 0; i < B_COUNT_OF(kSpeakerPlayback); i++) {
-		uint16 value = 0;
-		rt5640_read(driver, kSpeakerPlayback[i].reg, &value);
-		if (value != kSpeakerPlayback[i].value) {
-			TRACE_ALWAYS("MX-%02X reads %04x, written %04x\n",
-				kSpeakerPlayback[i].reg, value, kSpeakerPlayback[i].value);
-			mismatches++;
-		}
-	}
-	TRACE_ALWAYS("codec check while playing: %d registers differ\n",
-		mismatches);
 }
 
 
@@ -637,91 +538,466 @@ setup_speaker_playback(intel_lpe_driver* driver)
 		if (kSpeakerPlayback[i].reg == 0x64)
 			snooze(1000);
 	}
+	return B_OK;
+}
 
-	log_codec_clock();
 
-	for (size_t i = 0; i < B_COUNT_OF(kPlaybackRegisters); i++) {
-		uint16 value = 0;
-		rt5640_read(driver, kPlaybackRegisters[i], &value);
-		TRACE_ALWAYS("playback MX-%02X = %04x\n", kPlaybackRegisters[i],
-			value);
+//	#pragma mark - playback
+
+
+/*!	Follows the host position, which the firmware writes into the stream
+	mailbox every millisecond. Each change of buffer means a buffer finished
+	playing; buffer_exchange() then hands that buffer to the media add-on.
+*/
+static int32
+playback_thread(void* data)
+{
+	intel_lpe_driver* driver = (intel_lpe_driver*)data;
+	uint32 last = 0;
+
+	while (atomic_get(&driver->running) != 0) {
+		sof_ipc_stream_posn position;
+		if (lpe_dsp_read_position(&driver->dsp, &position) != B_OK) {
+			snooze(POLL_INTERVAL);
+			continue;
+		}
+		uint32 current = (uint32)(position.host_posn / PLAYBACK_BUFFER_SIZE)
+			% PLAYBACK_BUFFERS;
+		if (current == last) {
+			snooze(POLL_INTERVAL);
+			continue;
+		}
+		last = current;
+		bigtime_t now = system_time();
+
+		cpu_status state = disable_interrupts();
+		acquire_spinlock(&driver->positionLock);
+		driver->bufferCycle = current;
+		driver->framesCount += PLAYBACK_BUFFER_FRAMES;
+		driver->realTime = now;
+		release_spinlock(&driver->positionLock);
+		restore_interrupts(state);
+
+		release_sem_etc(driver->bufferReadySem, 1, B_DO_NOT_RESCHEDULE);
+		snooze(PLAYBACK_BUFFER_TIME - POLL_EARLY_WAKEUP);
+	}
+	return 0;
+}
+
+
+static status_t
+playback_start(intel_lpe_driver* driver)
+{
+	// the DSP boots once the firmware can be read from the boot volume
+	bigtime_t timeout = system_time() + DSP_READY_WAIT;
+	while (!driver->dsp.ready) {
+		if (system_time() > timeout)
+			return B_DEV_NOT_READY;
+		snooze(100000);
+	}
+
+	int32 count;
+	if (get_sem_count(driver->bufferReadySem, &count) == B_OK && count > 0)
+		acquire_sem_etc(driver->bufferReadySem, count, B_RELATIVE_TIMEOUT, 0);
+
+	status_t status = setup_speaker_playback(driver);
+	if (status != B_OK)
+		return status;
+
+	driver->bufferCycle = 0;
+	driver->framesCount = 0;
+	driver->realTime = system_time();
+
+	lpe_stream_buffer buffer;
+	buffer.pageTable = driver->tablePhysical;
+	buffer.pageCount = PLAYBACK_RING_SIZE / B_PAGE_SIZE;
+	buffer.size = PLAYBACK_RING_SIZE;
+	buffer.periodBytes = PLAYBACK_BUFFER_SIZE;
+	{
+		MutexLocker dspLocker(driver->dspLock);
+		status = lpe_dsp_start_playback(&driver->dsp, &buffer);
+	}
+	if (status != B_OK) {
+		rt5640_write(driver, RT5640_SPEAKER_VOLUME, RT5640_SPEAKER_MUTED);
+		return status;
+	}
+
+	driver->running = 1;
+	driver->playbackThread = spawn_kernel_thread(playback_thread,
+		"intel_lpe playback", B_REAL_TIME_DISPLAY_PRIORITY, driver);
+	if (driver->playbackThread < 0) {
+		status = driver->playbackThread;
+		driver->running = 0;
+		MutexLocker dspLocker(driver->dspLock);
+		lpe_dsp_stop_playback(&driver->dsp);
+		rt5640_write(driver, RT5640_SPEAKER_VOLUME, RT5640_SPEAKER_MUTED);
+		return status;
+	}
+	resume_thread(driver->playbackThread);
+	return B_OK;
+}
+
+
+static void
+playback_stop(intel_lpe_driver* driver)
+{
+	if (!driver->running)
+		return;
+
+	atomic_set(&driver->running, 0);
+	status_t result;
+	wait_for_thread(driver->playbackThread, &result);
+	driver->playbackThread = -1;
+
+	rt5640_write(driver, RT5640_SPEAKER_VOLUME, RT5640_SPEAKER_MUTED);
+	{
+		MutexLocker dspLocker(driver->dspLock);
+		lpe_dsp_stop_playback(&driver->dsp);
+	}
+
+	// wake a buffer_exchange() that is still waiting
+	release_sem_etc(driver->bufferReadySem, 1, 0);
+	TRACE_ALWAYS("playback stopped after %" B_PRId64 " frames\n",
+		driver->framesCount);
+}
+
+
+//	#pragma mark - multi_audio
+
+
+static multi_channel_info sChannels[] = {
+	{ 0, B_MULTI_OUTPUT_CHANNEL, B_CHANNEL_LEFT | B_CHANNEL_STEREO_BUS, 0 },
+	{ 1, B_MULTI_OUTPUT_CHANNEL, B_CHANNEL_RIGHT | B_CHANNEL_STEREO_BUS, 0 },
+	{ 2, B_MULTI_OUTPUT_BUS, B_CHANNEL_LEFT | B_CHANNEL_STEREO_BUS,
+		B_CHANNEL_ANALOG_HEADER },
+	{ 3, B_MULTI_OUTPUT_BUS, B_CHANNEL_RIGHT | B_CHANNEL_STEREO_BUS,
+		B_CHANNEL_ANALOG_HEADER },
+};
+
+
+static status_t
+get_description(intel_lpe_driver* driver, multi_description* data)
+{
+	data->interface_version = B_CURRENT_INTERFACE_VERSION;
+	data->interface_minimum = B_CURRENT_INTERFACE_VERSION;
+
+	strlcpy(data->friendly_name, "Speakers (Intel LPE)",
+		sizeof(data->friendly_name));
+	strlcpy(data->vendor_info, "Renku", sizeof(data->vendor_info));
+
+	data->output_channel_count = PLAYBACK_CHANNELS;
+	data->output_bus_channel_count = PLAYBACK_CHANNELS;
+	data->input_channel_count = 0;
+	data->input_bus_channel_count = 0;
+	data->aux_bus_channel_count = 0;
+
+	if (data->request_channel_count >= (int32)B_COUNT_OF(sChannels))
+		memcpy(data->channels, sChannels, sizeof(sChannels));
+
+	data->output_rates = B_SR_48000;
+	data->input_rates = 0;
+	data->max_cvsr_rate = 0;
+	data->min_cvsr_rate = 0;
+	data->output_formats = B_FMT_16BIT;
+	data->input_formats = 0;
+	data->lock_sources = B_MULTI_LOCK_INTERNAL;
+	data->timecode_sources = 0;
+	data->interface_flags = B_MULTI_INTERFACE_PLAYBACK;
+	data->start_latency = 30000;
+	data->control_panel[0] = '\0';
+	return B_OK;
+}
+
+
+static status_t
+get_enabled_channels(intel_lpe_driver* driver, multi_channel_enable* data)
+{
+	data->lock_source = B_MULTI_LOCK_INTERNAL;
+	for (int32 i = 0; i < PLAYBACK_CHANNELS; i++)
+		B_SET_CHANNEL(data->enable_bits, i, true);
+	return B_OK;
+}
+
+
+static status_t
+get_global_format(intel_lpe_driver* driver, multi_format_info* data)
+{
+	data->output_latency = 0;
+	data->input_latency = 0;
+	data->timecode_kind = 0;
+	data->output.format = B_FMT_16BIT;
+	data->output.rate = B_SR_48000;
+	data->input.format = 0;
+	data->input.rate = 0;
+	return B_OK;
+}
+
+
+static status_t
+set_global_format(intel_lpe_driver* driver, multi_format_info* data)
+{
+	// there is only one format; report it back
+	return get_global_format(driver, data);
+}
+
+
+static status_t
+list_mix_controls(intel_lpe_driver* driver, multi_mix_control_info* data)
+{
+	// no gain controls yet; the system mixer sets the volume
+	data->control_count = 0;
+	return B_OK;
+}
+
+
+static status_t
+list_mix_connections(intel_lpe_driver* driver,
+	multi_mix_connection_info* data)
+{
+	return B_ERROR;
+}
+
+
+static status_t
+list_mix_channels(intel_lpe_driver* driver, multi_mix_channel_info* data)
+{
+	return B_ERROR;
+}
+
+
+static status_t
+get_mix(intel_lpe_driver* driver, multi_mix_value_info* data)
+{
+	return B_OK;
+}
+
+
+static status_t
+set_mix(intel_lpe_driver* driver, multi_mix_value_info* data)
+{
+	return B_OK;
+}
+
+
+/*!	The ring layout is fixed, so the requested buffer count and size are
+	ignored.
+*/
+static status_t
+get_buffers(intel_lpe_driver* driver, multi_buffer_list* data)
+{
+	MutexLocker locker(driver->lock);
+
+	if (!driver->running)
+		memset(driver->ring, 0, PLAYBACK_RING_SIZE);
+
+	data->flags = B_MULTI_BUFFER_PLAYBACK;
+	data->return_playback_buffers = PLAYBACK_BUFFERS;
+	data->return_playback_channels = PLAYBACK_CHANNELS;
+	data->return_playback_buffer_size = PLAYBACK_BUFFER_FRAMES;
+	data->return_record_buffers = 0;
+	data->return_record_channels = 0;
+	data->return_record_buffer_size = 0;
+
+	if (data->request_playback_buffers < PLAYBACK_BUFFERS
+		|| data->request_playback_channels < PLAYBACK_CHANNELS) {
+		return B_BAD_VALUE;
+	}
+
+	for (int32 i = 0; i < PLAYBACK_BUFFERS; i++) {
+		buffer_desc descs[PLAYBACK_CHANNELS];
+		for (int32 channel = 0; channel < PLAYBACK_CHANNELS; channel++) {
+			descs[channel].base = (char*)driver->ring
+				+ i * PLAYBACK_BUFFER_SIZE + channel * PLAYBACK_SAMPLE_SIZE;
+			descs[channel].stride = PLAYBACK_FRAME_SIZE;
+		}
+		if (!IS_USER_ADDRESS(data->playback_buffers[i])
+			|| user_memcpy(data->playback_buffers[i], descs, sizeof(descs))
+				!= B_OK) {
+			return B_BAD_ADDRESS;
+		}
 	}
 	return B_OK;
 }
 
 
-/*!	Plays a 500 Hz tone through the speakers for a few seconds, to test the
-	path from memory through the DSP and SSP0 to the codec.
-*/
-static void
-play_test_tone(intel_lpe_driver* driver)
+static status_t
+buffer_exchange(intel_lpe_driver* driver, multi_buffer_info* data)
 {
-	uint8* memory;
-	area_id area = create_area("intel_lpe tone", (void**)&memory,
-		B_ANY_KERNEL_ADDRESS, (TONE_PAGES + 1) * B_PAGE_SIZE,
-		B_32_BIT_CONTIGUOUS, B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA);
-	if (area < 0) {
-		TRACE_ALWAYS("no memory for the tone: %s\n", strerror(area));
-		return;
+	multi_buffer_info info;
+	if (!IS_USER_ADDRESS(data)
+		|| user_memcpy(&info, data, sizeof(info)) != B_OK) {
+		return B_BAD_ADDRESS;
 	}
+
+	{
+		MutexLocker locker(driver->lock);
+		if (!driver->running) {
+			status_t status = playback_start(driver);
+			if (status != B_OK) {
+				TRACE_ALWAYS("playback did not start: %s\n",
+					strerror(status));
+				return status;
+			}
+		}
+	}
+
+	status_t status = acquire_sem_etc(driver->bufferReadySem, 1,
+		B_CAN_INTERRUPT | B_RELATIVE_TIMEOUT, EXCHANGE_TIMEOUT);
+	if (status != B_OK)
+		return status;
+
+	cpu_status state = disable_interrupts();
+	acquire_spinlock(&driver->positionLock);
+	info.playback_buffer_cycle = driver->bufferCycle;
+	info.played_real_time = driver->realTime;
+	info.played_frames_count = driver->framesCount;
+	release_spinlock(&driver->positionLock);
+	restore_interrupts(state);
+
+	info.record_buffer_cycle = -1;
+	info.recorded_real_time = 0;
+	info.recorded_frames_count = 0;
+
+	if (user_memcpy(data, &info, sizeof(info)) != B_OK)
+		return B_BAD_ADDRESS;
+	return B_OK;
+}
+
+
+static status_t
+buffer_force_stop(intel_lpe_driver* driver)
+{
+	MutexLocker locker(driver->lock);
+	playback_stop(driver);
+	return B_OK;
+}
+
+
+#define cookie_type intel_lpe_driver
+#include "../generic/multi.c"
+
+
+//	#pragma mark - setup
+
+
+/*!	The ring the media add-on writes into, and the page table through
+	which the DSP reads it.
+*/
+static status_t
+create_ring(intel_lpe_driver* driver)
+{
+	void* address;
+	driver->ringArea = create_area("intel_lpe playback", &address,
+		B_ANY_KERNEL_ADDRESS, PLAYBACK_RING_SIZE, B_32_BIT_CONTIGUOUS,
+		B_READ_AREA | B_WRITE_AREA);
+	if (driver->ringArea < 0)
+		return driver->ringArea;
+	driver->ring = (uint8*)address;
+	memset(driver->ring, 0, PLAYBACK_RING_SIZE);
+
+	driver->tableArea = create_area("intel_lpe page table", &address,
+		B_ANY_KERNEL_ADDRESS, B_PAGE_SIZE, B_32_BIT_CONTIGUOUS,
+		B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA);
+	if (driver->tableArea < 0)
+		return driver->tableArea;
+	memset(address, 0, B_PAGE_SIZE);
 
 	physical_entry entry;
-	if (get_memory_map(memory, B_PAGE_SIZE, &entry, 1) != B_OK) {
-		delete_area(area);
-		return;
-	}
+	status_t status = get_memory_map(address, B_PAGE_SIZE, &entry, 1);
+	if (status != B_OK)
+		return status;
+	driver->tablePhysical = entry.address;
 
-	// page 0 holds the page table, pages 1 to 3 the samples
-	phys_addr_t pages[TONE_PAGES];
-	for (int i = 0; i < TONE_PAGES; i++)
-		pages[i] = entry.address + (i + 1) * B_PAGE_SIZE;
-	memset(memory, 0, B_PAGE_SIZE);
-	lpe_fill_page_table(memory, pages, TONE_PAGES);
+	phys_addr_t pages[PLAYBACK_RING_SIZE / B_PAGE_SIZE];
+	status = get_memory_map(driver->ring, PLAYBACK_RING_SIZE, &entry, 1);
+	if (status != B_OK)
+		return status;
+	for (size_t i = 0; i < B_COUNT_OF(pages); i++)
+		pages[i] = entry.address + i * B_PAGE_SIZE;
+	lpe_fill_page_table((uint8*)address, pages, B_COUNT_OF(pages));
+	return B_OK;
+}
 
-	int32* samples = (int32*)(memory + B_PAGE_SIZE);
-	uint32 frames = TONE_PAGES * B_PAGE_SIZE / 8;
-	for (uint32 i = 0; i < frames; i++) {
-		samples[i * 2] = kSine[i % 96];
-		samples[i * 2 + 1] = kSine[i % 96];
-	}
 
-	lpe_stream_buffer buffer;
-	buffer.pageTable = entry.address;
-	buffer.pageCount = TONE_PAGES;
-	buffer.size = TONE_PAGES * B_PAGE_SIZE;
-	buffer.periodBytes = 48 * 8;
-	TRACE_ALWAYS("tone buffer: page table %#" B_PRIxPHYSADDR ", %" B_PRIu32
-		" frames\n", entry.address, frames);
+static void
+delete_ring(intel_lpe_driver* driver)
+{
+	if (driver->tableArea >= 0)
+		delete_area(driver->tableArea);
+	if (driver->ringArea >= 0)
+		delete_area(driver->ringArea);
+}
 
-	check_audio_pins();
-	status_t status = setup_speaker_playback(driver);
-	if (status == B_OK) {
-		status = lpe_dsp_start_playback(&driver->dsp, &buffer);
-		if (status != B_OK)
-			TRACE_ALWAYS("playback did not start: %s\n", strerror(status));
-	}
-	if (status == B_OK) {
-		for (int i = 0; i < 3; i++) {
-			snooze(TONE_DURATION / 3);
-			if (i == 0) {
-				verify_speaker_playback(driver);
-				sample_ssp0_pads();
-			}
-			sof_ipc_stream_posn position;
-			if (lpe_dsp_read_position(&driver->dsp, &position) == B_OK) {
-				TRACE_ALWAYS("position: host %" B_PRIu64 ", DAI %" B_PRIu64
-					", xrun %" B_PRId32 "\n", position.host_posn,
-					position.dai_posn, position.xrun_size);
-			}
-			lpe_dsp_poll_messages(&driver->dsp);
-			lpe_dsp_dump(&driver->dsp);
-		}
-		status = lpe_dsp_stop_playback(&driver->dsp);
-		TRACE_ALWAYS("playback stopped: %s\n", strerror(status));
-	}
 
-	rt5640_write(driver, RT5640_SPEAKER_VOLUME, RT5640_SPEAKER_MUTED);
-	delete_area(area);
+//	#pragma mark - device module API
+
+
+static status_t
+intel_lpe_init_device(void* driverCookie, void** _deviceCookie)
+{
+	*_deviceCookie = driverCookie;
+	return B_OK;
+}
+
+
+static void
+intel_lpe_uninit_device(void* deviceCookie)
+{
+}
+
+
+static status_t
+intel_lpe_open(void* deviceCookie, const char* path, int openMode,
+	void** _cookie)
+{
+	intel_lpe_driver* driver = (intel_lpe_driver*)deviceCookie;
+	MutexLocker locker(driver->lock);
+	driver->openCount++;
+	*_cookie = driver;
+	return B_OK;
+}
+
+
+static status_t
+intel_lpe_close(void* cookie)
+{
+	return B_OK;
+}
+
+
+static status_t
+intel_lpe_free(void* cookie)
+{
+	intel_lpe_driver* driver = (intel_lpe_driver*)cookie;
+	MutexLocker locker(driver->lock);
+	if (--driver->openCount == 0)
+		playback_stop(driver);
+	return B_OK;
+}
+
+
+static status_t
+intel_lpe_read(void* cookie, off_t position, void* buffer, size_t* _length)
+{
+	*_length = 0;
+	return B_NOT_ALLOWED;
+}
+
+
+static status_t
+intel_lpe_write(void* cookie, off_t position, const void* buffer,
+	size_t* _length)
+{
+	*_length = 0;
+	return B_NOT_ALLOWED;
+}
+
+
+static status_t
+intel_lpe_control(void* cookie, uint32 op, void* buffer, size_t length)
+{
+	return multi_audio_control_generic((intel_lpe_driver*)cookie, op, buffer,
+		length);
 }
 
 
@@ -773,6 +1049,11 @@ intel_lpe_init_driver(device_node* node, void** _driverCookie)
 	memset(driver, 0, sizeof(*driver));
 	driver->node = node;
 	driver->pollThread = -1;
+	driver->playbackThread = -1;
+	driver->ringArea = driver->tableArea = -1;
+	mutex_init(&driver->lock, "intel_lpe");
+	mutex_init(&driver->dspLock, "intel_lpe dsp");
+	B_INITIALIZE_SPINLOCK(&driver->positionLock);
 
 	device_node* parent = sDeviceManager->get_parent_node(node);
 	uint64 handle = 0;
@@ -786,11 +1067,23 @@ intel_lpe_init_driver(device_node* node, void** _driverCookie)
 
 	if (status == B_OK)
 		status = rt5640_probe(driver);
+	if (status == B_OK)
+		status = create_ring(driver);
+	if (status == B_OK) {
+		driver->bufferReadySem = create_sem(0, "intel_lpe buffer ready");
+		if (driver->bufferReadySem < 0)
+			status = driver->bufferReadySem;
+	}
 	if (status != B_OK) {
 		TRACE_ALWAYS("probe failed: %s\n", strerror(status));
+		delete_ring(driver);
+		mutex_destroy(&driver->dspLock);
+		mutex_destroy(&driver->lock);
 		delete driver;
 		return status;
 	}
+
+	set_tristate_buffer_gpio();
 
 	driver->pollThread = spawn_kernel_thread(jack_poll_thread,
 		"intel_lpe poll", B_LOW_PRIORITY, driver);
@@ -806,6 +1099,10 @@ static void
 intel_lpe_uninit_driver(void* driverCookie)
 {
 	intel_lpe_driver* driver = (intel_lpe_driver*)driverCookie;
+	mutex_lock(&driver->lock);
+	playback_stop(driver);
+	mutex_unlock(&driver->lock);
+
 	if (driver->pollThread >= 0) {
 		driver->stopPolling = true;
 		status_t result;
@@ -813,7 +1110,20 @@ intel_lpe_uninit_driver(void* driverCookie)
 	}
 	if (driver->dspInitialized)
 		lpe_dsp_uninit(&driver->dsp);
+	delete_sem(driver->bufferReadySem);
+	delete_ring(driver);
+	mutex_destroy(&driver->dspLock);
+	mutex_destroy(&driver->lock);
 	delete driver;
+}
+
+
+static status_t
+intel_lpe_register_child_devices(void* driverCookie)
+{
+	intel_lpe_driver* driver = (intel_lpe_driver*)driverCookie;
+	return sDeviceManager->publish_device(driver->node, INTEL_LPE_DEVICE_PATH,
+		INTEL_LPE_DEVICE_MODULE_NAME);
 }
 
 
@@ -828,9 +1138,33 @@ driver_module_info intel_lpe_driver_module = {
 	intel_lpe_register_device,
 	intel_lpe_init_driver,
 	intel_lpe_uninit_driver,
-	NULL,	// register_child_devices
+	intel_lpe_register_child_devices,
 	NULL,	// rescan
 	NULL,	// removed
+};
+
+
+struct device_module_info intel_lpe_device_module = {
+	{
+		INTEL_LPE_DEVICE_MODULE_NAME,
+		0,
+		NULL
+	},
+
+	intel_lpe_init_device,
+	intel_lpe_uninit_device,
+	NULL,	// removed
+
+	intel_lpe_open,
+	intel_lpe_close,
+	intel_lpe_free,
+	intel_lpe_read,
+	intel_lpe_write,
+	NULL,	// io
+	intel_lpe_control,
+
+	NULL,	// select
+	NULL	// deselect
 };
 
 
@@ -842,5 +1176,6 @@ module_dependency module_dependencies[] = {
 
 module_info* modules[] = {
 	(module_info*)&intel_lpe_driver_module,
+	(module_info*)&intel_lpe_device_module,
 	NULL
 };
