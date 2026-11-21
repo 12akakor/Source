@@ -348,11 +348,13 @@ static const rt5640_register_value kSpeakerPlayback[] = {
 	{ 0x64, 0x0200 },	// power: PLL
 	{ 0x80, 0x4000 },	// system clock from the PLL, PLL from MCLK
 	{ 0x83, 0x9a00 },	// ASRC
-	{ 0x84, 0xf800 },
+	{ 0x84, 0xf820 },	// ASRC for the filters, the DAC stereo filter too:
+						// SSP0 runs from 19.2 MHz, MCLK is 25 MHz
 	{ 0x85, 0x0008 },
 	{ 0x89, 0x0000 },
 	{ 0x8a, 0x0000 },
-	{ 0x70, 0x8008 },	// I2S1: consumer, 24 bit, I2S
+	{ 0x70, 0x8000 },	// I2S1: consumer, 16 bit, I2S (the 16 most
+						// significant bits of the 25 bit slots)
 	{ 0x71, 0x8000 },
 	{ 0x72, 0x8000 },
 	{ 0x73, 0x0014 },
@@ -431,6 +433,19 @@ static const rt5640_register_value kSpeakerPlayback[] = {
 	{ 0x66, 0xc000 },	// power: speaker volumes
 	{ 0x01, 0x0808 },	// speaker volume, unmuted
 };
+
+// private registers (index MX-6A, data MX-6C) that the Realtek drivers set
+// at initialization
+static const rt5640_register_value kPrivateInit[] = {
+	{ 0x3d, 0x3600 },
+	{ 0x12, 0x0aa8 },
+	{ 0x14, 0x0aaa },
+	{ 0x21, 0xe0e0 },
+	{ 0x23, 0x1804 },
+};
+
+#define RT5640_PRIVATE_INDEX		0x6a
+#define RT5640_PRIVATE_DATA			0x6c
 
 static const uint8 kPlaybackRegisters[] = {
 	0x01, 0x61, 0x63, 0x64, 0x65, 0x66, 0x70, 0x80, 0x81, 0x82
@@ -549,6 +564,42 @@ check_audio_pins()
 }
 
 
+/*!	TEST: samples the level of the SSP0 pads while SSP0 plays, to see
+	whether the I2S signals leave the SoC.
+*/
+static void
+sample_ssp0_pads()
+{
+	uint8* score;
+	area_id area = map_physical_memory("intel_lpe SCORE pads", SCORE_BASE,
+		B_PAGE_SIZE, B_ANY_KERNEL_ADDRESS, B_KERNEL_READ_AREA,
+		(void**)&score);
+	if (area < 0)
+		return;
+
+	static const struct { const char* name; uint32 pad; } kPads[] = {
+		{ "CLK", 34 }, { "FRM", 37 }, { "RXD", 36 }, { "TXD", 38 },
+	};
+	for (size_t p = 0; p < B_COUNT_OF(kPads); p++) {
+		volatile uint32* value
+			= (volatile uint32*)(score + kPads[p].pad * 16 + 8);
+		uint32 last = *value & 1;
+		uint32 changes = 0;
+		uint32 high = 0;
+		for (int i = 0; i < 100000; i++) {
+			uint32 level = *value & 1;
+			if (level != last)
+				changes++;
+			high += level;
+			last = level;
+		}
+		TRACE_ALWAYS("SSP0 pad %s: %" B_PRIu32 " level changes, high %"
+			B_PRIu32 " of 100000 samples\n", kPads[p].name, changes, high);
+	}
+	delete_area(area);
+}
+
+
 static void
 verify_speaker_playback(intel_lpe_driver* driver)
 {
@@ -570,6 +621,11 @@ verify_speaker_playback(intel_lpe_driver* driver)
 static status_t
 setup_speaker_playback(intel_lpe_driver* driver)
 {
+	for (size_t i = 0; i < B_COUNT_OF(kPrivateInit); i++) {
+		rt5640_write(driver, RT5640_PRIVATE_INDEX, kPrivateInit[i].reg);
+		rt5640_write(driver, RT5640_PRIVATE_DATA, kPrivateInit[i].value);
+	}
+
 	for (size_t i = 0; i < B_COUNT_OF(kSpeakerPlayback); i++) {
 		status_t status = rt5640_write(driver, kSpeakerPlayback[i].reg,
 			kSpeakerPlayback[i].value);
@@ -647,8 +703,10 @@ play_test_tone(intel_lpe_driver* driver)
 	if (status == B_OK) {
 		for (int i = 0; i < 3; i++) {
 			snooze(TONE_DURATION / 3);
-			if (i == 0)
+			if (i == 0) {
 				verify_speaker_playback(driver);
+				sample_ssp0_pads();
+			}
 			sof_ipc_stream_posn position;
 			if (lpe_dsp_read_position(&driver->dsp, &position) == B_OK) {
 				TRACE_ALWAYS("position: host %" B_PRIu64 ", DAI %" B_PRIu64
