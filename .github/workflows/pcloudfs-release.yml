@@ -1,0 +1,47 @@
+name: pcloudfs release
+
+# Publishes the image produced by the x270-build workflow as a public release
+# asset, so the tester can download a zip without logging in to GitHub.
+on:
+  workflow_run:
+    workflows: ["x270-build"]
+    types: [completed]
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download the image
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_NUMBER: ${{ github.event.workflow_run.run_number }}
+        run: |
+          set -euo pipefail
+          mkdir -p image
+          gh run download "${RUN_ID}" --repo 12akakor/Source \
+            --name "renku-x86_64-x270-build${RUN_NUMBER}" --dir image
+          ls -la image
+
+      - name: Pack and publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          IMG=$(find image -name '*.img' | head -1)
+          if [ -z "${IMG}" ]; then echo "::error::no .img in artifact"; exit 1; fi
+          cp "${IMG}" pcloudfs-test.img
+          zip -9 pcloudfs-test.zip pcloudfs-test.img
+          sha256sum pcloudfs-test.zip > pcloudfs-test.zip.sha256
+          if gh release view pcloudfs-test --repo 12akakor/Source >/dev/null 2>&1; then
+            gh release delete pcloudfs-test --repo 12akakor/Source --cleanup-tag --yes
+          fi
+          gh release create pcloudfs-test pcloudfs-test.zip pcloudfs-test.zip.sha256 \
+            --repo 12akakor/Source --target ${{ github.event.workflow_run.head_sha }} \
+            --title "pcloudfs test image" --prerelease --latest=false \
+            --notes 'Test image for the pcloudfs read-only phase. Write the .img to a USB stick in DD mode. If it does not boot, read SYSLOG.TXT from the FAT (EFI) partition and send it back.'
