@@ -832,6 +832,8 @@ lpe_fill_page_table(uint8* table, const phys_addr_t* pages, uint32 count)
 #define LPE_DMA1_OFFSET			0x09c000
 #define DW_DMA_CHANNEL_SIZE		0x58
 #define DW_DMA_CH_EN			0x3a0
+#define LPE_DSP_ADDRESS			0xff200000
+	// the BAR as the DSP sees it (SHIM_BASE 0xff340000 at 0x140000)
 
 
 /*!	Logs the SSP0 registers and the enabled DMA channels of the DSP. */
@@ -859,6 +861,20 @@ lpe_dsp_dump(lpe_dsp* dsp)
 				read32(dsp, offset + 0x08), read32(dsp, offset + 0x18),
 				read32(dsp, offset + 0x1c), read32(dsp, offset + 0x40),
 				read32(dsp, offset + 0x44));
+
+			// the samples the channel reads from DSP memory
+			uint32 source = read32(dsp, offset);
+			if (source >= LPE_DSP_ADDRESS + LPE_IRAM_OFFSET
+				&& source < LPE_DSP_ADDRESS + LPE_SHIM_OFFSET) {
+				uint32 data = (source - LPE_DSP_ADDRESS) & ~31;
+				TRACE_ALWAYS("  at %#" B_PRIx32 ": %08" B_PRIx32 " %08"
+					B_PRIx32 " %08" B_PRIx32 " %08" B_PRIx32 " %08" B_PRIx32
+					" %08" B_PRIx32 " %08" B_PRIx32 " %08" B_PRIx32 "\n",
+					data, read32(dsp, data), read32(dsp, data + 4),
+					read32(dsp, data + 8), read32(dsp, data + 12),
+					read32(dsp, data + 16), read32(dsp, data + 20),
+					read32(dsp, data + 24), read32(dsp, data + 28));
+			}
 		}
 	}
 
