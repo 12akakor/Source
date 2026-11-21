@@ -631,7 +631,7 @@ create_pipeline(lpe_dsp* dsp)
 	host.config.hdr.size = sizeof(host.config);
 	host.config.periods_sink = DAI_PERIODS;
 	host.config.periods_source = DAI_PERIODS;
-	host.config.frame_fmt = SOF_IPC_FRAME_S24_4LE;
+	host.config.frame_fmt = SOF_IPC_FRAME_S16_LE;
 	host.direction = SOF_IPC_STREAM_PLAYBACK;
 	status = send_message(dsp, &host, sizeof(host), NULL, 0);
 	if (status != B_OK)
@@ -741,15 +741,18 @@ lpe_dsp_start_playback(lpe_dsp* dsp, const lpe_stream_buffer* buffer)
 	params.params.buffer.pages = buffer->pageCount;
 	params.params.buffer.size = buffer->size;
 	params.params.direction = SOF_IPC_STREAM_PLAYBACK;
-	params.params.frame_fmt = SOF_IPC_FRAME_S24_4LE;
+	params.params.frame_fmt = SOF_IPC_FRAME_S16_LE;
 	params.params.buffer_fmt = SOF_IPC_BUFFER_INTERLEAVED;
 	params.params.rate = 48000;
 	params.params.stream_tag = 1;
 	params.params.channels = 2;
-	params.params.sample_valid_bytes = 3;
-	params.params.sample_container_bytes = 4;
+	params.params.sample_valid_bytes = 2;
+	params.params.sample_container_bytes = 2;
 	params.params.host_period_bytes = buffer->periodBytes;
+	// no position messages: the firmware writes the position into the
+	// stream mailbox every period instead
 	params.params.no_stream_position = 1;
+	params.params.cont_update_posn = 1;
 	params.params.chmap[0] = 3;
 		// SOF_CHMAP_FL
 	params.params.chmap[1] = 4;
@@ -821,70 +824,4 @@ lpe_fill_page_table(uint8* table, const phys_addr_t* pages, uint32 count)
 			value = frame;
 		memcpy(entry, &value, sizeof(value));
 	}
-}
-
-
-//	#pragma mark - diagnostics
-
-
-#define LPE_SSP0_OFFSET			0x0a0000
-#define LPE_DMA0_OFFSET			0x098000
-#define LPE_DMA1_OFFSET			0x09c000
-#define DW_DMA_CHANNEL_SIZE		0x58
-#define DW_DMA_CH_EN			0x3a0
-#define LPE_DSP_ADDRESS			0xff200000
-	// the BAR as the DSP sees it (SHIM_BASE 0xff340000 at 0x140000)
-
-
-/*!	Logs the SSP0 registers and the enabled DMA channels of the DSP. */
-void
-lpe_dsp_dump(lpe_dsp* dsp)
-{
-	TRACE_ALWAYS("SSP0: SSCR0 %#" B_PRIx32 ", SSCR1 %#" B_PRIx32 ", SSSR %#"
-		B_PRIx32 ", SSPSP %#" B_PRIx32 ", SSTSA %#" B_PRIx32 "\n",
-		read32(dsp, LPE_SSP0_OFFSET + 0x00), read32(dsp, LPE_SSP0_OFFSET + 0x04),
-		read32(dsp, LPE_SSP0_OFFSET + 0x08), read32(dsp, LPE_SSP0_OFFSET + 0x2c),
-		read32(dsp, LPE_SSP0_OFFSET + 0x30));
-
-	static const uint32 kControllers[] = { LPE_DMA0_OFFSET, LPE_DMA1_OFFSET };
-	for (int c = 0; c < 2; c++) {
-		uint32 base = kControllers[c];
-		uint32 enabled = read32(dsp, base + DW_DMA_CH_EN);
-		TRACE_ALWAYS("DMA%d: CH_EN %#" B_PRIx32 "\n", c, enabled);
-		for (uint32 channel = 0; channel < 8; channel++) {
-			if ((enabled & (1 << channel)) == 0)
-				continue;
-			uint32 offset = base + channel * DW_DMA_CHANNEL_SIZE;
-			TRACE_ALWAYS("DMA%d.%" B_PRIu32 ": SAR %#" B_PRIx32 ", DAR %#"
-				B_PRIx32 ", CTL %#" B_PRIx32 " %#" B_PRIx32 ", CFG %#" B_PRIx32
-				" %#" B_PRIx32 "\n", c, channel, read32(dsp, offset),
-				read32(dsp, offset + 0x08), read32(dsp, offset + 0x18),
-				read32(dsp, offset + 0x1c), read32(dsp, offset + 0x40),
-				read32(dsp, offset + 0x44));
-
-			// the samples the channel reads from DSP memory
-			uint32 source = read32(dsp, offset);
-			if (source >= LPE_DSP_ADDRESS + LPE_IRAM_OFFSET
-				&& source < LPE_DSP_ADDRESS + LPE_SHIM_OFFSET) {
-				uint32 data = (source - LPE_DSP_ADDRESS) & ~31;
-				TRACE_ALWAYS("  at %#" B_PRIx32 ": %08" B_PRIx32 " %08"
-					B_PRIx32 " %08" B_PRIx32 " %08" B_PRIx32 " %08" B_PRIx32
-					" %08" B_PRIx32 " %08" B_PRIx32 " %08" B_PRIx32 "\n",
-					data, read32(dsp, data), read32(dsp, data + 4),
-					read32(dsp, data + 8), read32(dsp, data + 12),
-					read32(dsp, data + 16), read32(dsp, data + 20),
-					read32(dsp, data + 24), read32(dsp, data + 28));
-			}
-		}
-	}
-
-	if (dsp->exceptionOffset != 0) {
-		uint32 words[8];
-		mailbox_read(dsp, dsp->exceptionOffset, words, sizeof(words));
-		TRACE_ALWAYS("exception window: %08" B_PRIx32 " %08" B_PRIx32 " %08"
-			B_PRIx32 " %08" B_PRIx32 " %08" B_PRIx32 " %08" B_PRIx32 " %08"
-			B_PRIx32 " %08" B_PRIx32 "\n", words[0], words[1], words[2],
-			words[3], words[4], words[5], words[6], words[7]);
-	}
-	log_state(dsp, "playing");
 }

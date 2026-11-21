@@ -320,7 +320,6 @@ void lpe_dsp_poll_messages(lpe_dsp* dsp);
 status_t lpe_dsp_start_playback(lpe_dsp* dsp, const lpe_stream_buffer* buffer);
 status_t lpe_dsp_stop_playback(lpe_dsp* dsp);
 status_t lpe_dsp_read_position(lpe_dsp* dsp, sof_ipc_stream_posn* position);
-void lpe_dsp_dump(lpe_dsp* dsp);
 void lpe_fill_page_table(uint8* table, const phys_addr_t* pages,
 	uint32 count);
 
