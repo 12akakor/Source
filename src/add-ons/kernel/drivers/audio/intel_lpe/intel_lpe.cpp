@@ -463,6 +463,30 @@ static const int32 kSine[96] = {
 #define TONE_DURATION				3000000
 
 
+// The codec MCLK is platform clock 3 of the PMC (ACPI: RTEK._PS0 sets
+// CKC3, PCLK = 0xfed03060): bits 1:0 on/off, bit 2 the frequency.
+#define PMC_PLATFORM_CLOCK_3		0xfed0306c
+
+
+static void
+log_codec_clock()
+{
+	void* address;
+	area_id area = map_physical_memory("intel_lpe PMC clocks",
+		PMC_PLATFORM_CLOCK_3 & ~(B_PAGE_SIZE - 1), B_PAGE_SIZE,
+		B_ANY_KERNEL_ADDRESS, B_KERNEL_READ_AREA, &address);
+	if (area < 0)
+		return;
+	uint32 value = *(volatile uint32*)((uint8*)address
+		+ (PMC_PLATFORM_CLOCK_3 & (B_PAGE_SIZE - 1)));
+	delete_area(area);
+	TRACE_ALWAYS("MCLK (PMC platform clock 3): %#" B_PRIx32 ", %s, %s\n",
+		value, (value & 3) == 1 ? "forced on" : (value & 3) == 2
+			? "forced off" : "on with S0", (value & 4) != 0 ? "19.2 MHz"
+			: "25 MHz");
+}
+
+
 static status_t
 setup_speaker_playback(intel_lpe_driver* driver)
 {
@@ -477,6 +501,8 @@ setup_speaker_playback(intel_lpe_driver* driver)
 		if (kSpeakerPlayback[i].reg == 0x64)
 			snooze(1000);
 	}
+
+	log_codec_clock();
 
 	for (size_t i = 0; i < B_COUNT_OF(kPlaybackRegisters); i++) {
 		uint16 value = 0;
@@ -547,6 +573,7 @@ play_test_tone(intel_lpe_driver* driver)
 					position.dai_posn, position.xrun_size);
 			}
 			lpe_dsp_poll_messages(&driver->dsp);
+			lpe_dsp_dump(&driver->dsp);
 		}
 		status = lpe_dsp_stop_playback(&driver->dsp);
 		TRACE_ALWAYS("playback stopped: %s\n", strerror(status));
