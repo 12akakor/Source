@@ -460,7 +460,7 @@ static const int32 kSine[96] = {
 };
 
 #define TONE_PAGES					3
-#define TONE_DURATION				3000000
+#define TONE_DURATION				9000000
 
 
 // The codec MCLK is platform clock 3 of the PMC (ACPI: RTEK._PS0 sets
@@ -484,6 +484,86 @@ log_codec_clock()
 		value, (value & 3) == 1 ? "forced on" : (value & 3) == 2
 			? "forced off" : "on with S0", (value & 4) != 0 ? "19.2 MHz"
 			: "25 MHz");
+}
+
+
+// TEST: the pads of the audio path. SSP0 (I2S to the codec) is on SCORE
+// GPIOs 8 to 11 (pads 34, 37, 36, 38), function 1. SSP2 is on SCORE GPIOs
+// 62 to 65 (pads 13, 12, 15, 14). SUS GPIO 21 (pad 2, GPIO function 1) is
+// the "byt_ffrd8_tristate_buffer_gpio" that Android drove low.
+#define SCORE_BASE					0xfed0c000
+#define SUS_BASE					0xfed0e000
+
+
+static void
+log_pad(const char* name, uint8* base, uint32 pad)
+{
+	volatile uint32* registers = (volatile uint32*)(base + pad * 16);
+	TRACE_ALWAYS("pad %s (%" B_PRIu32 "): CONF0 %#" B_PRIx32 " (function %"
+		B_PRIu32 "), VAL %#" B_PRIx32 "\n", name, pad, registers[0],
+		registers[0] & 7, registers[2]);
+}
+
+
+static void
+check_audio_pins()
+{
+	uint8* score;
+	area_id scoreArea = map_physical_memory("intel_lpe SCORE pads",
+		SCORE_BASE, B_PAGE_SIZE, B_ANY_KERNEL_ADDRESS,
+		B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA, (void**)&score);
+	if (scoreArea >= 0) {
+		static const struct { const char* name; uint32 pad; } kPads[] = {
+			{ "SSP0 CLK", 34 }, { "SSP0 FRM", 37 }, { "SSP0 RXD", 36 },
+			{ "SSP0 TXD", 38 }, { "SSP2 CLK", 13 }, { "SSP2 FRM", 12 },
+			{ "SSP2 RXD", 15 }, { "SSP2 TXD", 14 },
+		};
+		for (size_t i = 0; i < B_COUNT_OF(kPads); i++)
+			log_pad(kPads[i].name, score, kPads[i].pad);
+
+		// switch the SSP0 pads to their SSP function if they are not
+		for (int i = 0; i < 4; i++) {
+			volatile uint32* conf0
+				= (volatile uint32*)(score + kPads[i].pad * 16);
+			if ((*conf0 & 7) != 1) {
+				*conf0 = (*conf0 & ~7) | 1;
+				log_pad(kPads[i].name, score, kPads[i].pad);
+			}
+		}
+		delete_area(scoreArea);
+	}
+
+	uint8* sus;
+	area_id susArea = map_physical_memory("intel_lpe SUS pads", SUS_BASE,
+		B_PAGE_SIZE, B_ANY_KERNEL_ADDRESS,
+		B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA, (void**)&sus);
+	if (susArea >= 0) {
+		log_pad("SUS 21", sus, 2);
+		volatile uint32* registers = (volatile uint32*)(sus + 2 * 16);
+		// GPIO function, output enabled (bit 1 clear), level low
+		registers[0] = (registers[0] & ~7) | 1;
+		registers[2] = (registers[2] & ~3) | 4;
+		log_pad("SUS 21", sus, 2);
+		delete_area(susArea);
+	}
+}
+
+
+static void
+verify_speaker_playback(intel_lpe_driver* driver)
+{
+	int mismatches = 0;
+	for (size_t i = 0; i < B_COUNT_OF(kSpeakerPlayback); i++) {
+		uint16 value = 0;
+		rt5640_read(driver, kSpeakerPlayback[i].reg, &value);
+		if (value != kSpeakerPlayback[i].value) {
+			TRACE_ALWAYS("MX-%02X reads %04x, written %04x\n",
+				kSpeakerPlayback[i].reg, value, kSpeakerPlayback[i].value);
+			mismatches++;
+		}
+	}
+	TRACE_ALWAYS("codec check while playing: %d registers differ\n",
+		mismatches);
 }
 
 
@@ -557,6 +637,7 @@ play_test_tone(intel_lpe_driver* driver)
 	TRACE_ALWAYS("tone buffer: page table %#" B_PRIxPHYSADDR ", %" B_PRIu32
 		" frames\n", entry.address, frames);
 
+	check_audio_pins();
 	status_t status = setup_speaker_playback(driver);
 	if (status == B_OK) {
 		status = lpe_dsp_start_playback(&driver->dsp, &buffer);
@@ -566,6 +647,8 @@ play_test_tone(intel_lpe_driver* driver)
 	if (status == B_OK) {
 		for (int i = 0; i < 3; i++) {
 			snooze(TONE_DURATION / 3);
+			if (i == 0)
+				verify_speaker_playback(driver);
 			sof_ipc_stream_posn position;
 			if (lpe_dsp_read_position(&driver->dsp, &position) == B_OK) {
 				TRACE_ALWAYS("position: host %" B_PRIu64 ", DAI %" B_PRIu64
