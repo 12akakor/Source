@@ -1,3 +1,0 @@
-# Test programs copied to /boot/home/tests in the X270 test image.
-pcloudctl
-bfs_concurrent_grow_test
