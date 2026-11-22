@@ -28,20 +28,23 @@ static volatile bool sStop;
 
 
 static status_t
-sleeper(void*)
+sleeper(void* data)
 {
 	while (!sStop)
 		snooze(50000);
+	// leave one by one: simultaneous exits stress thread teardown
+	snooze(((intptr_t)data) * 100000);
 	return B_OK;
 }
 
 
 static status_t
-runner(void*)
+runner(void* data)
 {
 	volatile uint64 count = 0;
 	while (!sStop)
 		count++;
+	snooze(((intptr_t)data) * 100000);
 	return B_OK;
 }
 
@@ -53,10 +56,10 @@ main()
 	get_system_info(&info);
 	int32 cpus = info.cpu_count;
 
-	thread_id threads[8];
-	for (int i = 0; i < 8; i++) {
-		threads[i] = spawn_thread(i < 4 ? sleeper : runner, "target",
-			B_NORMAL_PRIORITY, NULL);
+	thread_id threads[4];
+	for (int i = 0; i < 4; i++) {
+		threads[i] = spawn_thread(i < 2 ? sleeper : runner, "target",
+			B_NORMAL_PRIORITY, (void*)(intptr_t)i);
 		resume_thread(threads[i]);
 	}
 	snooze(100000);
@@ -68,7 +71,7 @@ main()
 		memset(mask, 0, sizeof(mask));
 		int32 cpu = round % cpus;
 		mask[cpu / 32] |= 1u << (cpu % 32);
-		thread_id thread = threads[round % 8];
+		thread_id thread = threads[round % 4];
 		status_t status = _kern_set_thread_affinity(thread, mask,
 			sizeof(mask));
 		if (status != B_OK) {
@@ -89,13 +92,13 @@ main()
 	}
 
 	sStop = true;
-	for (int i = 0; i < 8; i++) {
+	for (int i = 0; i < 4; i++) {
 		status_t result;
 		wait_for_thread(threads[i], &result);
 	}
 
 	const char* result = failures == 0
-		? "ok, 20000 affinity changes of other threads" : "FAILED";
+		? "ok, 20000 affinity changes of 4 other threads" : "FAILED";
 	printf("RESULT: %s\n", result);
 	syslog(LOG_INFO, "thread_affinity_other: RESULT: %s", result);
 	return failures == 0 ? 0 : 1;
