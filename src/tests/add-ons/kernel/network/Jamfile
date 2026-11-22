@@ -19,11 +19,11 @@ HaikuInstall install-userland-networking
 	: installed-userland-networking
 ;
 
+SimpleTest ipv6_ext_header_test : ipv6_ext_header_test.c ;
+
+SimpleTest net_ioctl_permissions_test : net_ioctl_permissions_test.c ;
+
 SubInclude HAIKU_TOP src tests add-ons kernel network core ;
 SubInclude HAIKU_TOP src tests add-ons kernel network interfaces ;
 #SubInclude HAIKU_TOP src tests add-ons kernel network ppp ;
 SubInclude HAIKU_TOP src tests add-ons kernel network protocols ;
-
-SimpleTest ipv6_ext_header_test : ipv6_ext_header_test.c ;
-
-SimpleTest net_ioctl_permissions_test : net_ioctl_permissions_test.c ;
