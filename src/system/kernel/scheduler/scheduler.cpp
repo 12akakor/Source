@@ -492,9 +492,21 @@ scheduler_reschedule(int32 nextState)
 		return;
 	}
 
-	if (thread->cpu->reschedule_disabled) {
-		ASSERT(nextState == B_THREAD_READY);
-		return;
+	// A thread that has preemption disabled is not preempted, but it is
+	// still switched out when it blocks or exits: before, this returned for
+	// those too (the ASSERT is compiled out of release builds), so the thread
+	// went on as if it had been woken up (#148). The count used to be per
+	// CPU, and a CPU it was left on by mistake stopped switching for good.
+	if (thread->preemption_disabled > 0) {
+		if (nextState == B_THREAD_READY)
+			return;
+
+		static int32 sReported = 0;
+		if (atomic_add(&sReported, 1) < 8) {
+			dprintf("scheduler: thread %" B_PRId32 " (%s) leaves its CPU (state "
+				"%" B_PRId32 ") with preemption disabled\n", thread->id,
+				thread->name, nextState);
+		}
 	}
 
 	reschedule(nextState);
