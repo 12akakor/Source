@@ -1,0 +1,5 @@
+# Test programs copied to /boot/home/tests in the X270 test image.
+thread_affinity_other
+libnvmm_preempt_race
+ipv6_ext_header_test
+net_ioctl_permissions_test
