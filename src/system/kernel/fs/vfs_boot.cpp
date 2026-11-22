@@ -695,24 +695,6 @@ syslog_to_esp_thread(void*)
 
 
 
-	// Test only: copy the syslog into SYSLOG.TXT of the EFI partition every
-	// 10 seconds, so it can be read on another computer.
-	thread_id syslogThread = spawn_kernel_thread(&syslog_to_esp_thread,
-		"syslog to ESP", B_LOW_PRIORITY, NULL);
-	if (syslogThread >= 0)
-		resume_thread(syslogThread);
-
-	// Test only: list all threads with what they wait for, 60 and 120
-	// seconds after boot, so a hang can be read from SYSLOG.TXT.
-	thread_id threadDump = spawn_kernel_thread([](void*) -> status_t {
-		for (int32 round = 0; round < 2; round++) {
-			snooze(60000000);
-			dump_teams_for_diag(round);
-		}
-		return B_OK;
-	}, "thread dump", B_LOW_PRIORITY, NULL);
-	if (threadDump >= 0)
-		resume_thread(threadDump);
 void
 vfs_mount_boot_file_system(kernel_args* args)
 {
@@ -848,5 +830,24 @@ vfs_mount_boot_file_system(kernel_args* args)
 	KDiskDeviceManager *manager = KDiskDeviceManager::Default();
 	manager->RescanDiskSystems();
 	manager->StartMonitoring();
+
+	// Test only: copy the syslog into SYSLOG.TXT of the EFI partition every
+	// 10 seconds, so it can be read on another computer.
+	thread_id syslogThread = spawn_kernel_thread(&syslog_to_esp_thread,
+		"syslog to ESP", B_LOW_PRIORITY, NULL);
+	if (syslogThread >= 0)
+		resume_thread(syslogThread);
+
+	// Test only: list all threads with what they wait for, 60 and 120
+	// seconds after boot, so a hang can be read from SYSLOG.TXT.
+	thread_id threadDump = spawn_kernel_thread([](void*) -> status_t {
+		for (int32 round = 0; round < 2; round++) {
+			snooze(60000000);
+			dump_teams_for_diag(round);
+		}
+		return B_OK;
+	}, "thread dump", B_LOW_PRIORITY, NULL);
+	if (threadDump >= 0)
+		resume_thread(threadDump);
 }
 
