@@ -50,6 +50,8 @@ static volatile int64 sCalls[MAX_THREADS];
 static volatile int32 sRuns[MAX_THREADS];
 static volatile bool sDone[MAX_THREADS];
 static thread_id sThreads[MAX_THREADS];
+static thread_id sBusyThreads[MAX_THREADS];
+static thread_id sProbeThreads[MAX_THREADS];
 static int32 sThreadCount;
 static int32 sCPUCount;
 static volatile int64 sMoves;
@@ -178,8 +180,9 @@ main(int argc, char** argv)
 		resume_thread(sThreads[i]);
 	}
 	for (int32 i = 0; i < sCPUCount * 2; i++) {
-		resume_thread(spawn_thread(busy_thread, "busy", B_NORMAL_PRIORITY,
-			(void*)(addr_t)i));
+		sBusyThreads[i] = spawn_thread(busy_thread, "busy", B_NORMAL_PRIORITY,
+			(void*)(addr_t)i);
+		resume_thread(sBusyThreads[i]);
 	}
 
 	int64 lastCalls = 0;
@@ -202,16 +205,23 @@ main(int argc, char** argv)
 
 	sStop = true;
 	wait_until(sDone, sThreadCount, 10000000);
+	for (int32 i = 0; i < sThreadCount; i++)
+		wait_for_thread(sThreads[i], NULL);
+	for (int32 i = 0; i < sCPUCount * 2; i++)
+		wait_for_thread(sBusyThreads[i], NULL);
 	int32 left = 0;
 	for (int32 i = 0; i < sThreadCount; i++)
 		left += sDone[i] ? 0 : 1;
 
 	// a thread on every CPU: does it get to run, and does it sleep?
 	for (int32 cpu = 0; cpu < sCPUCount; cpu++) {
-		resume_thread(spawn_thread(probe_thread, "probe", B_NORMAL_PRIORITY,
-			(void*)(addr_t)cpu));
+		sProbeThreads[cpu] = spawn_thread(probe_thread, "probe",
+			B_NORMAL_PRIORITY, (void*)(addr_t)cpu);
+		resume_thread(sProbeThreads[cpu]);
 	}
 	wait_until(sProbeDone, sCPUCount, 5000000);
+	for (int32 cpu = 0; cpu < sCPUCount; cpu++)
+		wait_for_thread(sProbeThreads[cpu], NULL);
 
 	int32 bad = 0;
 	for (int32 cpu = 0; cpu < sCPUCount; cpu++) {

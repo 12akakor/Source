@@ -6,6 +6,7 @@ UsePrivateHeaders shared ;
 SimpleTest advisory_locking_test : advisory_locking_test.cpp ;
 
 SimpleTest thread_affinity_other : thread_affinity_other.cpp ;
+SimpleTest thread_churn_test : thread_churn_test.cpp ;
 
 SimpleTest fibo_load_image : fibo_load_image.cpp ;
 SimpleTest fibo_fork : fibo_fork.cpp ;
