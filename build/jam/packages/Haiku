@@ -258,8 +258,6 @@ if $(HAIKU_CC_IS_LEGACY_GCC_$(architecture)) = 1 {
 SEARCH on haiku-2019.pub = [ FDirName $(HAIKU_TOP) data trust_db ] ;
 AddFilesToPackage data trust_db : haiku-2019.pub ;
 
-# TEST (not for upstream): the self-built SOF firmware for the LPE DSP
-
 # TEST (not for upstream): two short sounds to test playback
 local testSounds = renku-test-48000.wav renku-test-44100.wav ;
 SEARCH on $(testSounds)
