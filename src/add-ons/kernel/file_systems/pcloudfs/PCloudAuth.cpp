@@ -84,8 +84,8 @@ PCloudAuth::AuthQuery() const
 
 
 status_t
-PCloudAuth::LoginWithPassword(const BString& username, const BString& password,
-	const BString& code)
+PCloudAuth::LoginWithPassword(const BString& username,
+	const BString& password)
 {
 	if (username.Length() == 0 || password.Length() == 0)
 		return B_BAD_VALUE;
@@ -94,13 +94,6 @@ PCloudAuth::LoginWithPassword(const BString& username, const BString& password,
 	parameters.SetToFormat("getauth=1&logout=1&timeformat=timestamp"
 		"&username=%s&password=%s", BUrl::UrlEncode(username).String(),
 		BUrl::UrlEncode(password).String());
-	if (code.Length() > 0) {
-		// pCloud does not document a 2FA parameter for password login.
-		// "code" is the parameter used by other verification methods; it is
-		// sent only when the user explicitly supplies a code.
-		parameters << "&" << kTwoFactorParameter << "="
-			<< BUrl::UrlEncode(code);
-	}
 
 	BString url;
 	url.SetToFormat("https://%s/userinfo?%s", kPCloudApiHost,

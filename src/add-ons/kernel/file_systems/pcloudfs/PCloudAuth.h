@@ -45,8 +45,7 @@ public:
 		BString			AuthQuery() const;
 
 		status_t		LoginWithPassword(const BString& username,
-							const BString& password,
-							const BString& code = BString());
+							const BString& password);
 
 private:
 		status_t		_Load();

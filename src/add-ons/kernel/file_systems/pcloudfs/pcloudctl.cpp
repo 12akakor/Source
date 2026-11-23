@@ -58,14 +58,12 @@ login(PCloudAuth& auth)
 {
 	BString username = read_line("pCloud e-mail: ");
 	BString password = read_line("Password: ");
-	BString code = read_line("Two-factor code (press Enter if none): ");
-
 	if (username.Length() == 0 || password.Length() == 0) {
 		fprintf(stderr, "E-mail and password are required.\n");
 		return B_BAD_VALUE;
 	}
 
-	status_t status = auth.LoginWithPassword(username, password, code);
+	status_t status = auth.LoginWithPassword(username, password);
 	if (status != B_OK) {
 		fprintf(stderr, "Login failed: %s\n", auth.LastError().String());
 		return status;

@@ -49,7 +49,6 @@ static const char kSettingPassword[] = "password";
 static const char kSettingAccessToken[] = "accessToken";
 static const char kSettingUid[] = "uid";
 
-static const char kTwoFactorParameter[] = "code";
 
 // State of a cached node. The values are stored in the cache metadata file.
 enum pcloud_cache_state {
