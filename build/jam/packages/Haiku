@@ -57,6 +57,7 @@ AddFilesToPackage add-ons kernel busses mmc :
 	;
 AddFilesToPackage add-ons kernel busses pci :
 	<pci>designware@riscv64
+	<pci>plda@riscv64
 	<pci>ecam@riscv64,arm,arm64
 	<pci>x86@x86,x86_64
 	;
@@ -170,6 +171,7 @@ AddNewDriversToPackage input :
 	i2c_elan@x86,x86_64,arm64
 	i2c_goodix@x86,x86_64
 	i2c_hid
+	rmi4_smbus@x86,x86_64
 	virtio_input
 	;
 AddNewDriversToPackage display :
@@ -255,9 +257,6 @@ SEARCH on haiku-2019.pub = [ FDirName $(HAIKU_TOP) data trust_db ] ;
 AddFilesToPackage data trust_db : haiku-2019.pub ;
 
 # TEST (not for upstream): the self-built SOF firmware for the LPE DSP
-SEARCH on sof-byt.ri
-	= [ FDirName $(HAIKU_TOP) src add-ons kernel drivers audio intel_lpe test ] ;
-AddFilesToPackage data firmware intel sof : sof-byt.ri ;
 
 # TEST (not for upstream): two short sounds to test playback
 local testSounds = renku-test-48000.wav renku-test-44100.wav ;
@@ -394,6 +393,7 @@ AddBootModuleSymlinksToPackage
 	pch_i2c@x86,x86_64
 	pci
 	<pci>designware@riscv64
+	<pci>plda@riscv64
 	<pci>ecam@riscv64,arm,arm64
 	<pci>x86@x86,x86_64
 	fdt@riscv64,arm,arm64
