@@ -48,8 +48,7 @@ Application pcloudctl
 ;
 
 # The add-on must be where userlandfs_server looks for it, and the command
-# line tool must be in PATH for "pcloudctl setup".
-AddFilesToHaikuImage system add-ons userlandfs : pcloudfs ;
+# line tools are installed next to the test suite for this image.
 Application pcloudfs_test
 	:
 	pcloudfs_test.cpp
@@ -58,7 +57,6 @@ Application pcloudfs_test
 	bnetapi be network shared [ TargetLibstdc++ ]
 ;
 
-AddFilesToHaikuImage system bin : pcloudctl ;
 Application pcloudfs_prefs
 	:
 	PCloudPrefsApp.cpp
@@ -69,5 +67,4 @@ Application pcloudfs_prefs
 	bnetapi be network shared [ TargetLibstdc++ ]
 ;
 
-AddFilesToHaikuImage home tests : pcloudfs_test ;
-AddFilesToHaikuImage system apps : pcloudfs_prefs ;
+AddFilesToHaikuImage home tests : pcloudfs_test pcloudctl pcloudfs_prefs pcloudfs ;
