@@ -36,7 +36,6 @@ struct WorkerArgs {
 	uint32		kind;
 	BString		username;
 	BString		password;
-	BString		code;
 	BString		path;
 };
 
@@ -71,8 +70,7 @@ worker_entry(void* data)
 		{
 			PCloudAuth auth;
 			auth.Init();
-			status = auth.LoginWithPassword(args->username, args->password,
-				args->code);
+			status = auth.LoginWithPassword(args->username, args->password);
 			if (status == B_OK) {
 				text.SetToFormat("Logged in as pCloud user %s",
 					auth.Uid().String());
@@ -160,7 +158,6 @@ PCloudPrefsWindow::PCloudPrefsWindow()
 	fCacheInfo(NULL),
 	fUsername(NULL),
 	fPassword(NULL),
-	fCode(NULL),
 	fMountPoint(NULL),
 	fLoginButton(NULL),
 	fMessenger(this),
@@ -211,10 +208,6 @@ PCloudPrefsWindow::_BuildAccountTab()
 		"Log in to your pCloud account to use it as a disk.");
 	fUsername = new BTextControl("username", "E-mail:", "", NULL);
 	fPassword = new BTextControl("password", "Password:", "", NULL);
-	fCode = new BTextControl("code", "Two-factor code:", "", NULL);
-	BStringView* codeNote = new BStringView("codeNote",
-		"Leave the code empty if your account does not use two-factor "
-		"authentication.");
 	BStringView* privacyNote = new BStringView("privacyNote",
 		"Your password is stored only in this user's settings file, which "
 		"is readable only by you.");
@@ -233,10 +226,7 @@ PCloudPrefsWindow::_BuildAccountTab()
 			.Add(fUsername->CreateTextViewLayoutItem(), 1, 0)
 			.Add(fPassword->CreateLabelLayoutItem(), 0, 1)
 			.Add(fPassword->CreateTextViewLayoutItem(), 1, 1)
-			.Add(fCode->CreateLabelLayoutItem(), 0, 2)
-			.Add(fCode->CreateTextViewLayoutItem(), 1, 2)
 		.End()
-		.Add(codeNote)
 		.Add(privacyNote)
 		.AddGroup(B_HORIZONTAL, B_USE_HALF_ITEM_SPACING)
 			.Add(fLoginButton)
@@ -368,7 +358,6 @@ PCloudPrefsWindow::_StartWorker(uint32 kind, const BString& description)
 	args->kind = kind;
 	args->username = fUsername->Text();
 	args->password = fPassword->Text();
-	args->code = fCode->Text();
 	args->path = fMountPoint->Text();
 
 	thread_id thread = spawn_thread(worker_entry, "pcloudfs worker",

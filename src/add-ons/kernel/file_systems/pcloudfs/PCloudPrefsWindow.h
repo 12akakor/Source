@@ -63,7 +63,6 @@ private:
 		BStringView*	fCacheInfo;
 		BTextControl*	fUsername;
 		BTextControl*	fPassword;
-		BTextControl*	fCode;
 		BTextControl*	fMountPoint;
 		BButton*		fLoginButton;
 		BMessenger		fMessenger;
