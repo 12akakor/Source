@@ -4,6 +4,9 @@ UsePrivateKernelHeaders ;
 UsePrivateHeaders shared ;
 
 SimpleTest advisory_locking_test : advisory_locking_test.cpp ;
+SimpleTest profiler_detach_test : profiler_detach_test.cpp ;
+SimpleTest pipe_fd_table_full_test : pipe_fd_table_full_test.cpp ;
+SimpleTest scheduler_cpu_count_test : scheduler_cpu_count_test.cpp ;
 
 SimpleTest thread_affinity_other : thread_affinity_other.cpp ;
 SimpleTest thread_churn_test : thread_churn_test.cpp ;

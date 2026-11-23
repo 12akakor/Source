@@ -4,3 +4,7 @@ libnvmm_preempt_race
 ipv6_ext_header_test
 net_ioctl_permissions_test
 thread_churn_test
+profiler_detach_test
+scheduler_cpu_count_test
+pipe_fd_table_full_test
+vfork_malloc_test
