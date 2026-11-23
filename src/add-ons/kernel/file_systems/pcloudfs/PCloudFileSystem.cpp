@@ -1,7 +1,6 @@
 /*
- * Copyright 2026, Akakor. All rights reserved.
+ * Copyright 2026 Akakor. All rights reserved.
  * Distributed under the terms of the MIT License.
- *
  * SPDX-License-Identifier: MIT
  */
 
