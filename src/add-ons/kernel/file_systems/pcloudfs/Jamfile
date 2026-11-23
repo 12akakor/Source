@@ -67,4 +67,5 @@ Application pcloudfs_prefs
 	bnetapi be network shared [ TargetLibstdc++ ]
 ;
 
-AddFilesToHaikuImage home tests : pcloudfs_test pcloudctl pcloudfs_prefs pcloudfs ;
+AddFilesToHaikuImage home tests : pcloudfs_test pcloudctl pcloudfs_prefs ;
+AddFilesToHaikuImage home config add-ons userlandfs : pcloudfs ;
