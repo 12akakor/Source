@@ -35,6 +35,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 #include <utility>
 
 
@@ -235,25 +236,47 @@ static mutex sReceivingProtocolLock;
 uint16
 IPv6Header::GetHeaderOffset(net_buffer* buffer, uint32 headerCode) const
 {
-	uint16 offset = sizeof(struct ip6_hdr);
+	// The returned offset is 0 when the extension headers are malformed:
+	// more than kMaxExtensionHeaders of them, or one that runs past the end
+	// of the packet (airos-works/haiku#128).
+	static const int kMaxExtensionHeaders = 16;
+
+	uint32 offset = sizeof(struct ip6_hdr);
 	uint8 next = header.ip6_nxt;
+	int count = 0;
 
 	// these are the extension headers that might be supported one day
+	// (ESP is not among them: what follows it is encrypted)
 	while (next != headerCode
 		&& (next == IPPROTO_HOPOPTS
 			|| next == IPPROTO_ROUTING
 			|| next == IPPROTO_FRAGMENT
-			|| next == IPPROTO_ESP
 			|| next == IPPROTO_AH
 			|| next == IPPROTO_DSTOPTS)) {
+		if (++count > kMaxExtensionHeaders)
+			return 0;
+
 		struct ip6_ext extensionHeader;
 		status_t status = gBufferModule->read(buffer, offset,
 			&extensionHeader, sizeof(ip6_ext));
 		if (status != B_OK)
-			break;
+			return 0;
+
+		uint32 length;
+		if (next == IPPROTO_FRAGMENT)
+			length = sizeof(struct ip6_frag);
+		else if (next == IPPROTO_AH) {
+			// the authentication header counts 4-byte units, minus 2
+			length = ((uint32)extensionHeader.ip6e_len + 2) * 4;
+		} else {
+			// the others count 8-byte units beyond the first 8 bytes
+			length = ((uint32)extensionHeader.ip6e_len + 1) * 8;
+		}
 
 		next = extensionHeader.ip6e_nxt;
-		offset += extensionHeader.ip6e_len;
+		offset += length;
+		if (offset > buffer->size || offset > 0xffff)
+			return 0;
 	}
 
 	// were we looking for a specific header?
@@ -624,6 +647,8 @@ send_fragments(ipv6_protocol* protocol, struct net_route* route,
 	// TODO: currently FragHeader goes always as the last one, but in theory
 	// ext. headers like AuthHeader and DestOptions should go after it.
 	uint16 headersLength = originalHeader->GetHeaderOffset(buffer);
+	if (headersLength == 0)
+		return B_BAD_DATA;
 	uint16 extensionHeadersLength = headersLength
 		- sizeof(ip6_hdr) + sizeof(ip6_frag);
 	uint32 bytesLeft = buffer->size - headersLength;
@@ -993,6 +1018,10 @@ status_t
 ipv6_open(net_protocol* _protocol)
 {
 	ipv6_protocol* protocol = (ipv6_protocol*)_protocol;
+
+	// Only root may open raw sockets, as for IPv4 (airos-works/haiku#128)
+	if (geteuid() != 0)
+		return B_NOT_ALLOWED;
 
 	RawSocket* raw = new (std::nothrow) RawSocket(protocol->socket);
 	if (raw == NULL)
@@ -1509,6 +1538,8 @@ ipv6_receive_data(net_buffer* buffer)
 
 	// get the transport protocol and transport header offset
 	uint16 transportHeaderOffset = header.GetHeaderOffset(buffer);
+	if (transportHeaderOffset == 0)
+		return B_BAD_DATA;
 	uint8 protocol = buffer->protocol;
 
 	// remove any trailing/padding data

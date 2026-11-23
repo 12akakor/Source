@@ -338,6 +338,13 @@ enum {
 static const int kTimestampFactor = 1000;
 	// conversion factor between usec system time and msec tcp time
 
+static const uint32 kMinimumSendSegmentSize = 216;
+	// The smallest maximum segment size (data plus options) we accept from a
+	// peer's SYN or from an ICMP "fragmentation needed" error, as FreeBSD's
+	// net.inet.tcp.minmss. A smaller size leaves no room for data once the
+	// options (up to 40 bytes) are taken off, and a peer could use it to make
+	// us send empty segments for ever (airos-works/haiku#128).
+
 
 static inline status_t
 posix_error(status_t error)
@@ -1563,8 +1570,9 @@ TCPEndpoint::_PrepareReceivePath(tcp_segment_header& segment)
 			// The maximum size of a segment that a TCP endpoint really sends,
 			// the "effective send MSS", MUST be the smaller of the send MSS and
 			// the largest transmission size permitted by the IP layer:
-			fSendMaxSegmentSize = min_c(segment.max_segment_size,
-				_MaxSegmentSize(*PeerAddress()));
+			fSendMaxSegmentSize = min_c(
+				max_c((uint32)segment.max_segment_size, kMinimumSendSegmentSize),
+				(uint32)_MaxSegmentSize(*PeerAddress()));
 		}
 
 		if (segment.options & TCP_HAS_WINDOW_SCALE) {
@@ -2170,7 +2178,11 @@ TCPEndpoint::ErrorReceived(net_error error, net_error_data* errorData,
 	MutexLocker locker(fLock);
 
 	if (error == B_NET_ERROR_MESSAGE_SIZE && errorData != NULL) {
-		uint32 newMaxSegmentSize = errorData->mtu - sizeof(tcp_header);
+		// errorData->mtu is the room left after the IP header; the floor
+		// keeps a forged error from shrinking segments to nothing
+		uint32 newMaxSegmentSize = errorData->mtu > sizeof(tcp_header)
+			? errorData->mtu - sizeof(tcp_header) : 0;
+		newMaxSegmentSize = max_c(newMaxSegmentSize, kMinimumSendSegmentSize);
 		if (fSendMaxSegmentSize > newMaxSegmentSize) {
 			fSendMaxSegmentSize = newMaxSegmentSize;
 			gStackModule->set_timer(&fRetransmitTimer, 0);
@@ -2592,8 +2604,9 @@ TCPEndpoint::_SendQueued(bool force)
 	}
 
 	do {
-		uint32 segmentMaxSize = fSendMaxSegmentSize
-			- tcp_options_length(segment);
+		uint32 optionsLength = tcp_options_length(segment);
+		uint32 segmentMaxSize = fSendMaxSegmentSize > optionsLength
+			? fSendMaxSegmentSize - optionsLength : 0;
 		uint32 segmentLength = min_c(length, segmentMaxSize);
 
 		if ((fSendNext + segmentLength) == fSendQueue.LastSequence() && !force) {
@@ -2642,6 +2655,12 @@ TCPEndpoint::_SendQueued(bool force)
 		length -= segmentLength;
 		segment.flags &= ~(TCP_FLAG_SYNCHRONIZE | TCP_FLAG_RESET
 			| TCP_FLAG_FINISH);
+
+		if (segmentLength == 0) {
+			// no room for data in a segment: sending again would only repeat
+			// this empty one for ever (airos-works/haiku#128)
+			break;
+		}
 
 		if (retransmit)
 			break;

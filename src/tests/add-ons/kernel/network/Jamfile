@@ -19,6 +19,8 @@ HaikuInstall install-userland-networking
 	: installed-userland-networking
 ;
 
+SimpleTest ipv6_ext_header_test : ipv6_ext_header_test.c : network ;
+
 SubInclude HAIKU_TOP src tests add-ons kernel network core ;
 SubInclude HAIKU_TOP src tests add-ons kernel network interfaces ;
 #SubInclude HAIKU_TOP src tests add-ons kernel network ppp ;
