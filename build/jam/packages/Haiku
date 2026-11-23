@@ -118,6 +118,7 @@ AddFilesToPackage add-ons kernel interrupt_controllers :
 AddFilesToPackage add-ons kernel power cpufreq :
 	amd_pstates@x86,x86_64
 	intel_pstates@x86,x86_64
+	jh7110_cpufreq@riscv64
 	;
 AddFilesToPackage add-ons kernel power cpuidle :
 	x86_cstates@x86,x86_64
@@ -167,7 +168,8 @@ AddNewDriversToPackage network :
 	virtio_net
 	;
 AddNewDriversToPackage input :
-	hyperv_hid@x86,x86_64
+	hyperv_hid@x86,x86_64,arm64
+	hyperv_kbd@x86,x86_64,arm64
 	i2c_elan@x86,x86_64,arm64
 	i2c_goodix@x86,x86_64
 	i2c_hid
