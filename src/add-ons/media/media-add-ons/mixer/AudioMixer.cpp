@@ -477,6 +477,16 @@ AudioMixer::_AutoStop()
 	if (roster->GetNodeFor(outputID, &output) != B_OK)
 		return;
 
+	// While something records from this sound card it keeps running:
+	// stopping it would end the recording early (#151).
+	media_output recording;
+	int32 recordings = 0;
+	if (roster->GetConnectedOutputsFor(output, &recording, 1, &recordings)
+			== B_OK && recordings > 0) {
+		roster->ReleaseNode(output);
+		return;
+	}
+
 	roster->StopNode(output, 0, true);
 
 	roster->ReleaseNode(output);
