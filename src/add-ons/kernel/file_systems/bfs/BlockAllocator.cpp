@@ -819,12 +819,6 @@ BlockAllocator::AllocateBlocks(Transaction& transaction, int32 groupIndex,
 	if (fAllowedEndBlock > fVolume->NumBlocks())
 		return B_BAD_VALUE;
 
-	// A run shorter than minimum cannot be used; round up what is needed.
-	if (needed > 0 && minimum > 1)
-		needed = round_up((uint32)needed, (uint32)minimum);
-	if (needed >= maximum)
-		needed = 0;
-
 	FUNCTION_START(("group = %" B_PRId32 ", start = %" B_PRIu16
 		", maximum = %" B_PRIu16 ", minimum = %" B_PRIu16 "\n",
 		groupIndex, start, maximum, minimum));
