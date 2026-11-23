@@ -97,3 +97,5 @@ UnitTestLib librootposixtest.so :
 
 SubInclude HAIKU_TOP src tests system libroot posix math ;
 SubInclude HAIKU_TOP src tests system libroot posix string ;
+
+SimpleTest vfork_malloc_test : vfork_malloc_test.cpp ;
