@@ -32,3 +32,4 @@ SubInclude HAIKU_TOP src tests kits media soundplayer ;
 SubInclude HAIKU_TOP src tests kits media streamer_sniff_test ;
 SubInclude HAIKU_TOP src tests kits media wav_reader_test ;
 
+SimpleTest mixer_record_test : mixer_record_test.cpp : be ;
