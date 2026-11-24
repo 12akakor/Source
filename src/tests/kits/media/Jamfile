@@ -20,7 +20,7 @@ UnitTestLib libmediatest.so :
 	: be media [ TargetLibstdc++ ] [ TargetLibsupc++ ]
 ;
 
-SimpleTest mixer_record_test : mixer_record_test.cpp : be ;
+SimpleTest mixer_record_test : mixer_record_test.cpp : be media ;
 
 SubInclude HAIKU_TOP src tests kits media media_decoder ;
 SubInclude HAIKU_TOP src tests kits media mpeg2_decoder_test ;
