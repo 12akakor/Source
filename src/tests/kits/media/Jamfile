@@ -20,6 +20,8 @@ UnitTestLib libmediatest.so :
 	: be media [ TargetLibstdc++ ] [ TargetLibsupc++ ]
 ;
 
+SimpleTest mixer_record_test : mixer_record_test.cpp : be ;
+
 SubInclude HAIKU_TOP src tests kits media media_decoder ;
 SubInclude HAIKU_TOP src tests kits media mpeg2_decoder_test ;
 SubInclude HAIKU_TOP src tests kits media mp3_decoder_test ;
@@ -31,5 +33,3 @@ SubInclude HAIKU_TOP src tests kits media playsound ;
 SubInclude HAIKU_TOP src tests kits media soundplayer ;
 SubInclude HAIKU_TOP src tests kits media streamer_sniff_test ;
 SubInclude HAIKU_TOP src tests kits media wav_reader_test ;
-
-SimpleTest mixer_record_test : mixer_record_test.cpp : be ;
