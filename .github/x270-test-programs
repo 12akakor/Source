@@ -8,3 +8,5 @@ profiler_detach_test
 scheduler_cpu_count_test
 pipe_fd_table_full_test
 vfork_malloc_test
+wchar_thread_test
+mixer_record_test

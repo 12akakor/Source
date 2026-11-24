@@ -97,5 +97,7 @@ UnitTestLib librootposixtest.so :
 
 SimpleTest vfork_malloc_test : vfork_malloc_test.cpp ;
 
+SimpleTest wchar_thread_test : wchar_thread_test.cpp : [ TargetLibstdc++ ] ;
+
 SubInclude HAIKU_TOP src tests system libroot posix math ;
 SubInclude HAIKU_TOP src tests system libroot posix string ;
