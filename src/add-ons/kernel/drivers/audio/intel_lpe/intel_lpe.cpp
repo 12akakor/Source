@@ -852,9 +852,8 @@ playback_thread(void* data)
 		release_spinlock(&driver->positionLock);
 		restore_interrupts(state);
 
-		// about every 2 seconds for the first 30 seconds of a stream
-		if (record < PLAYBACK_BUFFERS && changes < 1500
-			&& changes++ % 94 == 0) {
+		// about every 10 seconds
+		if (record < PLAYBACK_BUFFERS && changes++ % 470 == 0) {
 			report_capture(driver, (record + 1) % PLAYBACK_BUFFERS);
 		}
 
