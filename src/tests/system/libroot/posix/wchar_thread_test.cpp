@@ -14,9 +14,14 @@
 
 #include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <syslog.h>
 #include <wchar.h>
+
+
+extern "C" size_t mbstowcs(wchar_t* pwc, const char* s, size_t n);
+extern "C" size_t wcstombs(char* s, const wchar_t* pwcs, size_t n);
 
 
 static const char* kASCII = "the quick brown fox jumps over the lazy dog";
