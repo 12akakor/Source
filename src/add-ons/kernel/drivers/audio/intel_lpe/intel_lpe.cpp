@@ -727,6 +727,40 @@ microphone_off(intel_lpe_driver* driver)
 }
 
 
+// TODO: remove before submitting; shows whether the capture path works
+static void
+dump_microphone_path(intel_lpe_driver* driver)
+{
+	static const uint8 kRegisters[] = { 0x0d, 0x1c, 0x27, 0x3c, 0x3e, 0x61,
+		0x62, 0x63, 0x64, 0x65, 0x70, 0x84, 0x93 };
+	for (size_t i = 0; i < B_COUNT_OF(kRegisters); i++) {
+		uint16 value = 0;
+		rt5640_read(driver, kRegisters[i], &value);
+		TRACE_ALWAYS("capture: MX-%02X = %04x\n", kRegisters[i], value);
+	}
+}
+
+
+static void
+report_capture(intel_lpe_driver* driver, uint32 buffer)
+{
+	sof_ipc_stream_posn position;
+	lpe_dsp_read_position(&driver->dsp, LPE_CAPTURE, &position);
+	const int16* samples = (const int16*)(driver->ring[LPE_CAPTURE]
+		+ buffer * PLAYBACK_BUFFER_SIZE);
+	int32 peak[2] = { 0, 0 };
+	for (uint32 i = 0; i < PLAYBACK_BUFFER_FRAMES * 2; i++) {
+		int32 value = samples[i] < 0 ? -(int32)samples[i] : samples[i];
+		if (value > peak[i & 1])
+			peak[i & 1] = value;
+	}
+	TRACE_ALWAYS("capture: host %" B_PRIu64 ", dai %" B_PRIu64
+		", buffer %" B_PRIu32 ", peak L %" B_PRId32 " R %" B_PRId32
+		", frames %" B_PRId64 "\n", position.host_posn, position.dai_posn,
+		buffer, peak[0], peak[1], driver->recordedFrames);
+}
+
+
 static status_t
 setup_speaker_playback(intel_lpe_driver* driver)
 {
@@ -774,6 +808,7 @@ playback_thread(void* data)
 {
 	intel_lpe_driver* driver = (intel_lpe_driver*)data;
 	uint32 last = 0;
+	uint32 changes = 0;
 
 	while (atomic_get(&driver->running) != 0) {
 		sof_ipc_stream_posn position;
@@ -810,6 +845,12 @@ playback_thread(void* data)
 		}
 		release_spinlock(&driver->positionLock);
 		restore_interrupts(state);
+
+		// about every 2 seconds for the first 30 seconds of a stream
+		if (record < PLAYBACK_BUFFERS && changes < 1500
+			&& changes++ % 94 == 0) {
+			report_capture(driver, (record + 1) % PLAYBACK_BUFFERS);
+		}
 
 		release_sem_etc(driver->bufferReadySem, 1, B_DO_NOT_RESCHEDULE);
 		snooze(PLAYBACK_BUFFER_TIME - POLL_EARLY_WAKEUP);
@@ -874,7 +915,8 @@ playback_start(intel_lpe_driver* driver)
 	if (!driver->capturing) {
 		TRACE_ALWAYS("recording did not start\n");
 		microphone_off(driver);
-	}
+	} else
+		dump_microphone_path(driver);
 
 	{
 		MutexLocker outputLocker(driver->outputLock);
