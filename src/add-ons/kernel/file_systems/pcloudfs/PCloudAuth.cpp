@@ -41,7 +41,7 @@ PCloudAuth::PCloudAuth()
 	:
 	fHttp(),
 	fSettingsPath(),
-	fApiHost(kPCloudApiHost),
+	fApiHost(kPCloudApiHostEurope),
 	fUsername(),
 	fPassword(),
 	fAccessToken(),
@@ -212,7 +212,7 @@ PCloudAuth::_Load()
 
 	PCloudJson::GetString(settings, kSettingApiHost, fApiHost);
 	if (fApiHost.Length() == 0)
-		fApiHost.SetTo(kPCloudApiHost);
+		fApiHost.SetTo(kPCloudApiHostEurope);
 	PCloudJson::GetString(settings, kSettingUsername, fUsername);
 	PCloudJson::GetString(settings, kSettingPassword, fPassword);
 	PCloudJson::GetString(settings, kSettingAccessToken, fAccessToken);
