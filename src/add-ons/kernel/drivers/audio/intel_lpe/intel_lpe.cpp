@@ -31,6 +31,7 @@
 #include <hmulti_audio.h>
 
 #include <FindDirectory.h>
+#include <condition_variable.h>
 
 #include <new>
 
@@ -84,6 +85,10 @@
 // how long the first playback waits for the DSP to boot
 #define DSP_READY_WAIT				(15 * 1000000LL)
 
+#define DSP_BOOTING					0
+#define DSP_READY					1
+#define DSP_FAILED					2
+
 // The playback ring: two buffers of 1024 frames, one page each.
 #define PLAYBACK_RATE				48000
 #define PLAYBACK_CHANNELS			2
@@ -117,6 +122,10 @@ struct intel_lpe_driver {
 	mutex					dspLock;
 	lpe_dsp					dsp;
 	bool					dspInitialized;
+
+	// DSP_BOOTING until start_dsp() is done; dspBooted is notified then.
+	int32					dspState;
+	ConditionVariable		dspBooted;
 
 	// one ring per direction (LPE_PLAYBACK, LPE_CAPTURE)
 	area_id					ringArea[LPE_STREAM_COUNT];
@@ -363,8 +372,8 @@ read_firmware(uint8** _data, size_t* _size)
 }
 
 
-static void
-start_dsp(intel_lpe_driver* driver)
+static status_t
+boot_dsp(intel_lpe_driver* driver)
 {
 	uint8* image = NULL;
 	size_t size = 0;
@@ -377,7 +386,7 @@ start_dsp(intel_lpe_driver* driver)
 	if (status != B_OK) {
 		TRACE_ALWAYS("no SOF firmware (%s): %s\n", FIRMWARE_NAME,
 			strerror(status));
-		return;
+		return status;
 	}
 
 	MutexLocker dspLocker(driver->dspLock);
@@ -391,6 +400,39 @@ start_dsp(intel_lpe_driver* driver)
 
 	if (status != B_OK)
 		TRACE_ALWAYS("DSP did not boot: %s\n", strerror(status));
+	return status;
+}
+
+
+/*!	Boots the DSP once the firmware can be read from the boot volume, and
+	records the outcome for wait_for_dsp().
+*/
+static void
+start_dsp(intel_lpe_driver* driver)
+{
+	status_t status = boot_dsp(driver);
+	atomic_set(&driver->dspState, status == B_OK ? DSP_READY : DSP_FAILED);
+	driver->dspBooted.NotifyAll();
+}
+
+
+/*!	Waits until start_dsp() is done. Called without driver->lock held, so
+	that open and close are not blocked meanwhile.
+*/
+static status_t
+wait_for_dsp(intel_lpe_driver* driver)
+{
+	if (atomic_get(&driver->dspState) == DSP_BOOTING) {
+		ConditionVariableEntry entry;
+		driver->dspBooted.Add(&entry);
+		if (atomic_get(&driver->dspState) == DSP_BOOTING) {
+			status_t status = entry.Wait(B_CAN_INTERRUPT | B_RELATIVE_TIMEOUT,
+				DSP_READY_WAIT);
+			if (status == B_INTERRUPTED)
+				return status;
+		}
+	}
+	return atomic_get(&driver->dspState) == DSP_READY ? B_OK : B_DEV_NOT_READY;
 }
 
 
@@ -539,29 +581,6 @@ static const rt5640_register_value kPrivateInit[] = {
 #define RT5640_PR_CHARGE_PUMP_1		0x24
 #define RT5640_PR_MAIN_AMP_2		0x37
 #define RT5640_PR_HP_DCC_1			0x77
-
-// SUS GPIO 21 (pad 2): Android drives it low as
-// "byt_ffrd8_tristate_buffer_gpio"; the firmware leaves it high.
-#define SUS_BASE					0xfed0e000
-#define SUS_PAD_21					2
-
-
-static void
-set_tristate_buffer_gpio()
-{
-	uint8* sus;
-	area_id area = map_physical_memory("intel_lpe SUS pads", SUS_BASE,
-		B_PAGE_SIZE, B_ANY_KERNEL_ADDRESS,
-		B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA, (void**)&sus);
-	if (area < 0)
-		return;
-	volatile uint32* registers = (volatile uint32*)(sus + SUS_PAD_21 * 16);
-	// GPIO function, output enabled (VAL bit 1 clear), level low (bit 0)
-	registers[0] = (registers[0] & ~7) | 1;
-	registers[2] = (registers[2] & ~3) | 4;
-	delete_area(area);
-}
-
 
 static void
 rt5640_update(intel_lpe_driver* driver, uint8 reg, uint16 mask, uint16 value)
@@ -733,40 +752,6 @@ microphone_off(intel_lpe_driver* driver)
 }
 
 
-// TODO: remove before submitting; shows whether the capture path works
-static void
-dump_microphone_path(intel_lpe_driver* driver)
-{
-	static const uint8 kRegisters[] = { 0x0d, 0x1c, 0x27, 0x3c, 0x3e, 0x61,
-		0x62, 0x63, 0x64, 0x65, 0x70, 0x84, 0x93 };
-	for (size_t i = 0; i < B_COUNT_OF(kRegisters); i++) {
-		uint16 value = 0;
-		rt5640_read(driver, kRegisters[i], &value);
-		TRACE_ALWAYS("capture: MX-%02X = %04x\n", kRegisters[i], value);
-	}
-}
-
-
-static void
-report_capture(intel_lpe_driver* driver, uint32 buffer)
-{
-	sof_ipc_stream_posn position;
-	lpe_dsp_read_position(&driver->dsp, LPE_CAPTURE, &position);
-	const int16* samples = (const int16*)(driver->ring[LPE_CAPTURE]
-		+ buffer * PLAYBACK_BUFFER_SIZE);
-	int32 peak[2] = { 0, 0 };
-	for (uint32 i = 0; i < PLAYBACK_BUFFER_FRAMES * 2; i++) {
-		int32 value = samples[i] < 0 ? -(int32)samples[i] : samples[i];
-		if (value > peak[i & 1])
-			peak[i & 1] = value;
-	}
-	TRACE_ALWAYS("capture: host %" B_PRIu64 ", dai %" B_PRIu64
-		", buffer %" B_PRIu32 ", peak L %" B_PRId32 " R %" B_PRId32
-		", frames %" B_PRId64 "\n", position.host_posn, position.dai_posn,
-		buffer, peak[0], peak[1], driver->recordedFrames);
-}
-
-
 static status_t
 setup_speaker_playback(intel_lpe_driver* driver)
 {
@@ -814,7 +799,6 @@ playback_thread(void* data)
 {
 	intel_lpe_driver* driver = (intel_lpe_driver*)data;
 	uint32 last = 0;
-	uint32 changes = 0;
 
 	while (atomic_get(&driver->running) != 0) {
 		sof_ipc_stream_posn position;
@@ -852,11 +836,6 @@ playback_thread(void* data)
 		release_spinlock(&driver->positionLock);
 		restore_interrupts(state);
 
-		// about every 10 seconds
-		if (record < PLAYBACK_BUFFERS && changes++ % 470 == 0) {
-			report_capture(driver, (record + 1) % PLAYBACK_BUFFERS);
-		}
-
 		release_sem_etc(driver->bufferReadySem, 1, B_DO_NOT_RESCHEDULE);
 		snooze(PLAYBACK_BUFFER_TIME - POLL_EARLY_WAKEUP);
 	}
@@ -867,13 +846,8 @@ playback_thread(void* data)
 static status_t
 playback_start(intel_lpe_driver* driver)
 {
-	// the DSP boots once the firmware can be read from the boot volume
-	bigtime_t timeout = system_time() + DSP_READY_WAIT;
-	while (!driver->dsp.ready) {
-		if (system_time() > timeout)
-			return B_DEV_NOT_READY;
-		snooze(100000);
-	}
+	if (atomic_get(&driver->dspState) != DSP_READY)
+		return B_DEV_NOT_READY;
 
 	int32 count;
 	if (get_sem_count(driver->bufferReadySem, &count) == B_OK && count > 0)
@@ -920,8 +894,7 @@ playback_start(intel_lpe_driver* driver)
 	if (!driver->capturing) {
 		TRACE_ALWAYS("recording did not start\n");
 		microphone_off(driver);
-	} else
-		dump_microphone_path(driver);
+	}
 
 	{
 		MutexLocker outputLocker(driver->outputLock);
@@ -1118,6 +1091,7 @@ describe_ring(uint8* ring, buffer_desc** buffers)
 {
 	for (int32 i = 0; i < PLAYBACK_BUFFERS; i++) {
 		buffer_desc descs[PLAYBACK_CHANNELS];
+		memset(descs, 0, sizeof(descs));
 		for (int32 channel = 0; channel < PLAYBACK_CHANNELS; channel++) {
 			descs[channel].base = (char*)ring
 				+ i * PLAYBACK_BUFFER_SIZE + channel * PLAYBACK_SAMPLE_SIZE;
@@ -1183,6 +1157,12 @@ buffer_exchange(intel_lpe_driver* driver, multi_buffer_info* data)
 	if (!IS_USER_ADDRESS(data)
 		|| user_memcpy(&info, data, sizeof(info)) != B_OK) {
 		return B_BAD_ADDRESS;
+	}
+
+	if (!driver->running) {
+		status_t status = wait_for_dsp(driver);
+		if (status != B_OK)
+			return status;
 	}
 
 	{
@@ -1408,10 +1388,10 @@ intel_lpe_register_device(device_node* node)
 static status_t
 intel_lpe_init_driver(device_node* node, void** _driverCookie)
 {
-	intel_lpe_driver* driver = new(std::nothrow) intel_lpe_driver;
+	// value-initialized: every field starts at zero
+	intel_lpe_driver* driver = new(std::nothrow) intel_lpe_driver();
 	if (driver == NULL)
 		return B_NO_MEMORY;
-	memset(driver, 0, sizeof(*driver));
 	driver->node = node;
 	driver->pollThread = -1;
 	driver->playbackThread = -1;
@@ -1421,6 +1401,7 @@ intel_lpe_init_driver(device_node* node, void** _driverCookie)
 	mutex_init(&driver->dspLock, "intel_lpe dsp");
 	mutex_init(&driver->outputLock, "intel_lpe output");
 	B_INITIALIZE_SPINLOCK(&driver->positionLock);
+	driver->dspBooted.Init(driver, "intel_lpe dsp boot");
 
 	device_node* parent = sDeviceManager->get_parent_node(node);
 	uint64 handle = 0;
@@ -1452,8 +1433,6 @@ intel_lpe_init_driver(device_node* node, void** _driverCookie)
 		delete driver;
 		return status;
 	}
-
-	set_tristate_buffer_gpio();
 
 	driver->pollThread = spawn_kernel_thread(jack_poll_thread,
 		"intel_lpe poll", B_LOW_PRIORITY, driver);

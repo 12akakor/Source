@@ -107,6 +107,9 @@ mailbox_read(lpe_dsp* dsp, uint32 offset, void* buffer, size_t size)
 static void
 mailbox_write(lpe_dsp* dsp, uint32 offset, const void* buffer, size_t size)
 {
+	if (offset > LPE_BAR_SIZE || size > LPE_BAR_SIZE - offset)
+		return;
+
 	const uint32* words = (const uint32*)buffer;
 	for (size_t i = 0; i < size / 4; i++)
 		write32(dsp, offset + i * 4, words[i]);
@@ -289,7 +292,16 @@ parse_windows(lpe_dsp* dsp, const uint8* element, uint32 size)
 		const uint8* window = element + 8 + 16 + w * 24;
 		uint32 type = get32(window + 4);
 		uint32 windowSize = get32(window + 16);
-		uint32 windowOffset = LPE_MBOX_OFFSET + get32(window + 20);
+		uint32 relativeOffset = get32(window + 20);
+		// the image may be damaged: every window must lie in the BAR
+		if (relativeOffset > LPE_BAR_SIZE - LPE_MBOX_OFFSET
+			|| windowSize > LPE_BAR_SIZE - LPE_MBOX_OFFSET - relativeOffset) {
+			TRACE_ALWAYS("window type %" B_PRIu32 " at %#" B_PRIx32 ", %#"
+				B_PRIx32 " bytes is outside the BAR, ignored\n", type,
+				relativeOffset, windowSize);
+			continue;
+		}
+		uint32 windowOffset = LPE_MBOX_OFFSET + relativeOffset;
 		TRACE_ALWAYS("window type %" B_PRIu32 ": %#" B_PRIx32 ", %#" B_PRIx32
 			" bytes\n", type, windowOffset, windowSize);
 		switch (type) {
