@@ -187,21 +187,29 @@ PCloudHttp::_Request(const char* method, const BString& url,
 			return status;
 		}
 
-		BNetworkAddress address(target.host.String(), target.port);
+		BNetworkAddress address(AF_INET, target.host.String(), target.port);
 		status = address.InitCheck();
+		if (status != B_OK) {
+			address.SetTo(target.host.String(), target.port);
+			status = address.InitCheck();
+		}
 		if (status != B_OK) {
 			_SetError("could not resolve %s: %s", target.host.String(),
 				strerror(status));
 			return status;
 		}
+		PCLOUD_LOG_INFO("HTTP: %s resolved to %s", target.host.String(),
+			address.ToString().String());
 
 		BSecureSocket socket(address, kPCloudConnectTimeout);
 		status = socket.InitCheck();
 		if (status != B_OK || !socket.IsConnected()) {
-			_SetError("TLS connect failed for %s: %s", target.host.String(),
+			_SetError("TLS connect failed for %s (%s): %s",
+				target.host.String(), address.ToString().String(),
 				strerror(status == B_OK ? B_TIMED_OUT : status));
 			return status == B_OK ? B_TIMED_OUT : status;
 		}
+		PCLOUD_LOG_INFO("HTTP: TLS connected to %s", address.ToString().String());
 		status = socket.SetTimeout(kPCloudRequestTimeout);
 		if (status != B_OK) {
 			_SetError("could not set socket timeout: %s", strerror(status));
