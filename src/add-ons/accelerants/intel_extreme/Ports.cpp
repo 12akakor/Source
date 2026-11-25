@@ -3106,6 +3106,29 @@ DigitalDisplayInterface::SetDisplayMode(display_mode* target, uint32 colorMode)
 }
 
 
+/*!	The highest pixel clock (kHz) the monitor states in its EDID range limits, 0 if it has none.
+	Never below its own detailed timings, which some monitors list above the maximum they state.
+*/
+static uint32
+edid_max_pixel_clock(const edid1_info& edid)
+{
+	uint32 stated = 0;
+	uint32 listed = 0;
+	for (uint32 i = 0; i < EDID1_NUM_DETAILED_MONITOR_DESC; i++) {
+		const edid1_detailed_monitor& monitor = edid.detailed_monitor[i];
+		if (monitor.monitor_desc_type == EDID1_MONITOR_RANGES)
+			stated = monitor.data.monitor_range.max_clock * 10000;
+		else if (monitor.monitor_desc_type == EDID1_IS_DETAILED_TIMING)
+			listed = max_c(listed, (uint32)monitor.data.detailed_timing.pixel_clock * 10);
+	}
+	if (stated == 0)
+		return 0;
+
+	// a listed mode may be asked for with its clock adjusted to a round refresh rate
+	return max_c(stated, listed + listed / 100);
+}
+
+
 uint32
 DigitalDisplayInterface::MaxPixelClock()
 {
@@ -3114,7 +3137,41 @@ DigitalDisplayInterface::MaxPixelClock()
 		uint32 lanes = min_c(fDpcd[DP_MAX_LANE_COUNT] & DP_MAX_LANE_COUNT_MASK, 4);
 		return dp_max_link_rate(fDpcd) * lanes / 3;
 	}
-	return fMaxTmdsClock;
+
+	// TMDS: the dual mode adaptor's limit and, on a combo PHY port, the monitor's own
+	uint32 limit = fMaxTmdsClock;
+	if (_IsComboPhyPort() && fEDIDState == B_OK) {
+		uint32 monitorLimit = edid_max_pixel_clock(fEDIDInfo);
+		if (monitorLimit != 0 && (limit == 0 || monitorLimit < limit))
+			limit = monitorLimit;
+	}
+	return limit;
+}
+
+
+/*!	Whether SetDisplayMode() will find a PLL setting for the pixel clock (kHz). A TMDS sink on a
+	combo PHY port takes its clock from ComputeHdmiDpll(), which has none for some frequencies.
+*/
+bool
+DigitalDisplayInterface::SupportsPixelClock(uint32 pixelClock)
+{
+	if (!_IsComboPhyPort() || fPipe == NULL || _IsInternalPanel())
+		return true;
+
+	// as SetDisplayMode(): a port the BIOS lit goes by its transcoder, one we light by its sink
+	bool tmds = !fDisplayPortSink;
+	const uint32 transcoder = fPipe->Index() - INTEL_PIPE_A;
+	if (_IsPortLit(transcoder)) {
+		uint32 mode = (read32(ddi_func_ctl_register(transcoder)) & PIPE_DDI_MODESEL_MASK)
+			>> PIPE_DDI_MODESEL_SHIFT;
+		tmds = mode == PIPE_DDI_MODE_DVI || mode == PIPE_DDI_MODE_HDMI;
+	}
+	if (!tmds)
+		return true;
+
+	int p, q, k;
+	uint32 dco;
+	return ComputeHdmiDpll(pixelClock, &p, &q, &k, &dco);
 }
 
 

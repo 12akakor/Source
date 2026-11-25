@@ -154,6 +154,11 @@ arch_thread_control(const char* subsystem, uint32 function, void* buffer,
 				return B_BAD_ADDRESS;
 			}
 
+			// WRMSR faults in kernel mode on a non-canonical base. Every user
+			// address is canonical, and no other base is of use to userland.
+			if (base > USER_TOP)
+				return B_BAD_VALUE;
+
 			Thread* thread = thread_get_current_thread();
 			thread->arch_info.user_gs_base = base;
 			x86_write_msr(IA32_MSR_KERNEL_GS_BASE, base);
@@ -436,6 +441,12 @@ arch_setup_signal_frame(Thread* thread, struct sigaction* action,
 	arch_cpu_disable_user_access();
 	frame->di = (addr_t)userSignalFrameData;
 	frame->flags &= ~(uint64)(X86_EFLAGS_TRAP | X86_EFLAGS_DIRECTION);
+
+	// The handler is 64-bit code, but the signal may have interrupted 32-bit
+	// code. IRET with that CS and the handler's address would fault in kernel
+	// mode. The signal frame keeps the interrupted CS and SS for sigreturn.
+	frame->cs = USER_CODE_SELECTOR;
+	frame->ss = USER_DATA_SELECTOR;
 
 	return B_OK;
 }

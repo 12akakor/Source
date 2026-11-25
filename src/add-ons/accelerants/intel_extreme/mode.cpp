@@ -146,7 +146,9 @@ set_frame_buffer_registers(uint32 offset, uint32 hStart)
 		if (sharedInfo.device_type.InGroup(INTEL_GROUP_HAS)
 			|| sharedInfo.device_type.InGroup(INTEL_GROUP_VLV)
 			|| sharedInfo.device_type.InGroup(INTEL_GROUP_CHV)
+			|| sharedInfo.device_type.InGroup(INTEL_GROUP_BDW)
 //			|| sharedInfo.device_type.InGroup(INTEL_GROUP_SKY)
+			|| sharedInfo.device_type.InGroup(INTEL_GROUP_KBY)
 			|| sharedInfo.device_type.InGroup(INTEL_GROUP_ALD)) {
 			uint32 offsetValue = ((uint32)mode.v_display_start << 16) | hStart;
 			write32(INTEL_DISPLAY_A_OFFSET_HAS + offset, offsetValue);
@@ -247,6 +249,18 @@ max_port_pixel_clock()
 			limit = portLimit;
 	}
 	return limit;
+}
+
+
+//! Whether all connected ports have a PLL setting for the pixel clock (kHz)
+static bool
+ports_support_pixel_clock(uint32 pixelClock)
+{
+	for (uint32 i = 0; i < gInfo->port_count; i++) {
+		if (gInfo->ports[i] != NULL && !gInfo->ports[i]->SupportsPixelClock(pixelClock))
+			return false;
+	}
+	return true;
 }
 
 
@@ -493,6 +507,13 @@ intel_propose_display_mode(display_mode* target, const display_mode* low,
 	if (maxPixelClock != 0 && target->timing.pixel_clock > maxPixelClock) {
 		TRACE("%s: pixel clock %" B_PRIu32 " kHz above the port limit of %" B_PRIu32 " kHz\n",
 			__func__, target->timing.pixel_clock, maxPixelClock);
+		return B_BAD_VALUE;
+	}
+
+	// e.g. a TMDS clock the combo PHY's PLL has no dividers for
+	if (!ports_support_pixel_clock(target->timing.pixel_clock)) {
+		TRACE("%s: no PLL setting for a pixel clock of %" B_PRIu32 " kHz\n", __func__,
+			target->timing.pixel_clock);
 		return B_BAD_VALUE;
 	}
 
