@@ -293,6 +293,12 @@ DynamicThreadVector::_ResizeVector(unsigned minimumSize)
 		fGeneration = new Generation;
 		if (fGeneration == NULL)
 			return B_NO_MEMORY;
+
+		// A new vector has no blocks yet, so none can be stale: it is as
+		// current as the templates. At 0, once any TLS image had been
+		// unloaded, the thread's next access destroyed the blocks it had
+		// just made, and a thread-local value written once read back as 0.
+		fGeneration->SetCounter(TLSBlockTemplates::Get().GetGeneration(-1));
 	}
 
 	*(Generation**)*fVector = fGeneration;
