@@ -25,6 +25,10 @@
 #	include <util/fs_trim_support.h>
 #endif
 
+#ifndef FS_SHELL
+#	include <private/kernel/vfs.h>
+#endif
+
 
 #define BFS_IO_SIZE	65536
 
