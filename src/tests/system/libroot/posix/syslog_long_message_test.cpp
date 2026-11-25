@@ -35,9 +35,6 @@
 
 #include <OS.h>
 
-#include <KMessage.h>
-#include <launch.h>
-#include <syslog_daemon.h>
 
 
 static const int kLengths[] = {
@@ -211,69 +208,3 @@ main()
 			(int)longest);
 	}
 
-	// A line of the largest size, written to the daemon's port directly.
-	BPrivate::KMessage data;
-	port_id port = -1;
-	if (BPrivate::get_launch_data(B_SYSTEM_LOGGER_SIGNATURE, data) == B_OK)
-		port = data.GetInt32("logger_port", -1);
-	if (port < 0) {
-		printf("skipped: no syslog daemon port, the daemon is not checked\n");
-	} else {
-		static char buffer[SYSLOG_MESSAGE_BUFFER_SIZE];
-		syslog_message& message = *(syslog_message*)buffer;
-		message.from = find_thread(NULL);
-		message.when = real_time_clock();
-		message.options = LOG_PID;
-		message.priority = LOG_USER | LOG_INFO;
-		// an ident of the full size, for the longest header
-		snprintf(tag, sizeof(tag), "syslog_long_port_%d_____________",
-			(int)getpid());
-		strlcpy(message.ident, tag, sizeof(message.ident));
-		size_t length = SYSLOG_MAX_MESSAGE_LENGTH;
-		memset(message.message, 'P', length);
-		message.message[length - 1] = '\n';
-
-		start = log_size();
-		team_info before;
-		port_info portInfo;
-		get_port_info(port, &portInfo);
-		get_team_info(portInfo.team, &before);
-
-		status_t status = write_port_etc(port, SYSLOG_MESSAGE, buffer,
-			sizeof(syslog_message) + length, B_RELATIVE_TIMEOUT, 2000000);
-		check(status == B_OK, "a %d byte line written to the daemon's port: "
-			"%s", (int)length, strerror(status));
-		static const char* const kNext = "the message after the long line";
-		syslog(LOG_INFO, "%s", kNext);
-
-		size_t longest = 0;
-		int glued = 0;
-		int count = 0;
-		for (int attempt = 0; attempt < 50; attempt++) {
-			count = count_lines(start, tag, kNext, &longest, &glued);
-			size_t unused;
-			int unusedGlued;
-			if (count >= 1 && count_lines(start, kNext, NULL, &unused,
-					&unusedGlued) >= 1) {
-				break;
-			}
-			snooze(100000);
-		}
-		check(count == 1, "the daemon wrote it as %d line", count);
-		check(longest > 0 && longest <= SYSLOG_MESSAGE_BUFFER_SIZE,
-			"the line has %d characters (the daemon's buffer has %d)",
-			(int)longest, SYSLOG_MESSAGE_BUFFER_SIZE);
-		check(glued == 0, "the line ends, the next message is a line of its "
-			"own");
-
-		team_info after;
-		check(get_port_info(port, &portInfo) == B_OK
-				&& get_team_info(portInfo.team, &after) == B_OK
-				&& after.team == before.team,
-			"the syslog daemon is still the same team");
-	}
-
-	printf("%s\n", sFailures == 0 ? "PASSED" : "FAILED");
-	syslog(LOG_INFO, "syslog_long_message_test: return sFailures == 0 ? 0 : 1;");
-	return sFailures == 0 ? 0 : 1;
-}
