@@ -810,6 +810,9 @@ select_microphone(intel_lpe_driver* driver)
 }
 
 
+/*!	Takes outputLock: the headphone path updates the same power registers
+	from the jack thread.
+*/
 static void
 microphone_on(intel_lpe_driver* driver)
 {
@@ -1221,7 +1224,8 @@ static status_t
 get_enabled_channels(intel_lpe_driver* driver, multi_channel_enable* data)
 {
 	data->lock_source = B_MULTI_LOCK_INTERNAL;
-	for (int32 i = 0; i < PLAYBACK_CHANNELS; i++)
+	// the playback and the record channels
+	for (int32 i = 0; i < 2 * PLAYBACK_CHANNELS; i++)
 		B_SET_CHANNEL(data->enable_bits, i, true);
 	return B_OK;
 }
