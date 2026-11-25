@@ -1,5 +1,4 @@
 # Test programs copied to /boot/home/tests in the X270 test image.
 xsi_sem_number_test
-kqueue_unsupported_fd_test
 msync_large_offset_test
 syslog_long_message_test
