@@ -565,9 +565,10 @@ ModifiedPageQueue::_PageWriter()
 
 	while (fWriterThread >= 0) {
 		if (queue.Count() < kNumPages && sUnderQuotaCondition.EntriesCount() == 0) {
-			// wait the full amount when nobody's waiting for us
-			if (!fPageWriterCondition.Wait(PAGES_FLUSH_DURATION_LOCAL_QUOTA, true))
-				continue;
+			// wait the full amount when nobody's waiting for us, then write
+			// what there is: skipping the write on a timeout left the last
+			// pages below kNumPages unwritten until a sync
+			fPageWriterCondition.Wait(PAGES_FLUSH_DURATION_LOCAL_QUOTA, true);
 		}
 
 		page_num_t modifiedPages = queue.Count();
