@@ -96,16 +96,32 @@ PCloudAuth::LoginWithPassword(const BString& username,
 		"&username=%s&password=%s", BUrl::UrlEncode(username).String(),
 		BUrl::UrlEncode(password).String());
 
-	BString url;
-	url.SetToFormat("https://%s/userinfo?%s", kPCloudApiHost,
-		parameters.String());
-
-	PCLOUD_LOG_INFO("login: requesting userinfo for %s", username.String());
+	BString hosts[2];
+	hosts[0] = fApiHost;
+	hosts[1] = fApiHost == kPCloudApiHostEurope ? kPCloudApiHost
+		: kPCloudApiHostEurope;
 
 	BString response;
-	status_t status = fHttp.Get(url, "", response);
+	status_t status = B_ERROR;
+	for (int32 attempt = 0; attempt < 2; attempt++) {
+		BString url;
+		url.SetToFormat("https://%s/userinfo?%s", hosts[attempt].String(),
+			parameters.String());
+		PCLOUD_LOG_INFO("login: requesting userinfo from %s",
+			hosts[attempt].String());
+		status = fHttp.Get(url, "", response);
+		if (status == B_OK) {
+			fApiHost = hosts[attempt];
+			break;
+		}
+		PCLOUD_LOG_WARNING("login: %s unreachable: %s",
+			hosts[attempt].String(), fHttp.LastError().String());
+		response.Truncate(0);
+	}
 	if (status != B_OK) {
-		fLastError = fHttp.LastError();
+		fLastError.SetToFormat("Cannot contact pCloud (%s or %s). "
+			"Check the network connection and DNS.", kPCloudApiHost,
+			kPCloudApiHostEurope);
 		return status;
 	}
 

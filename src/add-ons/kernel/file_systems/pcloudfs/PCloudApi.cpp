@@ -278,7 +278,7 @@ PCloudApi::_Call(const char* method, const char* parameters, BMessage& reply)
 	}
 
 	BString url;
-	url.SetToFormat("https://%s/%s", kPCloudApiHost, method);
+	url.SetToFormat("https://%s/%s", fAuth.ApiHost().String(), method);
 	bool hasParameters = parameters != NULL && parameters[0] != '\0';
 	if (hasParameters)
 		url << '?' << parameters;
