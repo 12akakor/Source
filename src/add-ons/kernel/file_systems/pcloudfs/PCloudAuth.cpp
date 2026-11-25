@@ -41,6 +41,7 @@ PCloudAuth::PCloudAuth()
 	:
 	fHttp(),
 	fSettingsPath(),
+	fApiHost(kPCloudApiHost),
 	fUsername(),
 	fPassword(),
 	fAccessToken(),
@@ -193,6 +194,9 @@ PCloudAuth::_Load()
 	if (status != B_OK)
 		return status;
 
+	PCloudJson::GetString(settings, kSettingApiHost, fApiHost);
+	if (fApiHost.Length() == 0)
+		fApiHost.SetTo(kPCloudApiHost);
 	PCloudJson::GetString(settings, kSettingUsername, fUsername);
 	PCloudJson::GetString(settings, kSettingPassword, fPassword);
 	PCloudJson::GetString(settings, kSettingAccessToken, fAccessToken);
@@ -228,6 +232,7 @@ PCloudAuth::_Save()
 
 	BMessage settings;
 	settings.AddString(kSettingAuthType, "password");
+	settings.AddString(kSettingApiHost, fApiHost.String());
 	settings.AddString(kSettingUsername, fUsername.String());
 	settings.AddString(kSettingPassword, fPassword.String());
 	settings.AddString(kSettingAccessToken, fAccessToken.String());

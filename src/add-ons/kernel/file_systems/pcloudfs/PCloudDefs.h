@@ -15,6 +15,7 @@
 // The host and port of the pCloud API. TLS is mandatory; credentials are
 // never sent over a plain connection.
 static const char kPCloudApiHost[] = "api.pcloud.com";
+static const char kPCloudApiHostEurope[] = "eapi.pcloud.com";
 static const uint16 kPCloudApiPort = 443;
 
 // The add-on name, as passed to `mount -t userlandfs -p pcloudfs`.
@@ -48,6 +49,7 @@ static const char kSettingUsername[] = "username";
 static const char kSettingPassword[] = "password";
 static const char kSettingAccessToken[] = "accessToken";
 static const char kSettingUid[] = "uid";
+static const char kSettingApiHost[] = "apiHost";
 
 
 // State of a cached node. The values are stored in the cache metadata file.

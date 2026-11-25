@@ -39,6 +39,8 @@ public:
 		const BString&	AccessToken() const	{ return fAccessToken; }
 		const BString&	Uid() const			{ return fUid; }
 		const BString&	Username() const	{ return fUsername; }
+		const BString&	ApiHost() const	{ return fApiHost; }
+		void			SetApiHost(const BString& host)	{ fApiHost = host; }
 		const BString&	LastError() const	{ return fLastError; }
 
 	/*! Returns "auth=<urlencoded token>" for the query string. */
@@ -54,6 +56,7 @@ private:
 private:
 			PCloudHttp	fHttp;
 			BString		fSettingsPath;
+			BString		fApiHost;
 			BString		fUsername;
 			BString		fPassword;
 			BString		fAccessToken;
