@@ -8,6 +8,7 @@
 #include "PCloudAuth.h"
 
 #include "PCloudDefs.h"
+#include "PCloudErrors.h"
 #include "PCloudJson.h"
 #include "PCloudLogger.h"
 
@@ -152,7 +153,7 @@ PCloudAuth::LoginWithPassword(const BString& username,
 				"be supported by pCloud's password API.";
 		} else {
 			fLastError.SetToFormat("pCloud error %" B_PRId64 ": %s", result,
-				error.Length() > 0 ? error.String() : "unknown");
+				PCloudErrors::Message((int32)result).String());
 		}
 		return B_ERROR;
 	}

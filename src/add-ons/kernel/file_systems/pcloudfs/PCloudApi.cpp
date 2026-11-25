@@ -8,6 +8,7 @@
 #include "PCloudApi.h"
 
 #include "PCloudDefs.h"
+#include "PCloudErrors.h"
 #include "PCloudJson.h"
 #include "PCloudLogger.h"
 
@@ -328,7 +329,7 @@ PCloudApi::_Call(const char* method, const char* parameters, BMessage& reply)
 				"'pcloudctl setup' again", method);
 		} else {
 			_SetError("%s failed: %" B_PRId64 " (%s)", method, result,
-				error.Length() > 0 ? error.String() : "no message");
+				PCloudErrors::Message((int32)result).String());
 		}
 		return B_ERROR;
 	}
