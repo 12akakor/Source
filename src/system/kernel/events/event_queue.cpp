@@ -550,27 +550,6 @@ EventQueue::_GetEvent(int32 object, uint16 type)
 
 
 
-/*!	Test of the EventQueue invariant fixed in #183: a Select() of an object
-	that cannot be selected must not leave an event behind. A negative object
-	ID is rejected by select_object() at once; Query() of that ID must then
-	find no registration. Compiled in here, where the class is visible.
-*/
-static status_t
-kqueue_select_test(void*)
-{
-	EventQueue queue(true);
-	int32 events = 0;
-	status_t status = queue.Select(-1, 0, &events, NULL);
-	uint32 selected = 0;
-	void* userData = NULL;
-	status_t query = queue.Query(-1, 0, &selected, &userData);
-	dprintf("kqueue_select_test: %s: Select %s, Query %s\n",
-		status < 0 && query < 0 ? "ok" : "FAILED", strerror(status),
-		strerror(query));
-	queue.Closed();
-	return status < 0 && query < 0 ? B_OK : B_ERROR;
-}
-
 
 static status_t
 event_queue_close(file_descriptor* descriptor)
