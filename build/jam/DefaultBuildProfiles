@@ -39,6 +39,22 @@ switch $(HAIKU_BUILD_PROFILE) {
 Echo "Starting build of type $(HAIKU_BUILD_TYPE) ..." ;
 
 
+rule AddRenkuOSPortsPackages
+{
+	# Packages carried by RenkuOSPorts instead of HaikuPorts. The fixed
+	# wpa_supplicant comes from RenkuOS/RenkuOSPorts#20 via RenkuOS/Source#611.
+	if $(HAIKU_PACKAGING_ARCHS[1]) = x86_64 {
+		local wpaSupplicant = [ DownloadFile
+			wpa_supplicant-2.11.haiku.1-3-x86_64.hpkg
+			: https://github.com/idumych/Source/releases/download/ports-mirror/wpa_supplicant-2.11.haiku.1-3-x86_64.hpkg
+			:
+			: 09f540ffb85c559f029c0aba38ee088f8fa60e6f019ace81c2ce554d29068129 ] ;
+		AddPackageFilesToHaikuImage system packages : $(wpaSupplicant)
+			: nameFromMetaInfo ;
+	}
+}
+
+
 rule DefineDefaultBuildProfiles
 {
 	# release profiles
@@ -102,7 +118,9 @@ rule DefineDefaultBuildProfiles
 				timgmsoundfont
 				vision
 				wonderbrush
-				wpa_supplicant
+				# x86_64 uses the RenkuOSPorts build, see AddRenkuOSPortsPackages.
+				!x86_64 @{ wpa_supplicant }@
+				AddRenkuOSPortsPackages ;
 				# Some packages can't be built with gcc2, so we install the gcc13
 				# secondary architecture package instead in this case
 				!gcc2 @{ nano p7zip python3.14 xz_utils }@
@@ -152,7 +170,9 @@ rule DefineDefaultBuildProfiles
 				pe
 				sounds_community_default
 				vision
-				wpa_supplicant
+				# x86_64 uses the RenkuOSPorts build, see AddRenkuOSPortsPackages.
+				!x86_64 @{ wpa_supplicant }@
+				AddRenkuOSPortsPackages ;
 				# xz_utils can't be built with gcc2, so we install it for
 				# primary gcc 8 architectures or gcc 2 hybrids.
 				!gcc2 @{ nano p7zip xz_utils }@
