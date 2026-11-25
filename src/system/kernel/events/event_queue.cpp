@@ -262,7 +262,11 @@ EventQueue::Select(int32 object, uint16 type, int32* _events, void* userData)
 	status_t status = select_object(event->type, event->object, event, fKernel);
 	if (status < 0) {
 		locker.Lock();
-		fEventTree.Remove(event);
+		// The event is freed on return; an invalidation during the selection
+		// has taken it off the tree already.
+		ASSERT((event->events & B_EVENT_QUEUED) == 0);
+		if ((event->events & B_EVENT_INVALID) == 0)
+			fEventTree.Remove(event);
 		fEventCondition.NotifyAll();
 		return status;
 	}
@@ -270,7 +274,18 @@ EventQueue::Select(int32 object, uint16 type, int32* _events, void* userData)
 	eventDeleter.Detach();
 
 	*_events &= event->selected_events | event->behavior;
-	atomic_and(&event->events, ~B_EVENT_SELECTING);
+
+	// What was notified during the selection is queued now that the event
+	// is here to stay; _Notify() does not queue it while selecting.
+	locker.Lock();
+	const int32 previousEvents = atomic_and(&event->events, ~B_EVENT_SELECTING);
+	if ((previousEvents & event->selected_events) != 0
+		&& (previousEvents & (B_EVENT_QUEUED | B_EVENT_DELETING)) == 0) {
+		atomic_or(&event->events, B_EVENT_QUEUED);
+		fEventList.Add(event);
+		fQueueCondition.NotifyAll();
+	}
+	locker.Unlock();
 	fEventCondition.NotifyAll();
 
 	return B_OK;
@@ -369,6 +384,10 @@ EventQueue::_Notify(select_event* event, uint16 events)
 			atomic_or(&event->events, B_EVENT_INVALID);
 			fEventTree.Remove(event);
 		}
+
+		// An event still being selected is queued by Select() once it succeeds.
+		if ((event->events & B_EVENT_SELECTING) != 0)
+			return;
 
 		// If it's not already queued, it's our responsibility to queue it.
 		if ((atomic_or(&event->events, B_EVENT_QUEUED) & B_EVENT_QUEUED) == 0) {

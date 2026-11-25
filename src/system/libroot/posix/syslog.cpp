@@ -161,13 +161,17 @@ send_syslog_message(syslog_context *context, int priority, const char *text,
 	message.priority = priority;
 	strcpy(message.ident, context->ident);
 
-	int length = vsnprintf(message.message, sizeof(buffer)
-		- sizeof(syslog_message), text, args);
-	if (message.message + length - buffer < (int32)sizeof(buffer)) {
-		if (length == 0 || message.message[length - 1] != '\n')
-			message.message[length++] = '\n';
-	} else
-		buffer[length - 1] = '\n';
+	// vsnprintf() returns the length the text would have had: a text that
+	// does not fit has to be cut here, or the newline and write_port() use
+	// that length to write past the buffer (the caller's stack).
+	const int kMaxLength = sizeof(buffer) - sizeof(syslog_message) - 1;
+	int length = vsnprintf(message.message, kMaxLength + 1, text, args);
+	if (length < 0)
+		length = 0;
+	else if (length > kMaxLength)
+		length = kMaxLength;
+	if (length == 0 || message.message[length - 1] != '\n')
+		message.message[length++] = '\n';
 
 	status_t status;
 	do {

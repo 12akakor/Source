@@ -176,7 +176,8 @@ syslog_output(syslog_message &message)
 		const char *newLine = strchr(message.message + pos, '\n');
 		if (newLine != NULL) {
 			length = newLine - message.message + 1 - pos;
-			strlcpy(buffer + headerLength, message.message + pos, length + 1);
+			strlcpy(buffer + headerLength, message.message + pos,
+				min_c((size_t)length + 1, sizeof(buffer) - headerLength));
 			pos += length;
 		} else {
 			length = strlcpy(buffer + headerLength, message.message + pos,
@@ -187,7 +188,11 @@ syslog_output(syslog_message &message)
 
 		length += headerLength;
 
-		if (length >= (int32)sizeof(buffer))
+		if (length >= (int32)sizeof(buffer)) {
+			// a cut line still ends, or the next one is glued to it
+			length = sizeof(buffer) - 1;
+			buffer[length - 1] = '\n';
+		}
 			length = sizeof(buffer) - 1;
 
 		if (message.from == sLastThread

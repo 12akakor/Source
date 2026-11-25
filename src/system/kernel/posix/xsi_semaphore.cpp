@@ -802,8 +802,20 @@ _user_xsi_semctl(int semaphoreID, int semaphoreNumber, int command,
 			semaphoreID));
 		return EINVAL;
 	}
-	if (semaphoreNumber < 0
-		|| semaphoreNumber > semaphoreSet->NumberOfSemaphores()) {
+	// Commands on a single semaphore need a valid number; the set's size
+	// itself was accepted and then read, and SETVAL wrote, behind the array.
+	bool singleSemaphore = false;
+	switch (command) {
+		case GETVAL:
+		case SETVAL:
+		case GETPID:
+		case GETNCNT:
+		case GETZCNT:
+			singleSemaphore = true;
+			break;
+	}
+	if (singleSemaphore && (semaphoreNumber < 0
+			|| semaphoreNumber >= semaphoreSet->NumberOfSemaphores())) {
 		TRACE(("xsi_semctl: semaphore number %d not valid for "
 			"semaphore %d\n", semaphoreNumber, semaphoreID));
 		return EINVAL;
@@ -821,7 +833,8 @@ _user_xsi_semctl(int semaphoreID, int semaphoreNumber, int command,
 	}
 
 	int result = 0;
-	XsiSemaphore *semaphore = semaphoreSet->Semaphore(semaphoreNumber);
+	XsiSemaphore *semaphore = singleSemaphore
+		? semaphoreSet->Semaphore(semaphoreNumber) : NULL;
 	switch (command) {
 		case GETVAL: {
 			if (!semaphoreSet->HasReadPermission()) {

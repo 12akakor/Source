@@ -6286,8 +6286,10 @@ _user_sync_memory(void* _address, size_t size, uint32 flags)
 		if (area == NULL)
 			return B_NO_MEMORY;
 
-		uint32 offset = address - area->Base();
-		size_t rangeSize = min_c(area->Size() - offset, size);
+		// The cache offset is a file offset: in 32 bits, a range 4 GiB or
+		// more into a file had other pages written in its place.
+		off_t offset = address - area->Base();
+		size_t rangeSize = min_c(area->Size() - (size_t)offset, size);
 		offset += area->cache_offset;
 
 		// lock the cache
