@@ -23,6 +23,7 @@ local pcloudCommonSources =
 	PCloudApi.cpp
 	PCloudCache.cpp
 	PCloudCrypto.cpp
+	PCloudErrors.cpp
 	PCloudHttp.cpp
 	PCloudJson.cpp
 	PCloudJournal.cpp
