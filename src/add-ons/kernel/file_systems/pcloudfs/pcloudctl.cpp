@@ -30,6 +30,7 @@ print_usage(const char* program)
 		"\n"
 		"  login <email> <password>  Log in (prompts if omitted)\n"
 		"  status                Show account, token and cache state\n"
+		"  nettest               Check both pCloud endpoints\n"
 		"  selftest              Run local integrity and parser tests\n"
 		"\n"
 		"Mount after login with:\n"
@@ -198,6 +199,8 @@ main(int argc, char** argv)
 		status = login(auth, argc, argv);
 	else if (strcmp(argv[1], "status") == 0)
 		status = show_status(auth);
+	else if (strcmp(argv[1], "nettest") == 0)
+		status = nettest();
 	else if (strcmp(argv[1], "selftest") == 0)
 		status = selftest();
 	else {
