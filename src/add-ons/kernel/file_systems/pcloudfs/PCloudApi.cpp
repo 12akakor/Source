@@ -286,7 +286,15 @@ PCloudApi::_Call(const char* method, const char* parameters, BMessage& reply)
 		url << (hasParameters ? '&' : '?') << fAuth.AuthQuery();
 
 	BString body;
-	status_t status = fHttp.Get(url, "", body);
+	status_t status = B_ERROR;
+	for (int32 retry = 0; retry < 3; retry++) {
+		status = fHttp.Get(url, "", body);
+		if (status == B_OK)
+			break;
+		PCLOUD_LOG_WARNING("%s: request attempt %" B_PRId32 " failed: %s",
+			method, retry + 1, fHttp.LastError().String());
+		body.Truncate(0);
+	}
 	if (status != B_OK && fHttp.LastStatusCode() == 401) {
 		_SetError("%s: pCloud rejected the token; run 'pcloudctl login' again",
 			method);

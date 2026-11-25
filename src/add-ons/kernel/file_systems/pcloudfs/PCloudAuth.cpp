@@ -109,14 +109,19 @@ PCloudAuth::LoginWithPassword(const BString& username,
 			parameters.String());
 		PCLOUD_LOG_INFO("login: requesting userinfo from %s",
 			hosts[attempt].String());
-		status = fHttp.Get(url, "", response);
+		for (int32 retry = 0; retry < 3; retry++) {
+			status = fHttp.Get(url, "", response);
+			if (status == B_OK)
+				break;
+			PCLOUD_LOG_WARNING("login: %s attempt %" B_PRId32
+				" failed: %s", hosts[attempt].String(), retry + 1,
+				fHttp.LastError().String());
+			response.Truncate(0);
+		}
 		if (status == B_OK) {
 			fApiHost = hosts[attempt];
 			break;
 		}
-		PCLOUD_LOG_WARNING("login: %s unreachable: %s",
-			hosts[attempt].String(), fHttp.LastError().String());
-		response.Truncate(0);
 	}
 	if (status != B_OK) {
 		fLastError.SetToFormat("Cannot contact pCloud (%s or %s). "
