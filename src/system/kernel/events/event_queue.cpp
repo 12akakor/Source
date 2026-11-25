@@ -551,24 +551,24 @@ EventQueue::_GetEvent(int32 object, uint16 type)
 
 
 /*!	Test of the EventQueue invariant fixed in #183: a Select() of an object
-	that cannot be selected must not leave the failed event on the pending
-	list. A negative object ID is rejected by select_object() at once.
+	that cannot be selected must not leave an event behind. A negative object
+	ID is rejected by select_object() at once; Query() of that ID must then
+	find no registration. Compiled in here, where the class is visible.
 */
 static status_t
-_run_kqueue_select_test()
+kqueue_select_test(void*)
 {
 	EventQueue queue(true);
 	int32 events = 0;
 	status_t status = queue.Select(-1, 0, &events, NULL);
-	bool ok = status < 0 && queue.fEventList.IsEmpty()
-		&& queue.fEventTree.IsEmpty();
-	const char* result = ok ? "ok" : "FAILED";
-	dprintf("%s: unsupported Select left no event pending (status %s)\n",
-		result, strerror(status));
-	syslog(LOG_INFO, "kqueue_select_test: %s: status %s", result,
-		strerror(status));
+	uint32 selected = 0;
+	void* userData = NULL;
+	status_t query = queue.Query(-1, 0, &selected, &userData);
+	dprintf("kqueue_select_test: %s: Select %s, Query %s\n",
+		status < 0 && query < 0 ? "ok" : "FAILED", strerror(status),
+		strerror(query));
 	queue.Closed();
-	return ok ? B_OK : B_ERROR;
+	return status < 0 && query < 0 ? B_OK : B_ERROR;
 }
 
 
