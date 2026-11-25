@@ -99,6 +99,8 @@ PCloudAuth::LoginWithPassword(const BString& username,
 	url.SetToFormat("https://%s/userinfo?%s", kPCloudApiHost,
 		parameters.String());
 
+	PCLOUD_LOG_INFO("login: requesting userinfo for %s", username.String());
+
 	BString response;
 	status_t status = fHttp.Get(url, "", response);
 	if (status != B_OK) {
@@ -118,6 +120,7 @@ PCloudAuth::LoginWithPassword(const BString& username,
 		fLastError = "pCloud reply has no result field";
 		return B_BAD_DATA;
 	}
+	PCLOUD_LOG_INFO("login: pCloud result %" B_PRId64, result);
 	if (result != 0) {
 		BString error;
 		PCloudJson::GetString(json, "error", error);

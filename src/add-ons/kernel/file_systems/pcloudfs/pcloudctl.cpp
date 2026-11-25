@@ -28,7 +28,7 @@ print_usage(const char* program)
 	fprintf(stderr,
 		"Usage: %s <command>\n"
 		"\n"
-		"  login                 Log in with pCloud e-mail and password\n"
+		"  login <email> <password>  Log in (prompts if omitted)\n"
 		"  status                Show account, token and cache state\n"
 		"  selftest              Run local integrity and parser tests\n"
 		"\n"
@@ -54,15 +54,24 @@ read_line(const char* prompt)
 
 
 static status_t
-login(PCloudAuth& auth)
+login(PCloudAuth& auth, int argc, char** argv)
 {
-	BString username = read_line("pCloud e-mail: ");
-	BString password = read_line("Password: ");
+	BString username;
+	BString password;
+	if (argc >= 4) {
+		username.SetTo(argv[2]);
+		password.SetTo(argv[3]);
+	} else {
+		username = read_line("pCloud e-mail: ");
+		password = read_line("Password: ");
+	}
 	if (username.Length() == 0 || password.Length() == 0) {
 		fprintf(stderr, "E-mail and password are required.\n");
 		return B_BAD_VALUE;
 	}
 
+	printf("Contacting pCloud as %s...\n", username.String());
+	fflush(stdout);
 	status_t status = auth.LoginWithPassword(username, password);
 	if (status != B_OK) {
 		fprintf(stderr, "Login failed: %s\n", auth.LastError().String());
@@ -186,7 +195,7 @@ main(int argc, char** argv)
 	}
 
 	if (strcmp(argv[1], "login") == 0)
-		status = login(auth);
+		status = login(auth, argc, argv);
 	else if (strcmp(argv[1], "status") == 0)
 		status = show_status(auth);
 	else if (strcmp(argv[1], "selftest") == 0)
