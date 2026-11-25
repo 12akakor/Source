@@ -71,6 +71,11 @@ l2cap_handle_connection_rsp(L2capEndpoint* endpoint, uint8 ident, net_buffer* bu
 		return;
 	}
 
+	if (endpoint == NULL) {
+		ERROR("l2cap: unexpected connection rsp: ident %d unknown\n", ident);
+		return;
+	}
+
 	NetBufferHeaderReader<l2cap_connection_rsp> command(buffer);
 	if (command.Status() != B_OK)
 		return;
@@ -258,6 +263,11 @@ l2cap_handle_disconnection_req(HciConnection* conn, uint8 ident, net_buffer* buf
 static status_t
 l2cap_handle_disconnection_rsp(L2capEndpoint* endpoint, uint8 ident, net_buffer* buffer)
 {
+	if (endpoint == NULL) {
+		ERROR("l2cap: unexpected disconnection rsp: ident %d unknown\n", ident);
+		return B_ERROR;
+	}
+
 	if (endpoint == NULL) {
 		ERROR("l2cap: unexpected disconnection rsp: ident %d unknown\n", ident);
 		return B_ERROR;
