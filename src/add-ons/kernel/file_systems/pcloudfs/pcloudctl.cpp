@@ -84,6 +84,25 @@ login(PCloudAuth& auth, int argc, char** argv)
 
 
 static status_t
+nettest()
+{
+	const char* hosts[2] = { kPCloudApiHost, kPCloudApiHostEurope };
+	for (int32 i = 0; i < 2; i++) {
+		BString url;
+		url.SetToFormat("https://%s/userinfo", hosts[i]);
+		PCloudHttp http;
+		BString body;
+		status_t status = http.Get(url, "", body);
+		if (status == B_OK)
+			printf("%s: reachable\n", hosts[i]);
+		else
+			printf("%s: FAILED - %s\n", hosts[i], http.LastError().String());
+	}
+	return B_OK;
+}
+
+
+static status_t
 show_status(PCloudAuth& auth)
 {
 	printf("Username      : %s\n", auth.Username().Length() > 0
