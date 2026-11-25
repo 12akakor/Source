@@ -4,6 +4,8 @@ UsePrivateKernelHeaders ;
 UsePrivateHeaders shared ;
 
 SimpleTest advisory_locking_test : advisory_locking_test.cpp ;
+SimpleTest kqueue_unsupported_fd_test : kqueue_unsupported_fd_test.cpp ;
+SimpleTest msync_large_offset_test : msync_large_offset_test.cpp ;
 
 SimpleTest fibo_load_image : fibo_load_image.cpp ;
 SimpleTest fibo_fork : fibo_fork.cpp ;
