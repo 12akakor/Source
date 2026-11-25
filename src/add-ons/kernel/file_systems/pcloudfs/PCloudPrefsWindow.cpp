@@ -68,6 +68,9 @@ worker_entry(void* data)
 	switch (args->kind) {
 		case kPrefsLogin:
 		{
+			BMessage progress(kPrefsProgress);
+			progress.AddString("text", "Contacting pCloud...");
+			args->messenger.SendMessage(&progress);
 			PCloudAuth auth;
 			auth.Init();
 			status = auth.LoginWithPassword(args->username, args->password);
@@ -335,6 +338,14 @@ PCloudPrefsWindow::MessageReceived(BMessage* message)
 				"Clearing the cache is not available in this test build. "
 				"Your data has not been changed.", "OK");
 			alert->Go();
+			break;
+		}
+
+		case kPrefsProgress:
+		{
+			BString text;
+			message->FindString("text", &text);
+			_SetStatus(text);
 			break;
 		}
 

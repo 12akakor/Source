@@ -27,6 +27,7 @@ enum pcloud_prefs_messages {
 	kPrefsUnmount		= 'pumn',
 	kPrefsShowInTracker	= 'pshw',
 	kPrefsClearCache	= 'pclr',
+	kPrefsProgress		= 'pprg',
 	kPrefsWorkerDone	= 'pdon'
 };
 
