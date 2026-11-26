@@ -487,7 +487,6 @@ AddFilesToPackage add-ons input_server devices :
 	<input>wacom
 	;
 AddFilesToPackage add-ons input_server filters :
-	media_keys
 	padblocker
 	screen_saver
 	shortcut_catcher

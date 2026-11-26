@@ -11,7 +11,7 @@
 	down, rotation lock. The power button already reaches the system through
 	ACPI; this driver publishes the volume buttons as a keyboard that sends
 	the consumer page keys of USB HID, the key codes the USB keyboard driver
-	uses for volume keys.
+	uses for volume keys, so the default Shortcuts settings act on them.
 */
 
 
@@ -24,6 +24,8 @@
 #include <device_manager.h>
 #include <kernel.h>
 #include <keyboard_mouse_driver.h>
+#include <usb/USB_hid.h>
+#include <usb/USB_hid_page_consumer.h>
 #include <lock.h>
 #include <util/AutoLock.h>
 
@@ -45,13 +47,16 @@ extern "C" {
 #define POLL_INTERVAL				50000
 #define KEY_BUFFER_SIZE				16
 
-// key codes of the USB HID consumer page (0x0c), as hid_shared reports them
-#define KEY_VOLUME_UP				0x000c00e9
-#define KEY_VOLUME_DOWN				0x000c00ea
+// the key codes hid_shared reports for these USB HID usages; the default
+// Shortcuts settings bind them to setvolume
+#define CONSUMER_KEY(usage)			(((uint32)B_HID_USAGE_PAGE_CONSUMER << 16) \
+										| (usage))
+#define KEY_VOLUME_UP		CONSUMER_KEY(B_HID_UID_CON_VOLUME_INCREMENT)
+#define KEY_VOLUME_DOWN		CONSUMER_KEY(B_HID_UID_CON_VOLUME_DECREMENT)
 
 #define BUTTON_VOLUME_UP			2
 #define BUTTON_VOLUME_DOWN			3
-#define MAX_BUTTONS					5
+#define MAX_BUTTONS					2
 
 
 struct button {

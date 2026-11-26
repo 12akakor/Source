@@ -1,8 +1,0 @@
-# SPDX-License-Identifier: MIT
-
-SubDir HAIKU_TOP src add-ons input_server filters media_keys ;
-
-Addon media_keys
-	: MediaKeysInputFilter.cpp
-	: be input_server [ TargetLibstdc++ ] [ TargetLibsupc++ ]
-	;
