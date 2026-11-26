@@ -63,6 +63,7 @@ AddFilesToPackage add-ons kernel busses pci :
 	;
 AddFilesToPackage add-ons kernel busses random :
 	ccp_rng@x86,x86_64
+	jh7110_trng@riscv64
 	virtio_rng
 	;
 AddFilesToPackage add-ons kernel busses scsi :
@@ -98,6 +99,7 @@ AddFilesToPackage add-ons kernel generic :
 	ata_adapter
 	bios@x86,x86_64
 	dpc
+	dw_axi_dma@riscv64
 	jh7110_clock_reset@riscv64
 	mpu401
 	scsi_periph
@@ -162,6 +164,7 @@ AddNewDriversToPackage sensor
 	: $(SYSTEM_ADD_ONS_DRIVERS_SENSOR) ;
 AddNewDriversToPackage network :
 	brcmfmac@arm64
+	dwmac@riscv64
 	genet@arm64
 	hyperv_netvsc@x86,x86_64,arm64
 	usb_ecm
@@ -174,6 +177,7 @@ AddNewDriversToPackage input :
 	i2c_goodix@x86,x86_64
 	i2c_hid
 	rmi4_smbus@x86,x86_64
+	soc_buttons@x86,x86_64
 	virtio_input
 	;
 AddNewDriversToPackage display :
@@ -182,6 +186,8 @@ AddNewDriversToPackage display :
 AddNewDriversToPackage audio hmulti :
 	intel_lpe@x86,x86_64
 #	virtio_sound
+	jh7110_i2stx@riscv64
+	jh7110_pwmdac@riscv64
 	;
 AddNewDriversToPackage hyperv :
 	hyperv_ic@x86,x86_64,arm64
@@ -481,6 +487,7 @@ AddFilesToPackage add-ons input_server devices :
 	<input>wacom
 	;
 AddFilesToPackage add-ons input_server filters :
+	media_keys
 	padblocker
 	screen_saver
 	shortcut_catcher
