@@ -18,7 +18,8 @@
 #include <Message.h>
 #include <Roster.h>
 
-#include <unistd.h>
+
+extern char** environ;
 
 
 #define KEY_MUTE			0x000c00e2
