@@ -106,7 +106,8 @@
 // of a buffer after a change, then checking every POLL_INTERVAL.
 #define POLL_INTERVAL				500
 #define POLL_EARLY_WAKEUP			3000
-#define POSITION_TIMEOUT			(2 * PLAYBACK_BUFFER_TIME)
+// short enough that a lost position message does not skip a buffer
+#define POSITION_TIMEOUT			(PLAYBACK_BUFFER_TIME / 4)
 #define EXCHANGE_TIMEOUT			500000
 
 
@@ -405,6 +406,10 @@ position_reported(void* cookie, uint32 direction)
 	intel_lpe_driver* driver = (intel_lpe_driver*)cookie;
 	if (direction == LPE_PLAYBACK)
 		release_sem_etc(driver->positionSem, 1, B_DO_NOT_RESCHEDULE);
+
+	static int32 sFirst = 0;
+	if (atomic_add(&sFirst, 1) == 0)
+		TRACE_ALWAYS("position messages from the DSP arrive\n");
 }
 
 

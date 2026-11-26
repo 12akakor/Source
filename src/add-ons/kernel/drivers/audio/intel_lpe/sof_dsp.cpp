@@ -518,18 +518,21 @@ handle_dsp_message(lpe_dsp* dsp)
 			handle_fw_ready(dsp);
 		else if ((header[1] & SOF_GLB_TYPE_MASK) == SOF_IPC_GLB_TRACE_MSG) {
 			// trace positions: nothing to do without a trace buffer
-		} else if (header[1]
+		} else if ((header[1] & (SOF_GLB_TYPE_MASK | SOF_CMD_TYPE_MASK))
 				== (SOF_IPC_GLB_STREAM_MSG | SOF_IPC_STREAM_POSITION)) {
-			// sof_ipc_stream_posn: the header, then the host component
-			uint32 words[3];
-			mailbox_read(dsp, dsp->dspBoxOffset, words, sizeof(words));
+			// the low 16 bits of the command name the host component
+			uint32 component = header[1] & 0xffff;
 			for (uint32 i = 0; i < LPE_STREAM_COUNT; i++) {
-				if (words[2] == kPipelines[i].host && dsp->positionHook != NULL)
+				if (component == kPipelines[i].host && dsp->positionHook != NULL)
 					dsp->positionHook(dsp->hookCookie, i);
 			}
 		} else {
-			TRACE_ALWAYS("DSP message %#" B_PRIx32 " (%" B_PRIu32 " bytes)\n",
-				header[1], header[0]);
+			// this runs in the interrupt handler: do not flood the log
+			static int32 sReported = 0;
+			if (atomic_add(&sReported, 1) < 20) {
+				TRACE_ALWAYS("DSP message %#" B_PRIx32 " (%" B_PRIu32
+					" bytes)\n", header[1], header[0]);
+			}
 		}
 	}
 
