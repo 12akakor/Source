@@ -197,6 +197,7 @@ lpe_dsp_init(lpe_dsp* dsp)
 	dsp->area = -1;
 	dsp->pciArea = -1;
 	dsp->replySem = -1;
+	dsp->rate = 48000;
 	B_INITIALIZE_SPINLOCK(&dsp->lock);
 
 	acpi_module_info* acpi;
@@ -779,8 +780,9 @@ static status_t
 configure_ssp(lpe_dsp* dsp)
 {
 	// SSP0 to the codec on Bay Trail-CR: I2S, the SSP provides the clocks,
-	// 2 slots of 25 bits with 24 valid bits at 48 kHz (BCLK 2.4 MHz from
-	// the 19.2 MHz SSP clock), as in the SOF topology for Bay Trail codecs
+	// 2 slots of 25 bits with 24 valid bits (BCLK 50 times the rate, 2.4 MHz
+	// at 48 kHz, divided from the 19.2 MHz SSP clock), as in the SOF
+	// topology for Bay Trail codecs
 	sof_ipc_dai_config config;
 	memset(&config, 0, sizeof(config));
 	init_header(&config.hdr, sizeof(config),
@@ -791,8 +793,8 @@ configure_ssp(lpe_dsp* dsp)
 		| SOF_DAI_FMT_CBC_CFC;
 	config.ssp.hdr_size = sizeof(config.ssp);
 	config.ssp.mclk_rate = 19200000;
-	config.ssp.fsync_rate = 48000;
-	config.ssp.bclk_rate = 2400000;
+	config.ssp.fsync_rate = dsp->rate;
+	config.ssp.bclk_rate = dsp->rate * 50;
 	config.ssp.tdm_slots = 2;
 	config.ssp.rx_slots = 3;
 	config.ssp.tx_slots = 3;
@@ -943,7 +945,7 @@ lpe_dsp_start_stream(lpe_dsp* dsp, uint32 direction,
 	params.params.direction = direction;
 	params.params.frame_fmt = SOF_IPC_FRAME_S16_LE;
 	params.params.buffer_fmt = SOF_IPC_BUFFER_INTERLEAVED;
-	params.params.rate = 48000;
+	params.params.rate = dsp->rate;
 	params.params.stream_tag = direction + 1;
 	params.params.channels = 2;
 	params.params.sample_valid_bytes = 2;
@@ -997,6 +999,30 @@ lpe_dsp_stop_stream(lpe_dsp* dsp, uint32 direction)
 	status_t freeStatus = send_message(dsp, &stream, sizeof(stream), NULL,
 		0);
 	return status != B_OK ? status : freeStatus;
+}
+
+
+/*!	Changes the rate of both streams. They must be stopped; the SSP is
+	configured again if the pipelines exist already.
+*/
+status_t
+lpe_dsp_set_rate(lpe_dsp* dsp, uint32 rate)
+{
+	// the SSP clock divider must be an integer: 19.2 MHz / (50 * rate)
+	if (rate == 0 || 19200000 % (rate * 50) != 0)
+		return B_BAD_VALUE;
+	if (rate == dsp->rate)
+		return B_OK;
+
+	uint32 previous = dsp->rate;
+	dsp->rate = rate;
+	if (!dsp->pipelineCreated[LPE_PLAYBACK] && !dsp->pipelineCreated[LPE_CAPTURE])
+		return B_OK;
+
+	status_t status = configure_ssp(dsp);
+	if (status != B_OK)
+		dsp->rate = previous;
+	return status;
 }
 
 

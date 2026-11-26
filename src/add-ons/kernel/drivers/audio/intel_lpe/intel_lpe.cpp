@@ -90,7 +90,6 @@
 #define DSP_FAILED					2
 
 // The playback ring: two buffers of 1024 frames, one page each.
-#define PLAYBACK_RATE				48000
 #define PLAYBACK_CHANNELS			2
 #define PLAYBACK_SAMPLE_SIZE		2
 #define PLAYBACK_FRAME_SIZE			(PLAYBACK_CHANNELS * PLAYBACK_SAMPLE_SIZE)
@@ -98,8 +97,8 @@
 #define PLAYBACK_BUFFER_FRAMES		1024
 #define PLAYBACK_BUFFER_SIZE		(PLAYBACK_BUFFER_FRAMES * PLAYBACK_FRAME_SIZE)
 #define PLAYBACK_RING_SIZE			(PLAYBACK_BUFFERS * PLAYBACK_BUFFER_SIZE)
-#define PLAYBACK_BUFFER_TIME \
-	((bigtime_t)PLAYBACK_BUFFER_FRAMES * 1000000 / PLAYBACK_RATE)
+#define PLAYBACK_BUFFER_TIME(driver) \
+	((bigtime_t)PLAYBACK_BUFFER_FRAMES * 1000000 / (driver)->rate)
 
 // How the playback thread waits for the next buffer: woken by the position
 // message of the DSP, or, without its interrupt, by polling: sleeping most
@@ -107,10 +106,11 @@
 #define POLL_INTERVAL				500
 #define POLL_EARLY_WAKEUP			3000
 // short enough that a lost position message does not skip a buffer
-#define POSITION_TIMEOUT			(PLAYBACK_BUFFER_TIME / 4)
+#define POSITION_TIMEOUT(driver)	(PLAYBACK_BUFFER_TIME(driver) / 4)
 #define EXCHANGE_TIMEOUT			500000
 // After about 5 seconds of silence the output amplifiers are powered down.
-#define IDLE_BUFFERS				(5 * PLAYBACK_RATE / PLAYBACK_BUFFER_FRAMES)
+#define IDLE_BUFFERS(driver) \
+	((int32)(5 * (driver)->rate / PLAYBACK_BUFFER_FRAMES))
 
 
 struct intel_lpe_driver {
@@ -146,6 +146,7 @@ struct intel_lpe_driver {
 	sem_id					bufferReadySem;
 	sem_id					positionSem;
 	bool					capturing;
+	uint32					rate;		// of playback and recording
 	// guarded by outputLock
 	bool					microphoneActive;
 	bool					headsetMicrophone;
@@ -347,7 +348,7 @@ jack_poll_thread(void* data)
 		}
 		// power the output down after a while of silence, and up again as
 		// soon as the playback thread sees sound
-		bool idle = atomic_get(&driver->silentBuffers) >= IDLE_BUFFERS;
+		bool idle = atomic_get(&driver->silentBuffers) >= IDLE_BUFFERS(driver);
 		if (idle != driver->outputIdle) {
 			MutexLocker outputLocker(driver->outputLock);
 			driver->outputIdle = idle;
@@ -453,6 +454,8 @@ boot_dsp(intel_lpe_driver* driver)
 	status = lpe_dsp_init(&driver->dsp);
 	driver->dsp.positionHook = position_reported;
 	driver->dsp.hookCookie = driver;
+	// a rate chosen before the boot
+	lpe_dsp_set_rate(&driver->dsp, driver->rate);
 	if (status == B_OK) {
 		driver->dspInitialized = true;
 		status = lpe_dsp_boot(&driver->dsp, image, size);
@@ -1006,6 +1009,22 @@ apply_record_volume(intel_lpe_driver* driver)
 }
 
 
+// The rates whose bit clock (50 times the rate) the SSP divides from its
+// 19.2 MHz clock, and that the codec's ASRC takes on I2S1 (MX-85).
+#define RT5640_ASRC_RATE			0x85
+#define RT5640_ASRC_RATE_I2S1_MASK	(0xf << 12)
+
+static const struct {
+	uint32	multiRate;
+	uint32	rate;
+	uint16	asrcRate;
+} kRates[] = {
+	{ B_SR_32000, 32000, 3 << 12 },
+	{ B_SR_48000, 48000, 0 << 12 },
+	{ B_SR_96000, 96000, 1 << 12 },
+};
+
+
 static status_t
 setup_speaker_playback(intel_lpe_driver* driver)
 {
@@ -1024,6 +1043,12 @@ setup_speaker_playback(intel_lpe_driver* driver)
 		}
 		if (kSpeakerPlayback[i].reg == 0x64)
 			snooze(1000);
+	}
+	for (size_t i = 0; i < B_COUNT_OF(kRates); i++) {
+		if (kRates[i].rate == driver->rate) {
+			rt5640_update(driver, RT5640_ASRC_RATE, RT5640_ASRC_RATE_I2S1_MASK,
+				kRates[i].asrcRate);
+		}
 	}
 	apply_playback_volume(driver);
 	return B_OK;
@@ -1051,10 +1076,12 @@ count_silence(intel_lpe_driver* driver, uint32 buffer)
 
 	if (silent) {
 		// stops counting at IDLE_BUFFERS
-		if (atomic_get(&driver->silentBuffers) < IDLE_BUFFERS
-			&& atomic_add(&driver->silentBuffers, 1) == IDLE_BUFFERS - 1)
+		int32 idle = IDLE_BUFFERS(driver);
+		if (atomic_get(&driver->silentBuffers) < idle
+			&& atomic_add(&driver->silentBuffers, 1) == idle - 1)
 			release_sem_etc(driver->idleSem, 1, B_DO_NOT_RESCHEDULE);
-	} else if (atomic_get_and_set(&driver->silentBuffers, 0) >= IDLE_BUFFERS)
+	} else if (atomic_get_and_set(&driver->silentBuffers, 0)
+			>= IDLE_BUFFERS(driver))
 		release_sem_etc(driver->idleSem, 1, B_DO_NOT_RESCHEDULE);
 }
 
@@ -1093,7 +1120,7 @@ playback_thread(void* data)
 		if (current == last) {
 			if (driver->dsp.interruptsEnabled) {
 				acquire_sem_etc(driver->positionSem, 1, B_RELATIVE_TIMEOUT,
-					POSITION_TIMEOUT);
+					POSITION_TIMEOUT(driver));
 			} else
 				snooze(POLL_INTERVAL);
 			continue;
@@ -1124,7 +1151,7 @@ playback_thread(void* data)
 
 		release_sem_etc(driver->bufferReadySem, 1, B_DO_NOT_RESCHEDULE);
 		if (!driver->dsp.interruptsEnabled)
-			snooze(PLAYBACK_BUFFER_TIME - POLL_EARLY_WAKEUP);
+			snooze(PLAYBACK_BUFFER_TIME(driver) - POLL_EARLY_WAKEUP);
 	}
 	return 0;
 }
@@ -1293,8 +1320,8 @@ get_description(intel_lpe_driver* driver, multi_description* data)
 	if (data->request_channel_count >= (int32)B_COUNT_OF(sChannels))
 		memcpy(data->channels, sChannels, sizeof(sChannels));
 
-	data->output_rates = B_SR_48000;
-	data->input_rates = B_SR_48000;
+	data->output_rates = B_SR_32000 | B_SR_48000 | B_SR_96000;
+	data->input_rates = data->output_rates;
 	data->max_cvsr_rate = 0;
 	data->min_cvsr_rate = 0;
 	data->output_formats = B_FMT_16BIT;
@@ -1327,17 +1354,43 @@ get_global_format(intel_lpe_driver* driver, multi_format_info* data)
 	data->input_latency = 0;
 	data->timecode_kind = 0;
 	data->output.format = B_FMT_16BIT;
-	data->output.rate = B_SR_48000;
 	data->input.format = B_FMT_16BIT;
-	data->input.rate = B_SR_48000;
+	for (size_t i = 0; i < B_COUNT_OF(kRates); i++) {
+		if (kRates[i].rate == driver->rate)
+			data->output.rate = data->input.rate = kRates[i].multiRate;
+	}
 	return B_OK;
 }
 
 
+/*!	Both streams share the SSP, so they run at the rate asked for the
+	output; a running stream stops, and the next buffer exchange starts it
+	again at the new rate.
+*/
 static status_t
 set_global_format(intel_lpe_driver* driver, multi_format_info* data)
 {
-	// there is only one format; report it back
+	uint32 rate = 0;
+	for (size_t i = 0; i < B_COUNT_OF(kRates); i++) {
+		if (kRates[i].multiRate == data->output.rate)
+			rate = kRates[i].rate;
+	}
+	if (rate == 0)
+		return B_BAD_VALUE;
+
+	MutexLocker locker(driver->lock);
+	if (rate != driver->rate) {
+		playback_stop(driver);
+		MutexLocker dspLocker(driver->dspLock);
+		if (driver->dspInitialized) {
+			status_t status = lpe_dsp_set_rate(&driver->dsp, rate);
+			if (status != B_OK)
+				return status;
+		}
+		driver->rate = rate;
+		TRACE_ALWAYS("rate %" B_PRIu32 " Hz\n", rate);
+	}
+	locker.Unlock();
 	return get_global_format(driver, data);
 }
 
@@ -1831,6 +1884,7 @@ intel_lpe_init_driver(device_node* node, void** _driverCookie)
 	for (int32 i = 0; i < LPE_STREAM_COUNT; i++)
 		driver->ringArea[i] = driver->tableArea[i] = -1;
 	driver->bufferReadySem = driver->positionSem = driver->idleSem = -1;
+	driver->rate = 48000;
 	driver->dacVolume[0] = driver->dacVolume[1] = DAC_VOLUME_MAX;
 	driver->adcLevel[0] = driver->adcLevel[1] = ADC_LEVEL_DEFAULT;
 	mutex_init(&driver->lock, "intel_lpe");

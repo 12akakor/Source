@@ -315,6 +315,7 @@ struct lpe_dsp {
 	uint32			exceptionOffset;
 
 	bool			pipelineCreated[LPE_STREAM_COUNT];
+	uint32			rate;		// of both streams and the SSP
 	uint32			positionOffset[LPE_STREAM_COUNT];
 
 	// after the boot, the doorbells raise interrupts instead of being polled
@@ -343,6 +344,7 @@ void lpe_dsp_poll_messages(lpe_dsp* dsp);
 status_t lpe_dsp_start_stream(lpe_dsp* dsp, uint32 direction,
 	const lpe_stream_buffer* buffer);
 status_t lpe_dsp_stop_stream(lpe_dsp* dsp, uint32 direction);
+status_t lpe_dsp_set_rate(lpe_dsp* dsp, uint32 rate);
 status_t lpe_dsp_read_position(lpe_dsp* dsp, uint32 direction,
 	sof_ipc_stream_posn* position);
 void lpe_fill_page_table(uint8* table, const phys_addr_t* pages,
