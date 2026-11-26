@@ -153,7 +153,6 @@ struct intel_lpe_driver {
 	bool					dacMuted;
 	uint8					adcLevel[2];
 	bool					adcMuted;
-	uint16					adcVolume;
 
 	// Protects the output routing: speakers or headphones.
 	mutex					outputLock;
@@ -766,6 +765,7 @@ update_output(intel_lpe_driver* driver)
 #define RT5640_BOOST_IN3_52DB		(8 << 8)
 #define RT5640_ADC_ON				0x4747		// +9 dB, unmuted
 #define RT5640_ADC_MUTED			0xafaf
+#define RT5640_ADC_MUTE_BITS		0x8080		// MX-1C: L, R
 
 // Over-current detection on MICBIAS1 tells a headset from headphones: the
 // microphone ring of plain headphones shorts the bias to ground. Values of
@@ -788,6 +788,14 @@ microphone_bias(intel_lpe_driver* driver, bool on)
 		on ? RT5640_POWER_LDO2 : 0);
 	rt5640_update(driver, RT5640_PWR_ANLG2, RT5640_POWER_MICBIAS1,
 		on ? RT5640_POWER_MICBIAS1 : 0);
+}
+
+
+static uint16
+record_volume(intel_lpe_driver* driver)
+{
+	return (driver->adcLevel[0] << 8) | driver->adcLevel[1]
+		| (driver->adcMuted ? RT5640_ADC_MUTE_BITS : 0);
 }
 
 
@@ -834,7 +842,7 @@ microphone_on(intel_lpe_driver* driver)
 	rt5640_update(driver, RT5640_STEREO_ADC_MIXER, RT5640_MUTE_ADC1, 0);
 	driver->microphoneActive = true;
 	select_microphone(driver);
-	rt5640_write(driver, RT5640_ADC_VOLUME, driver->adcVolume);
+	rt5640_write(driver, RT5640_ADC_VOLUME, record_volume(driver));
 }
 
 
@@ -927,17 +935,18 @@ detect_headset(intel_lpe_driver* driver)
 #define ADC_LEVEL_MAX				0x7f
 #define ADC_LEVEL_DEFAULT			0x47		// +9 dB, see RT5640_ADC_ON
 #define VOLUME_STEP					0.375f
-#define RT5640_ADC_MUTE_BITS		0x8080
+#define RT5640_STEREO_DAC_MIXER		0x2a
+#define RT5640_MUTE_DAC1			((1 << 14) | (1 << 6))	// MX-2A
 
 
 /*!	Called with outputLock held. */
 static void
 apply_playback_volume(intel_lpe_driver* driver)
 {
-	uint16 value = 0;
-	if (!driver->dacMuted)
-		value = (driver->dacVolume[0] << 8) | driver->dacVolume[1];
-	rt5640_write(driver, RT5640_DAC1_VOLUME, value);
+	rt5640_write(driver, RT5640_DAC1_VOLUME,
+		(driver->dacVolume[0] << 8) | driver->dacVolume[1]);
+	rt5640_update(driver, RT5640_STEREO_DAC_MIXER, RT5640_MUTE_DAC1,
+		driver->dacMuted ? RT5640_MUTE_DAC1 : 0);
 }
 
 
@@ -945,11 +954,8 @@ apply_playback_volume(intel_lpe_driver* driver)
 static void
 apply_record_volume(intel_lpe_driver* driver)
 {
-	driver->adcVolume = (driver->adcLevel[0] << 8) | driver->adcLevel[1];
-	if (driver->adcMuted)
-		driver->adcVolume |= RT5640_ADC_MUTE_BITS;
 	if (driver->microphoneActive)
-		rt5640_write(driver, RT5640_ADC_VOLUME, driver->adcVolume);
+		rt5640_write(driver, RT5640_ADC_VOLUME, record_volume(driver));
 }
 
 
@@ -1356,7 +1362,8 @@ static uint8
 gain_to_steps(float gain, float zero, uint8 max)
 {
 	float steps = zero + gain / VOLUME_STEP + 0.5f;
-	if (steps < 0)
+	// the value comes from user space: NaN fails this test as well
+	if (!(steps >= 0))
 		return 0;
 	if (steps > max)
 		return max;
@@ -1748,7 +1755,6 @@ intel_lpe_init_driver(device_node* node, void** _driverCookie)
 	driver->bufferReadySem = driver->positionSem = -1;
 	driver->dacVolume[0] = driver->dacVolume[1] = DAC_VOLUME_MAX;
 	driver->adcLevel[0] = driver->adcLevel[1] = ADC_LEVEL_DEFAULT;
-	driver->adcVolume = RT5640_ADC_ON;
 	mutex_init(&driver->lock, "intel_lpe");
 	mutex_init(&driver->dspLock, "intel_lpe dsp");
 	mutex_init(&driver->outputLock, "intel_lpe output");

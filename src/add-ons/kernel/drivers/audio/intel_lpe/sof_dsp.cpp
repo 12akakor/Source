@@ -270,20 +270,14 @@ static int32 lpe_dsp_interrupt(void* data);
 void
 lpe_dsp_uninit(lpe_dsp* dsp)
 {
-	if (dsp->interruptsEnabled && dsp->area >= 0) {
-		shim_update64(dsp, SHIM_IMRX, 0x3, 0x3);
-		remove_io_interrupt_handler(dsp->irq, lpe_dsp_interrupt, dsp);
-		dsp->interruptsEnabled = false;
-	}
-	if (dsp->replySem >= 0) {
-		delete_sem(dsp->replySem);
-		dsp->replySem = -1;
-	}
-
 	if (dsp->area >= 0) {
 		// put the DSP back into reset, with its interrupts masked
 		shim_update64(dsp, SHIM_IMRX, 0x3, 0x3);
 		shim_update64(dsp, SHIM_IMRD, 0x3, 0x3);
+		if (dsp->interruptsEnabled) {
+			remove_io_interrupt_handler(dsp->irq, lpe_dsp_interrupt, dsp);
+			dsp->interruptsEnabled = false;
+		}
 		shim_update64(dsp, SHIM_CSR,
 			SHIM_BYT_CSR_RST | SHIM_BYT_CSR_VECTOR_SEL,
 			SHIM_BYT_CSR_RST | SHIM_BYT_CSR_VECTOR_SEL);
@@ -293,6 +287,10 @@ lpe_dsp_uninit(lpe_dsp* dsp)
 	if (dsp->pciArea >= 0) {
 		delete_area(dsp->pciArea);
 		dsp->pciArea = -1;
+	}
+	if (dsp->replySem >= 0) {
+		delete_sem(dsp->replySem);
+		dsp->replySem = -1;
 	}
 }
 
