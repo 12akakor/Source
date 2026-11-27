@@ -32,6 +32,73 @@ handleMute(BParameter *muteParameter, int mute = 2, bool toggle = false) {
 }
 
 
+// Sets the mutes of the recording channels: the groups that also hold the
+// input source selector (B_INPUT_MUX) of a converter. A mute of -1 (toggle)
+// is decided by the first channel. Returns the number of channels set.
+static int32
+setInputMutes(BParameterGroup *group, int &mute)
+{
+	BParameter *muteParameter = NULL;
+	bool recording = false;
+	for (int32 i = 0; i < group->CountParameters(); i++) {
+		BParameter *parameter = group->ParameterAt(i);
+		if (!strcmp(parameter->Kind(), B_MUTE))
+			muteParameter = parameter;
+		else if (!strcmp(parameter->Kind(), B_INPUT_MUX))
+			recording = true;
+	}
+	int32 count = 0;
+	if (recording && muteParameter != NULL) {
+		if (mute < 0)
+			mute = 1 - handleMute(muteParameter);
+		handleMute(muteParameter, mute);
+		count++;
+	}
+
+	for (int32 i = 0; i < group->CountGroups(); i++)
+		count += setInputMutes(group->GroupAt(i), mute);
+	return count;
+}
+
+
+// Mutes (1), unmutes (0) or toggles (-1) the microphone: every recording
+// channel of the default audio input.
+static int
+handleMicrophone(BMediaRoster *roster, int mute)
+{
+	media_node input;
+	status_t status = roster->GetAudioInput(&input);
+	if (status != B_OK) {
+		fprintf(stderr, "%s: cannot get audio input: %s\n", sProgramName,
+			strerror(status));
+		return 1;
+	}
+
+	BParameterWeb *web;
+	status = roster->GetParameterWebFor(input, &web);
+	roster->ReleaseNode(input);
+	if (status != B_OK) {
+		fprintf(stderr, "%s: cannot get parameter web for audio input: %s\n",
+			sProgramName, strerror(status));
+		return 1;
+	}
+
+	int32 count = 0;
+	for (int32 i = 0; i < web->CountGroups(); i++)
+		count += setInputMutes(web->GroupAt(i), mute);
+	if (count == 0) {
+		fprintf(stderr, "%s: the audio input has no mute control\n",
+			sProgramName);
+		delete web;
+		return 1;
+	}
+
+	printf("Microphone %s\n", mute ? "muted" : "unmuted");
+	delete web;
+	return 0;
+}
+
+
 int
 main(int argc, char **argv)
 {
@@ -41,6 +108,17 @@ main(int argc, char **argv)
 	if (roster == NULL) {
 		fprintf(stderr, "%s: media roster not available\n", sProgramName);
 		return 1;
+	}
+
+	if (argc > 1) {
+		if (strcmp(argv[1], "-M") == 0 || strcmp(argv[1], "--mic-mute") == 0)
+			return handleMicrophone(roster, 1);
+		if (strcmp(argv[1], "-U") == 0 || strcmp(argv[1], "--mic-unmute") == 0)
+			return handleMicrophone(roster, 0);
+		if (strcmp(argv[1], "-T") == 0
+			|| strcmp(argv[1], "--mic-togglemute") == 0) {
+			return handleMicrophone(roster, -1);
+		}
 	}
 
 	media_node mixer;
@@ -132,7 +210,10 @@ main(int argc, char **argv)
 						"  -t  --togglemute\ttoggles muting\n"
 						"  -i  --increase x\tincreases volume by x dB\n"
 						"  -d  --decrease x\tdecreases volume by x dB\n"
-						"\t\t\tx defaults to 3 if not supplied\n" ,
+						"\t\t\tx defaults to 3 if not supplied\n"
+						"  -M  --mic-mute\tmutes the microphone\n"
+						"  -U  --mic-unmute\n"
+						"  -T  --mic-togglemute\ttoggles muting the microphone\n",
 						sProgramName);
 					exit(1);
 				}
