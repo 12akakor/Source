@@ -71,10 +71,11 @@ acpi_ac_update_status(acpi_ac_device_info* device)
 static void
 acpi_ac_notify_handler(acpi_handle _device, uint32 value, void *context)
 {
-	if (value != ACPI_NOTIFY_STATUS_CHANGED) {
-		dprintf("acpi_ac: unknown notification (%d)\n", value);
-		return;
-	}
+	// Some firmware does not use the standard value for a status change
+	// (Sony VAIO notifies 0x81, for instance), so re-read the status on any
+	// notification, as Linux does.
+	if (value != ACPI_NOTIFY_STATUS_CHANGED)
+		TRACE("notification 0x%" B_PRIx32 ", re-reading status\n", value);
 
 	acpi_ac_device_info* device = (acpi_ac_device_info*) context;
 	acpi_ac_update_status(device);
@@ -256,15 +257,19 @@ acpi_ac_init_driver(device_node *node, void **_driverCookie)
 		(void **)&device->acpi_cookie);
 	sDeviceManager->put_node(parent);
 
+	device->last_status = 0;
+	device->select_pool = NULL;
+
+	// Read the current state; until now it was only read on a notify, so
+	// booting on AC reported "offline" until the adapter was replugged.
+	acpi_ac_update_status(device);
+	device->updated = false;
+
 	status = device->acpi->install_notify_handler(device->acpi_cookie,
 		ACPI_DEVICE_NOTIFY, acpi_ac_notify_handler, device);
 	if (status != B_OK) {
 		ERROR("can't install notify handler\n");
 	}
-
-	device->last_status = 0;
-	device->updated = false;
-	device->select_pool = NULL;
 
 	*_driverCookie = device;
 	return B_OK;
