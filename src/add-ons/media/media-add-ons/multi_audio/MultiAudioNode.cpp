@@ -1823,8 +1823,13 @@ MultiAudioNode::SetParameterValue(int32 id, bigtime_t performanceTime,
 		status_t status = fDevice->SetMix(&info);
 		if (status != B_OK)
 			fprintf(stderr, "Failed on DRIVER_SET_MIX\n");
-		else
+		else {
 			_RememberValue(id, value, expectedSize);
+			// let open views, such as the Media preferences, show the change
+			// made by another program (setvolume)
+			BroadcastNewParameterValue(performanceTime, id,
+				const_cast<void*>(value), size);
+		}
 	}
 }
 
