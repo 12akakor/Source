@@ -25,7 +25,7 @@ on:
         default: renkuos
         required: false
   push:
-    branches: [tablet-sdio]
+    branches: [tablet-sdio, x270]
 
 permissions:
   contents: read
