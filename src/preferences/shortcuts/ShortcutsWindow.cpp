@@ -42,6 +42,7 @@
 #include <SupportDefs.h>
 #include <usb/USB_hid.h>
 #include <usb/USB_hid_page_consumer.h>
+#include <usb/USB_hid_page_telephony.h>
 
 #include "EditWindow.h"
 #include "KeyInfos.h"
@@ -221,6 +222,9 @@ ShortcutsWindow::ShortcutsWindow()
 		_AddNewSpec("/bin/setvolume -t", (B_HID_USAGE_PAGE_CONSUMER << 16) | B_HID_UID_CON_MUTE);
 		_AddNewSpec("/bin/setvolume -i", (B_HID_USAGE_PAGE_CONSUMER << 16) | B_HID_UID_CON_VOLUME_INCREMENT);
 		_AddNewSpec("/bin/setvolume -d", (B_HID_USAGE_PAGE_CONSUMER << 16) | B_HID_UID_CON_VOLUME_DECREMENT);
+		_AddNewSpec("/bin/setvolume -T", (B_HID_USAGE_PAGE_TELEPHONY << 16) | B_HID_UID_TEL_PHONE_MUTE);
+		_AddNewSpec("/bin/screenmode -b +0.1", (B_HID_USAGE_PAGE_CONSUMER << 16) | B_HID_UID_CON_DISPLAY_BRIGHTNESS_INCREMENT);
+		_AddNewSpec("/bin/screenmode -b -0.1", (B_HID_USAGE_PAGE_CONSUMER << 16) | B_HID_UID_CON_DISPLAY_BRIGHTNESS_DECREMENT);
 		fLastSaved = BEntry(&keySetRef);
 		PostMessage(SAVE_KEYSET);
 	}
