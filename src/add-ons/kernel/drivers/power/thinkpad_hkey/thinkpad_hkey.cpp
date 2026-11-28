@@ -67,6 +67,21 @@
 
 
 static device_manager_info* sDeviceManager;
+static acpi_module_info* sACPI;
+	// test only: logs every ACPI notification
+
+
+static void
+diag_global_notify(acpi_handle handle, uint32 value, void* context)
+{
+	char path[128];
+	acpi_data buffer;
+	buffer.pointer = path;
+	buffer.length = sizeof(path);
+	if (sACPI->ns_handle_to_pathname(handle, &buffer) != B_OK)
+		strlcpy(path, "?", sizeof(path));
+	dprintf("diag: acpi notify %s %#" B_PRIx32 "\n", path, value);
+}
 
 static const char* const kHids[] = { "LEN0268", "LEN0068", "IBM0068" };
 
@@ -221,6 +236,7 @@ hkey_handle_event(thinkpad_hkey_device* device, uint32 event)
 		if (kHotkeyMap[i].event == event) {
 			// the firmware reports a key once; send a press and a release
 			bigtime_t when = system_time();
+			dprintf("diag: hkey key %#" B_PRIx32 "\n", kHotkeyMap[i].key);
 			hkey_queue_key(device, kHotkeyMap[i].key, true, when);
 			hkey_queue_key(device, kHotkeyMap[i].key, false, when);
 			return;
@@ -250,6 +266,7 @@ hkey_notify_handler(acpi_handle _device, uint32 value, void* context)
 		uint32 event;
 		if (hkey_call(device, "MHKP", 0, 0, 0, &event) != B_OK || event == 0)
 			break;
+		dprintf("diag: hkey event %#" B_PRIx32 "\n", event);
 		hkey_handle_event(device, event);
 	}
 }
@@ -462,6 +479,13 @@ thinkpad_hkey_init_driver(device_node* node, void** _driverCookie)
 		device->notify_installed = true;
 
 	hkey_enable(device);
+
+	if (get_module(B_ACPI_MODULE_NAME, (module_info**)&sACPI) == B_OK) {
+		status_t diag = sACPI->install_notify_handler(
+			(acpi_handle)~(addr_t)0, ACPI_ALL_NOTIFY, diag_global_notify,
+			NULL);
+		dprintf("diag: global notify handler: %s\n", strerror(diag));
+	}
 
 	*_driverCookie = device;
 	return B_OK;
