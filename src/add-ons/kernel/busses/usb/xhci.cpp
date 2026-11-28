@@ -2090,6 +2090,8 @@ XHCI::AllocateDevice(Hub *parent, int8 hubAddress, uint8 hubPort,
 	ASSERT(endpoint0->td_list.IsEmpty());
 	endpoint0->used = 0;
 	endpoint0->next = 0;
+	endpoint0->halt_errors = 0;
+	device->recovery_timed_out = false;
 	endpoint0->trbs = device->trbs;
 	endpoint0->trb_addr = device->trb_addr;
 
@@ -2348,6 +2350,7 @@ XHCI::_InsertEndpointForPipe(Pipe *pipe)
 		endpoint->lastFailedTrb = 0;
 		endpoint->failureCount = 0;
 		endpoint->validationCount = 0;
+		endpoint->halt_errors = 0;
 
 		endpoint->trbs = device->trbs + id * fRingStride;
 		endpoint->trb_addr = device->trb_addr
@@ -3824,6 +3827,38 @@ XHCI::ResetEndpoint(bool preserve, xhci_endpoint* endpoint)
 	will be (or already was) linked: after the reset it still points into the
 	halted TD, whose TRBs have just been freed.
 */
+bool
+XHCI::_MayRecoverHaltedEndpoint(xhci_endpoint* endpoint)
+{
+	xhci_device* device = endpoint->device;
+	if (device == NULL || device->recovery_timed_out
+		|| _GetEndpointState(endpoint) != ENDPOINT_STATE_HALTED) {
+		return false;
+	}
+
+	const uint32 port = SLOT_1_RH_PORT_GET(
+		_ReadContext(&device->device_ctx->slot.dwslot1));
+	if (port >= 1 && port <= fPortCount
+		&& (ReadOpReg(XHCI_PORTSC(port - 1)) & PS_CCS) == 0) {
+		return false;
+	}
+
+	if (endpoint->halt_errors >= XHCI_MAX_HALT_RECOVERIES) {
+		if (endpoint->halt_errors == XHCI_MAX_HALT_RECOVERIES) {
+			endpoint->halt_errors++;
+			TRACE_ALWAYS("endpoint %" B_PRIu32 " of slot %" B_PRIu8 " failed %d"
+				" transfers in a row, leaving it halted\n",
+				(uint32)endpoint->id + 1, device->slot,
+				XHCI_MAX_HALT_RECOVERIES + 1);
+		}
+		return false;
+	}
+
+	endpoint->halt_errors++;
+	return true;
+}
+
+
 void
 XHCI::_RecoverHaltedEndpoint(xhci_endpoint* endpoint)
 {
@@ -3850,6 +3885,8 @@ XHCI::_RecoverHaltedEndpoint(xhci_endpoint* endpoint)
 		// CancelQueuedTransfers(), which resets the endpoint as well.
 		TRACE_ERROR("could not recover halted endpoint %" B_PRIu32 " on slot %"
 			B_PRIu8 ": %s\n", (uint32)endpoint->id + 1, slot, strerror(status));
+		if (status == B_TIMED_OUT)
+			endpoint->device->recovery_timed_out = true;
 		return;
 	}
 
@@ -4052,18 +4089,25 @@ XHCI::FinishTransfers()
 			// caller that immediately sends its next request finds a working
 			// endpoint. See _RecoverHaltedEndpoint().
 			//
-			// STALL only. Babble and transaction errors halt the endpoint too,
-			// but a transaction error is also what an unplug produces, in a
-			// burst: recovering those would send commands to a slot that is
-			// gone, each failing only after DoCommand()'s ~800 ms of timeouts,
-			// all on this thread. They keep the old path (the next transfer's
-			// timeout resets the endpoint).
-			if (completionCode == COMP_STALL
-					&& transfer->IsochronousData() == NULL) {
-				xhci_endpoint* endpoint = (xhci_endpoint*)
-					transfer->TransferPipe()->ControllerCookie();
-				if (endpoint != NULL)
+			// Babble and transaction errors halt the endpoint too, and
+			// usb_hid and the network drivers queue their next transfer
+			// without a timeout: after one glitch on the bus the device was
+			// silent until it was plugged in again. But an unplug produces
+			// them as well, in a burst, and each command to a slot that is
+			// gone fails only after DoCommand()'s ~800 ms of timeouts, all on
+			// this thread. So they are reset only while that is worth it, see
+			// _MayRecoverHaltedEndpoint().
+			xhci_endpoint* endpoint = (xhci_endpoint*)
+				transfer->TransferPipe()->ControllerCookie();
+			if (endpoint != NULL) {
+				if (completionCode == COMP_SUCCESS
+					|| completionCode == COMP_SHORT_PACKET) {
+					endpoint->halt_errors = 0;
+				} else if (transfer->IsochronousData() == NULL
+					&& (completionCode == COMP_STALL
+						|| _MayRecoverHaltedEndpoint(endpoint))) {
 					_RecoverHaltedEndpoint(endpoint);
+				}
 			}
 
 			size_t actualLength = transfer->FragmentLength();
