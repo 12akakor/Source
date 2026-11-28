@@ -29,6 +29,7 @@ HIDDevice::HIDDevice(usb_device device, const usb_configuration_info *config,
 		fDevice(device),
 		fInterfaceIndex(interfaceIndex),
 		fTransferScheduled(0),
+		fRetryDelay(0),
 		fTransferBufferSize(0),
 		fTransferBuffer(NULL),
 		fParentCookie(-1),
@@ -273,6 +274,12 @@ HIDDevice::MaybeScheduleTransfer(HIDReport*)
 		return B_OK;
 	}
 
+	// After a failed transfer, wait before the next one, longer each time,
+	// as Linux's usbhid does (13 ms doubling up to 100 ms): a device that
+	// glitched on the bus, often behind a hub, gets time to recover.
+	if (fRetryDelay > 0)
+		snooze(fRetryDelay);
+
 	TRACE("scheduling interrupt transfer of %lu bytes\n", fTransferBufferSize);
 	status_t result = gUSBModule->queue_interrupt(fInterruptPipe,
 		fTransferBuffer, fTransferBufferSize, _TransferCallback, this);
@@ -339,6 +346,13 @@ HIDDevice::_TransferCallback(void *cookie, status_t status, void *data,
 			USB_REQUEST_CLEAR_FEATURE, USB_FEATURE_ENDPOINT_HALT,
 			device->fEndpointAddress, 0, NULL, _UnstallCallback, device);
 		return;
+	}
+
+	if (status == B_OK)
+		device->fRetryDelay = 0;
+	else if (status != B_CANCELED) {
+		device->fRetryDelay = device->fRetryDelay == 0
+			? 13000 : min_c(device->fRetryDelay * 2, 100000);
 	}
 
 	atomic_set(&device->fTransferScheduled, 0);
