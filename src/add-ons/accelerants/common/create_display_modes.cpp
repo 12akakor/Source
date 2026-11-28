@@ -82,7 +82,10 @@ static const display_mode kBaseModeList[] = {
 	//{{160000, 1920, 2010, 2060, 2110, 1200, 1202, 1208, 1235, POSITIVE_SYNC}, B_CMAP8, 1920, 1200, 0, 0, MODE_FLAGS}, /* Vesa_Monitor_@60Hz_(1920X1200) */
 	{{193160, 1920, 2048, 2256, 2592, 1200, 1201, 1204, 1242, POSITIVE_SYNC}, B_CMAP8, 1920, 1200, 0, 0, MODE_FLAGS}, /* Vesa_Monitor_@60Hz_(1920X1200) */
 
-	{{181250, 2560, 2608, 2640, 2720, 1080, 1083, 1093, 1111, B_POSITIVE_HSYNC}, B_CMAP8, 2560, 1080, 0, 0, MODE_FLAGS}, /* CVT reduced blanking 60Hz (2560X1080), 21:9 */
+	{{218750, 2560, 2608, 2640, 2720, 1080, 1083, 1093, 1117, B_POSITIVE_HSYNC}, B_CMAP8, 2560, 1080, 0, 0, MODE_FLAGS}, /* CVT reduced blanking 72Hz (2560X1080), 21:9 */
+	{{210750, 1920, 1968, 2000, 2080, 1080, 1083, 1088, 1127, B_POSITIVE_HSYNC}, B_CMAP8, 1920, 1080, 0, 0, MODE_FLAGS}, /* CVT reduced blanking 90Hz (1920X1080) */
+	{{220750, 1920, 1968, 2000, 2080, 1200, 1203, 1209, 1249, B_POSITIVE_HSYNC}, B_CMAP8, 1920, 1200, 0, 0, MODE_FLAGS}, /* CVT reduced blanking 85Hz (1920X1200) */
+	{{225000, 2048, 2096, 2128, 2208, 1152, 1155, 1160, 1199, B_POSITIVE_HSYNC}, B_CMAP8, 2048, 1152, 0, 0, MODE_FLAGS}, /* CVT reduced blanking 85Hz (2048X1152) */
 	{{221000, 2560, 2608, 2640, 2720, 1440, 1443, 1448, 1478, B_POSITIVE_HSYNC}, B_CMAP8, 2560, 1440, 0, 0, MODE_FLAGS}, /* CVT reduced blanking 55Hz (2560X1440) */
 	{{205750, 2880, 2928, 2960, 3040, 1200, 1203, 1213, 1232, B_POSITIVE_HSYNC}, B_CMAP8, 2880, 1200, 0, 0, MODE_FLAGS}, /* CVT reduced blanking 55Hz (2880X1200), 21:9 */
 	{{222750, 3000, 3048, 3080, 3160, 1250, 1253, 1263, 1283, B_POSITIVE_HSYNC}, B_CMAP8, 3000, 1250, 0, 0, MODE_FLAGS}, /* CVT reduced blanking 55Hz (3000X1250), 21:9 */
@@ -115,7 +118,7 @@ private:
 			void				_RemoveModeAt(uint32 index);
 			void				_AddBaseMode(uint16 width, uint16 height,
 									uint32 refresh);
-			display_mode*		_FindMode(uint16 width, uint16 height) const;
+			display_mode*		_FindMode(const display_mode& mode) const;
 
 private:
 			display_mode*		fModes;
@@ -298,9 +301,10 @@ ModeList::AddModes(edid1_info* info)
 	for (uint32 i = 0; i < kNumBaseModes; i++) {
 		const display_mode& mode = kBaseModeList[i];
 
-		// Check if a mode with this resolution already exists
+		// Check if a mode with this resolution and refresh rate already
+		// exists
 
-		if (_FindMode(mode.timing.h_display, mode.timing.v_display) != NULL)
+		if (_FindMode(mode) != NULL)
 			continue;
 
 		// Check monitor limits
@@ -428,12 +432,15 @@ ModeList::_AddBaseMode(uint16 width, uint16 height, uint32 refresh)
 
 
 display_mode*
-ModeList::_FindMode(uint16 width, uint16 height) const
+ModeList::_FindMode(const display_mode& other) const
 {
+	const double refresh = get_refresh_rate(other);
 	for (uint32 i = 0; i < fCount; i++) {
 		const display_mode& mode = fModes[i];
 
-		if (mode.timing.h_display == width && mode.timing.v_display == height)
+		if (mode.timing.h_display == other.timing.h_display
+			&& mode.timing.v_display == other.timing.v_display
+			&& fabs(get_refresh_rate(mode) - refresh) < refresh * 0.012)
 			return &fModes[i];
 	}
 
