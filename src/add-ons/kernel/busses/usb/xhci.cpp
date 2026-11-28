@@ -2091,6 +2091,7 @@ XHCI::AllocateDevice(Hub *parent, int8 hubAddress, uint8 hubPort,
 	endpoint0->used = 0;
 	endpoint0->next = 0;
 	endpoint0->halt_errors = 0;
+	endpoint0->last_halt_recovery = 0;
 	device->recovery_timed_out = false;
 	endpoint0->trbs = device->trbs;
 	endpoint0->trb_addr = device->trb_addr;
@@ -2351,6 +2352,7 @@ XHCI::_InsertEndpointForPipe(Pipe *pipe)
 		endpoint->failureCount = 0;
 		endpoint->validationCount = 0;
 		endpoint->halt_errors = 0;
+		endpoint->last_halt_recovery = 0;
 
 		endpoint->trbs = device->trbs + id * fRingStride;
 		endpoint->trb_addr = device->trb_addr
@@ -3843,18 +3845,21 @@ XHCI::_MayRecoverHaltedEndpoint(xhci_endpoint* endpoint)
 		return false;
 	}
 
-	if (endpoint->halt_errors >= XHCI_MAX_HALT_RECOVERIES) {
-		if (endpoint->halt_errors == XHCI_MAX_HALT_RECOVERIES) {
-			endpoint->halt_errors++;
-			TRACE_ALWAYS("endpoint %" B_PRIu32 " of slot %" B_PRIu8 " failed %d"
-				" transfers in a row, leaving it halted\n",
-				(uint32)endpoint->id + 1, device->slot,
-				XHCI_MAX_HALT_RECOVERIES + 1);
-		}
+	// A driver that waits before its next transfer, as usb_hid does after
+	// an error, keeps its endpoint through a longer outage; one that sends
+	// the next at once does not get this thread to spin.
+	const bigtime_t now = system_time();
+	if (endpoint->halt_errors >= XHCI_MAX_HALT_RECOVERIES
+		&& now - endpoint->last_halt_recovery < XHCI_HALT_RECOVERY_INTERVAL) {
+		TRACE_ALWAYS("endpoint %" B_PRIu32 " of slot %" B_PRIu8 " failed %d"
+			" transfers in a row, leaving it halted\n",
+			(uint32)endpoint->id + 1, device->slot, endpoint->halt_errors + 1);
 		return false;
 	}
 
-	endpoint->halt_errors++;
+	if (endpoint->halt_errors < 255)
+		endpoint->halt_errors++;
+	endpoint->last_halt_recovery = now;
 	return true;
 }
 

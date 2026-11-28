@@ -42,8 +42,10 @@ class XHCIRootHub;
 #define XHCI_MAX_RECOVERY_REQUESTS	32
 
 // How many transfers in a row may halt an endpoint with an error other than
-// a stall and still have it reset, see _MayRecoverHaltedEndpoint().
+// a stall and have it reset at once; after that, only when the last reset
+// is XHCI_HALT_RECOVERY_INTERVAL ago. See _MayRecoverHaltedEndpoint().
 #define XHCI_MAX_HALT_RECOVERIES	3
+#define XHCI_HALT_RECOVERY_INTERVAL	50000
 
 
 struct xhci_td : public DoublyLinkedListLinkImpl<xhci_td> {
@@ -91,9 +93,10 @@ struct xhci_endpoint {
 	uint32			failureCount;
 	uint32			validationCount;
 
-	// Transfers in a row that halted on a transaction error or babble;
-	// finisher thread only.
+	// Transfers in a row that halted on a transaction error or babble, and
+	// when the last of them was reset; finisher thread only.
 	uint8			halt_errors;
+	bigtime_t		last_halt_recovery;
 };
 
 

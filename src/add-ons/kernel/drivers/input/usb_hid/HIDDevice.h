@@ -60,6 +60,7 @@ private:
 			uint8				fEndpointAddress;
 
 			int32				fTransferScheduled;
+			bigtime_t			fRetryDelay;
 			size_t				fTransferBufferSize;
 			uint8 *				fTransferBuffer;
 
