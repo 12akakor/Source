@@ -16,6 +16,8 @@
 
 #include "accelerant.h"
 
+#include <KernelExport.h>
+
 
 #undef TRACE
 #define TRACE_VLV_PLL
@@ -283,7 +285,7 @@ vlv_set_hdmi_clock(pipe_index pipeIndex, port_index portIndex,
 			spin(100);
 	}
 	if (!locked)
-		ERROR("%s: DPLL %c failed to lock\n", __func__, 'A' + pipe);
+		ERROR("%s: DPLL %c failed to lock\n", __func__, (char)('A' + pipe));
 	write32(INTEL_DISPLAY_A_PLL_MD + pipe * 4, 0);
 
 	dpio_write(DPIO_PCS(channel, 8), DPIO_PCS_USEDCLKCHANNEL_OVERRIDE
