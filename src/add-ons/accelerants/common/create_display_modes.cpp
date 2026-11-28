@@ -83,6 +83,9 @@ static const display_mode kBaseModeList[] = {
 	{{193160, 1920, 2048, 2256, 2592, 1200, 1201, 1204, 1242, POSITIVE_SYNC}, B_CMAP8, 1920, 1200, 0, 0, MODE_FLAGS}, /* Vesa_Monitor_@60Hz_(1920X1200) */
 
 	{{181250, 2560, 2608, 2640, 2720, 1080, 1083, 1093, 1111, B_POSITIVE_HSYNC}, B_CMAP8, 2560, 1080, 0, 0, MODE_FLAGS}, /* CVT reduced blanking 60Hz (2560X1080), 21:9 */
+	{{221000, 2560, 2608, 2640, 2720, 1440, 1443, 1448, 1478, B_POSITIVE_HSYNC}, B_CMAP8, 2560, 1440, 0, 0, MODE_FLAGS}, /* CVT reduced blanking 55Hz (2560X1440) */
+	{{205750, 2880, 2928, 2960, 3040, 1200, 1203, 1213, 1232, B_POSITIVE_HSYNC}, B_CMAP8, 2880, 1200, 0, 0, MODE_FLAGS}, /* CVT reduced blanking 55Hz (2880X1200), 21:9 */
+	{{222750, 3000, 3048, 3080, 3160, 1250, 1253, 1263, 1283, B_POSITIVE_HSYNC}, B_CMAP8, 3000, 1250, 0, 0, MODE_FLAGS}, /* CVT reduced blanking 55Hz (3000X1250), 21:9 */
 };
 static const uint32 kNumBaseModes = sizeof(kBaseModeList) / sizeof(display_mode);
 
