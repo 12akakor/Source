@@ -48,5 +48,10 @@ if $(HAIKU_BUILD_TYPE) = regular {
 		: realtek_rtw88_wifi_firmwares.hpkg : nameFromMetaInfo ;
 }
 
+# test: InterTouch on, so the ThinkPad X270 touchpad runs over SMBus
+SEARCH on <x270-settings>rmi4_smbus = [ FDirName $(HAIKU_TOP) .github x270 ] ;
+AddFilesToHaikuImage home config settings kernel drivers
+	: <x270-settings>rmi4_smbus : rmi4_smbus ;
+
 # import what is shared by all images
 include [ FDirName $(HAIKU_BUILD_RULES_DIR) images definitions common-tail ] ;
