@@ -41,6 +41,12 @@ class XHCIRootHub;
 // Maximum number of deferred endpoint recovery requests queued at once.
 #define XHCI_MAX_RECOVERY_REQUESTS	32
 
+// How many transfers in a row may halt an endpoint with an error other than
+// a stall and have it reset at once; after that, only when the last reset
+// is XHCI_HALT_RECOVERY_INTERVAL ago. See _MayRecoverHaltedEndpoint().
+#define XHCI_MAX_HALT_RECOVERIES	3
+#define XHCI_HALT_RECOVERY_INTERVAL	50000
+
 
 struct xhci_td : public DoublyLinkedListLinkImpl<xhci_td> {
 	xhci_trb*	trbs;
@@ -86,6 +92,11 @@ struct xhci_endpoint {
 	phys_addr_t		lastFailedTrb;
 	uint32			failureCount;
 	uint32			validationCount;
+
+	// Transfers in a row that halted on a transaction error or babble, and
+	// when the last of them was reset; finisher thread only.
+	uint8			halt_errors;
+	bigtime_t		last_halt_recovery;
 };
 
 
@@ -103,6 +114,9 @@ struct xhci_device {
 	area_id device_ctx_area;
 	phys_addr_t device_ctx_addr;
 	struct xhci_device_ctx *device_ctx;
+
+	// A recovery command for this device timed out; finisher thread only.
+	bool recovery_timed_out;
 
 	xhci_endpoint endpoints[XHCI_MAX_ENDPOINTS - 1];
 };
@@ -164,6 +178,8 @@ private:
 									usb_speed speed, uint8 maxBurst,
 									uint16 bytesPerInterval);
 			uint8				_GetEndpointState(xhci_endpoint* ep);
+			bool				_MayRecoverHaltedEndpoint(
+									xhci_endpoint* endpoint);
 			void				_RecoverHaltedEndpoint(xhci_endpoint* ep);
 
 			status_t			_InsertEndpointForPipe(Pipe *pipe);
